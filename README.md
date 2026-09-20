@@ -18,6 +18,21 @@ make test
 
 `make dev-down` 으로 로컬 의존성을 정리합니다. `make ci` 는 CI와 동일한 fmt/vet/lint/test 체크를 로컬에서 실행합니다.
 
+운영 콘솔(Vue, `web/apps/console`)까지 넣은 참조 바이너리를 실행하려면:
+
+```sh
+make web-install     # 최초 1회
+make console-sync    # web/apps/console/dist 를 빌드해 cmd/sendplane/console/dist 로 복사(ADR-0010)
+go build -o sendplane ./cmd/sendplane
+cp cmd/sendplane/config.example.yaml config.yaml   # 필요한 값 채우기
+./sendplane --config=config.yaml --roles=control,sender,bounce
+```
+
+`http://localhost:8080/console/` 에서 콘솔을 엽니다. `console-sync` 없이 빌드해도
+`go build`는 되지만(커밋된 플레이스홀더 덕분) 콘솔은 "not built" 페이지만 보입니다.
+자세한 내용은 [cmd/sendplane/README.md](cmd/sendplane/README.md#운영-콘솔-cmdsendplaneconsole)를
+참고하세요.
+
 ## 상태: 개발 초기
 
 아직 공개 API가 안정화되지 않았습니다. 구현 순서는 [docs/roadmap.md](docs/roadmap.md)의 Phase 0부터 진행됩니다.

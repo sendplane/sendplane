@@ -1,0 +1,19 @@
+<!doctype html>
+<!--
+  Placeholder for web/apps/console/dist/index.html.
+
+  This file exists so `go build ./cmd/sendplane` succeeds in a fresh clone
+  without Node/pnpm installed: the //go:embed directive in console.go
+  requires at least one file under dist/. It is replaced on disk (but not in
+  git; see .gitignore) by `make console-sync`, which builds the real Vue
+  console and copies its output here.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>sendplane console not built</title>
+  </head>
+  <body>
+    console not built; run make web-build console-sync
+  </body>
+</html>

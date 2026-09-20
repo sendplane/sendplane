@@ -48,6 +48,41 @@ HTTP 서버는 어떤 역할 조합이든 항상 기동되고 `/healthz`를 응�
   `nameservers`는 DNS 진단 계층이 직접 질의할 리졸버입니다
 - `limits`: `host.Limits`에 매핑, 0인 필드는 기본값으로 채워집니다
 
+## 운영 콘솔 (cmd/sendplane/console)
+
+`control`이 `--roles`에 있으면 `config.yaml`의 `console.path`(기본 `/console`, "/"가
+아닌 이유는 아래 참고)에 Vue 운영 콘솔(`web/apps/console`)이 함께 마운트됩니다.
+`console.enabled: false`로 끌 수 있습니다.
+
+콘솔은 [`cmd/sendplane/console`](console) 패키지가 `//go:embed dist/*`로 통째로
+바이너리에 넣습니다(ADR-0010). `cmd/sendplane/console/dist/`는 `index.html`
+플레이스홀더 한 장만 커밋되어 있고("console not built; run make web-build
+console-sync") 나머지는 `.gitignore` 대상이라, Node 없이도 클론 직후
+`go build ./cmd/sendplane`가 됩니다. 진짜 콘솔을 넣으려면:
+
+```sh
+make web-install    # 최초 1회, web/ 에 pnpm install
+make console-sync   # VITE_BASE=/console/ 로 web/apps/console/dist 를 빌드해
+                     # cmd/sendplane/console/dist/ 로 복사
+go build -o sendplane ./cmd/sendplane
+./sendplane --config=config.yaml --roles=control,sender,bounce
+# http://localhost:8080/console/
+```
+
+`console.path`를 바꾸면 `VITE_BASE`도 그 경로(끝에 `/`)로 맞춰 `console-sync`를
+다시 돌려야 합니다 — 콘솔 자산의 URL이 빌드 시점에 base path로 고정되기 때문입니다.
+
+경로가 `/`가 아니라 `/console`인 이유는 `sp.Handler()`가 이미 `/api/v1`(REST
+API)과 `/t/`(트래킹)를 `/` 아래에 소유하고 있어서입니다. `/console`은 `net/http`의
+`ServeMux`가 `/`보다 더 구체적인 패턴으로 우선 매칭해 주는, 겹치지 않는 자기
+자리입니다. `cmd/sendplane/console.Handler`는 알 수 없는 하위 경로(클라이언트 사이드
+라우팅)를 전부 `index.html`로 폴백하고, 해시가 붙은 `assets/*`는 영구 캐시,
+`index.html` 자신은 `no-store`로 응답합니다.
+
+콘솔의 API 주소는 기본적으로 same-origin(`/api/v1`)입니다 — 별도 설정 없이 같은
+`sendplane` 프로세스에 붙습니다. 자세한 프론트엔드 구성은
+[`web/README.md`](../web/README.md)를 참고하세요.
+
 ## cmd/chaos-smtp
 
 `internal/chaossmtp`(결정적으로 실패하는 테스트용 SMTP 서버)를 감싼 얇은 바이너리입니다.

@@ -122,3 +122,18 @@ jobs:
 
       - name: build
         run: pnpm build
+
+      # Proves the embed actually compiles: copies the just-built console
+      # into cmd/sendplane/console/dist (what `make console-sync` does) and
+      # builds the Go binary that embeds it (ADR-0010).
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: console embed build
+        working-directory: .
+        run: |
+          rm -rf cmd/sendplane/console/dist
+          mkdir -p cmd/sendplane/console/dist
+          cp -R web/apps/console/dist/. cmd/sendplane/console/dist/
+          go build ./cmd/sendplane

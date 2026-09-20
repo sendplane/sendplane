@@ -1,6 +1,6 @@
 COMPOSE ?= docker compose
 .PHONY: build gen gen-check test test-store lint vet fmt-check dev-up dev-down ci docker load-test \
-	web-install web-gen web-lint web-test web-build web-ci
+	web-install web-gen web-lint web-test web-build web-ci console-sync
 
 build:
 	go build ./...
@@ -72,6 +72,17 @@ web-build:
 	cd web && $(PNPM) build
 
 web-ci: web-install web-gen web-lint web-test web-build
+
+# Builds the console with the base path cmd/sendplane mounts it at by default
+# (console.path in config.yaml, "/console" — see cmd/sendplane/README.md) and
+# copies the result into cmd/sendplane/console/dist, which its //go:embed
+# picks up (ADR-0010). Needs `make web-install` first; go build/test work
+# without ever running this (see the committed dist/index.html placeholder).
+console-sync:
+	cd web && VITE_BASE=/console/ $(PNPM) build
+	rm -rf cmd/sendplane/console/dist
+	mkdir -p cmd/sendplane/console/dist
+	cp -R web/apps/console/dist/. cmd/sendplane/console/dist/
 
 # 1M-recipient load test (docs/architecture.md 15.1). N overrides the recipient
 # count, which defaults to 100k so that a local run finishes in minutes; the

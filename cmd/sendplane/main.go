@@ -24,6 +24,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/cmd/sendplane/console"
 	"github.com/sendplane/sendplane/store"
 	"github.com/sendplane/sendplane/store/mongo"
 	"github.com/sendplane/sendplane/store/postgres"
@@ -251,14 +252,16 @@ func openStore(ctx context.Context, cfg StoreConfig) (store.Provider, error) {
 	}
 }
 
-// serve runs the HTTP server and the selected roles until ctx is cancelled,
-// then drains for up to drainTimeout.
+// buildMux assembles the HTTP server's top-level routing.
 //
-// The HTTP server always starts (not only when roles.control is set): it is
-// how every role, including a sender-only or bounce-only pod, answers
-// Kubernetes' /healthz probe. sendplane's API handler is mounted at "/" only
-// when the control role is present; other roles serve /healthz alone.
-func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *sendplane.Sendplane, logger *slog.Logger) error {
+// sendplane's API handler is mounted at "/" only when the control role is
+// present; other roles serve /healthz alone. The embedded console
+// (cmd/sendplane/console) is mounted under cfg.Console.Path — "/console" by
+// default, never "/" — alongside it, also only for the control role: a
+// sender- or bounce-only pod has no API for the console to call. Because the
+// console's own path is more specific than sp.Handler()'s "/" mount,
+// net/http's ServeMux routes it there without the two colliding.
+func buildMux(cfg *Config, roles roleSet, sp *sendplane.Sendplane) *http.ServeMux {
 	mux := http.NewServeMux()
 	if roles.control {
 		// sendplane's own router already serves GET /healthz, and it answers
@@ -266,6 +269,18 @@ func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *
 		// one here as well would shadow it: net/http's mux prefers the more
 		// specific pattern, so "/healthz" would win over "/".
 		mux.Handle("/", sp.Handler())
+
+		if cfg.Console.Enabled != nil && *cfg.Console.Enabled {
+			base := cfg.Console.Path
+			if base == "" {
+				base = "/console"
+			}
+			pattern := base
+			if pattern != "/" {
+				pattern += "/"
+			}
+			mux.Handle(pattern, console.Handler(base))
+		}
 	} else {
 		// A sender- or bounce-only pod serves no API, but Kubernetes still
 		// probes it.
@@ -274,6 +289,17 @@ func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *
 			_, _ = w.Write([]byte("ok"))
 		})
 	}
+	return mux
+}
+
+// serve runs the HTTP server and the selected roles until ctx is cancelled,
+// then drains for up to drainTimeout.
+//
+// The HTTP server always starts (not only when roles.control is set): it is
+// how every role, including a sender-only or bounce-only pod, answers
+// Kubernetes' /healthz probe.
+func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *sendplane.Sendplane, logger *slog.Logger) error {
+	mux := buildMux(cfg, roles, sp)
 	httpServer := &http.Server{
 		Addr:    flags.listen,
 		Handler: mux,

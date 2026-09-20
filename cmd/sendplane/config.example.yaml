@@ -103,3 +103,12 @@ limits:
 log:
   level: info  # debug | info | warn | error
   format: json # json | text
+
+console:
+  # Embedded Vue ops console (cmd/sendplane/console, ADR-0010). Only mounted
+  # when --roles includes control, since the console has nothing to talk to
+  # otherwise. `make console-sync` builds it; see cmd/sendplane/README.md.
+  enabled: true
+  # Not "/": the control role's REST API owns /api/v1 and tracking owns /t/
+  # under sp.Handler()'s "/" mount, so the console needs its own prefix.
+  path: /console

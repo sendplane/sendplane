@@ -54,6 +54,7 @@ type Config struct {
 	Probe   ProbeConfig   `yaml:"probe"`
 	Limits  LimitsConfig  `yaml:"limits"`
 	Log     LogConfig     `yaml:"log"`
+	Console ConsoleConfig `yaml:"console"`
 }
 
 // StoreConfig selects and configures the store.Provider.
@@ -201,6 +202,20 @@ type LogConfig struct {
 	Format string `yaml:"format"` // "json" | "text"
 }
 
+// ConsoleConfig configures the embedded Vue ops console (cmd/sendplane/console,
+// ADR-0010). It is only ever mounted alongside the control role (serve in
+// main.go): a sender- or bounce-only pod has no API for it to talk to.
+//
+// Path defaults to "/console", not "/": the control role's REST API already
+// owns "/api/v1" and tracking owns "/t/" under sp.Handler()'s "/" mount, and
+// mounting the console SPA's catch-all fallback at "/" too would contend
+// with net/http.ServeMux for the same prefix. "/console" keeps the three
+// apart with no special-casing in serve().
+type ConsoleConfig struct {
+	Enabled *bool  `yaml:"enabled"`
+	Path    string `yaml:"path"`
+}
+
 // defaultLanes is used when config.yaml sets no lane at all (every field
 // zero), matching internal/sender's own defaults (architecture 8.1).
 var defaultLanes = LanesConfig{Transactional: 8, Bulk: 32, Probe: 1}
@@ -253,6 +268,13 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Log.Format == "" {
 		c.Log.Format = "json"
+	}
+	if c.Console.Enabled == nil {
+		on := true
+		c.Console.Enabled = &on
+	}
+	if c.Console.Path == "" {
+		c.Console.Path = "/console"
 	}
 }
 
@@ -351,6 +373,20 @@ func (c *Config) Validate(needSecrets bool) error {
 	case "json", "text", "":
 	default:
 		errs = append(errs, fmt.Sprintf("log.format %q is not json or text", c.Log.Format))
+	}
+
+	if p := c.Console.Path; p != "" {
+		if !strings.HasPrefix(p, "/") {
+			errs = append(errs, fmt.Sprintf("console.path %q must start with /", p))
+		}
+		// sp.Handler() already owns "/api/v1" (the REST API) and "/t/"
+		// (tracking) under its "/" mount; a console.path there would shadow
+		// (or be shadowed by) them instead of getting its own prefix.
+		if p == "/" || p == "/t" || strings.HasPrefix(p, "/t/") ||
+			p == "/api" || strings.HasPrefix(p, "/api/") ||
+			p == "/healthz" {
+			errs = append(errs, fmt.Sprintf("console.path %q collides with the API, tracking or healthz routes", p))
+		}
 	}
 
 	if len(errs) > 0 {

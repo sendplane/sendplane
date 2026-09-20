@@ -33,6 +33,12 @@ node_modules/
 web/**/dist/
 .pnpm-store/
 
+# `make console-sync` copies web/apps/console/dist into here for
+# cmd/sendplane's //go:embed (ADR-0010). Only the placeholder index.html
+# that lets `go build ./cmd/sendplane` work without Node is committed.
+cmd/sendplane/console/dist/*
+!cmd/sendplane/console/dist/index.html
+
 # Env files (keep the example)
 .env*
 !.env.example

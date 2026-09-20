@@ -14,9 +14,12 @@ docs/
 *.md
 LICENSE
 
-# Frontend workspace (Vue/Vite/pnpm) is a separate deployable, not linked
-# into the Go binaries.
-web/
+# Frontend workspace (Vue/Vite/pnpm): the web-build stage in
+# deploy/dev/Dockerfile needs the sources to build web/apps/console/dist,
+# which is then copied into cmd/sendplane/console/dist for the Go build
+# stage to embed (ADR-0010). node_modules and every workspace's dist/ are
+# excluded either way: rebuilt fresh in the image, never useful from the
+# host.
 node_modules/
 **/node_modules/
 **/dist/
