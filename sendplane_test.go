@@ -2,8 +2,10 @@ package sendplane_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -159,7 +161,7 @@ func TestRunSenderStopsWithTheContext(t *testing.T) {
 	}
 }
 
-func TestBounceAndHandlerAreNotImplementedYet(t *testing.T) {
+func TestBounceIsNotImplementedYet(t *testing.T) {
 	s, err := sendplane.New(sendplane.Options{Store: memstore.New(), Auth: staticAuth{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -167,7 +169,63 @@ func TestBounceAndHandlerAreNotImplementedYet(t *testing.T) {
 	if err := s.RunBounce(context.Background()); !errors.Is(err, sendplane.ErrNotImplemented) {
 		t.Errorf("RunBounce = %v, want ErrNotImplemented", err)
 	}
+}
+
+// Handler is the mounted router, built once and shared with RunControl. The
+// liveness probe is the cheapest proof that the wiring is real: it is a route
+// of api/openapi.yaml, it is public, and it answers JSON.
+func TestHandlerServesTheAPI(t *testing.T) {
+	s, err := sendplane.New(sendplane.Options{
+		Store: memstore.New(), Auth: staticAuth{p: &sendplane.Principal{ID: "u1", TenantID: "acme"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h := s.Handler()
+	if h == nil {
+		t.Fatal("Handler returned nil")
+	}
+	if s.Handler() != h {
+		t.Fatal("Handler built a second router on the second call")
+	}
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /healthz = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v; body: %s", err, w.Body.String())
+	}
+	if body.Status != "ok" {
+		t.Fatalf("status = %q, want ok", body.Status)
+	}
+
+	// An authenticated route goes through the injected Authenticator.
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/settings", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/settings = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+}
+
+// Handler and RunControl must share one control plane: the public tracking
+// routes record into its buffer, and two instances would mean two buffers,
+// one of which nobody flushes.
+func TestHandlerAndRunControlShareTheControlPlane(t *testing.T) {
+	s, err := sendplane.New(sendplane.Options{Store: memstore.New(), Auth: staticAuth{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 	if s.Handler() == nil {
 		t.Fatal("Handler returned nil")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.RunControl(ctx); err != nil {
+		t.Fatalf("RunControl after Handler: %v", err)
 	}
 }

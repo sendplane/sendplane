@@ -121,6 +121,12 @@ func (b *TrackingBuffer) Stats() TrackingStats {
 	return s
 }
 
+// Start launches the flusher without the leader loops, for a process that
+// serves the public tracking routes but never calls Control.Run: the API
+// handlers record into this buffer, and nothing would ever write it out.
+// Calling it more than once, or after Run already started it, is a no-op.
+func (b *TrackingBuffer) Start(ctx context.Context) { b.start(ctx) }
+
 // start launches the flusher. Calling it more than once is a no-op.
 func (b *TrackingBuffer) start(ctx context.Context) {
 	b.startOnce.Do(func() {

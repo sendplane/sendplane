@@ -18,10 +18,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/sendplane/sendplane/host"
+	"github.com/sendplane/sendplane/internal/api"
 	"github.com/sendplane/sendplane/internal/control"
+	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/internal/sender"
 	"github.com/sendplane/sendplane/store"
 )
@@ -29,6 +32,21 @@ import (
 // Sendplane is the engine instance. It is safe for concurrent use.
 type Sendplane struct {
 	opts Options
+
+	// The control plane is shared between Handler and RunControl: the HTTP
+	// handlers call its campaign transitions and record into its tracking
+	// buffer, and the buffer only reaches the store if somebody flushes it.
+	controlOnce sync.Once
+	control     *control.Control
+	controlErr  error
+
+	handlerOnce sync.Once
+	handler     http.Handler
+
+	// renderer is shared so that template previews reuse the parse cache
+	// across requests.
+	rendererOnce sync.Once
+	renderer     *render.Renderer
 }
 
 // SenderConfig configures one sender process (RunSender). Every field except
@@ -97,11 +115,57 @@ func New(o Options) (*Sendplane, error) {
 // Options returns the effective options, with defaults applied.
 func (s *Sendplane) Options() Options { return s.opts }
 
-// Handler returns the /api/v1 router to mount on the host's mux.
+// Handler returns the router to mount on the host's mux: /api/v1, the public
+// tracking routes under /t and /healthz.
+//
+// It is built once, on the first call, and shares the control plane with
+// RunControl. Building it also starts the tracking buffer's flusher, because
+// a replica may serve the public pixel and redirect routes without ever
+// running the control loops, and an unflushed buffer would drop every open
+// and click it recorded.
 func (s *Sendplane) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, ErrNotImplemented.Error(), http.StatusNotImplemented)
+	s.handlerOnce.Do(func() {
+		c, err := s.controlPlane()
+		if err != nil {
+			// New validated the options, so the only way here is a Store that
+			// went away. Answering 500 is better than a nil handler on a mux.
+			s.opts.Logger.Error("sendplane: cannot build the API handler", "err", err)
+			s.handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "sendplane: handler unavailable", http.StatusInternalServerError)
+			})
+			return
+		}
+		c.Tracking().Start(context.Background())
+		s.handler = api.New(api.Deps{
+			Provider: s.opts.Store,
+			Auth:     s.opts.Auth,
+			Authz:    s.opts.Authz,
+			Tenants:  s.opts.Tenants,
+			Hooks:    s.opts.Hooks,
+			Limits:   s.opts.Limits,
+			Secrets:  s.opts.Secrets,
+			Control:  c,
+			Renderer: s.sharedRenderer(),
+			Logger:   s.opts.Logger,
+			Clock:    s.opts.Clock,
+			Metrics:  s.opts.Metrics,
+		})
 	})
+	return s.handler
+}
+
+// controlPlane returns the process-wide control plane, building it once.
+func (s *Sendplane) controlPlane() (*control.Control, error) {
+	s.controlOnce.Do(func() {
+		s.control, s.controlErr = control.New(
+			s.opts.Store, s.opts.Hooks, s.opts.Logger, s.opts.Clock)
+	})
+	return s.control, s.controlErr
+}
+
+func (s *Sendplane) sharedRenderer() *render.Renderer {
+	s.rendererOnce.Do(func() { s.renderer = render.NewRenderer() })
+	return s.renderer
 }
 
 // RunControl runs the control plane: the leader loops (scheduler, finalizer,
@@ -111,7 +175,7 @@ func (s *Sendplane) Handler() http.Handler {
 // Every replica may call it. Exactly one of them holds the leader lease at a
 // time, so the loops run once cluster-wide (ADR-0002).
 func (s *Sendplane) RunControl(ctx context.Context) error {
-	c, err := control.New(s.opts.Store, s.opts.Hooks, s.opts.Logger, s.opts.Clock)
+	c, err := s.controlPlane()
 	if err != nil {
 		return err
 	}

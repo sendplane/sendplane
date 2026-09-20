@@ -149,7 +149,7 @@ func TestUnsubscribeHeaderMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			settings := &store.TenantSettings{UnsubscribeMode: tc.mode, UnsubscribeOneClick: tc.oneClick}
-			got := s.unsubscribeLinks(settings, "d1", tc.dest, key, tc.hasKey, tc.domain)
+			got := s.unsubscribeLinks(settings, "t1", "d1", tc.dest, key, tc.hasKey, tc.domain)
 
 			checkURL := func(field, want, have string) {
 				switch want {
@@ -169,7 +169,7 @@ func TestUnsubscribeHeaderMatrix(t *testing.T) {
 						t.Errorf("%s token does not verify: %v", field, err)
 						return
 					}
-					if p.Kind != tracking.KindUnsubscribe || p.DeliveryID != "d1" || p.Dest != dest {
+					if p.Kind != tracking.KindUnsubscribe || p.TenantID != "t1" || p.DeliveryID != "d1" || p.Dest != dest {
 						t.Errorf("%s token payload = %+v", field, p)
 					}
 				default:

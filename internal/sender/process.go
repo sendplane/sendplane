@@ -244,7 +244,7 @@ func (s *Sender) renderMessage(
 	}
 	key, hasKey := tracking.SelectKey(settings.Tracking.SigningKeys)
 	domain := settings.Tracking.Domain
-	unsub := s.unsubscribeLinks(settings, d.ID, dest, key, hasKey, domain)
+	unsub := s.unsubscribeLinks(settings, t.id, d.ID, dest, key, hasKey, domain)
 
 	locales := []string{d.Locale}
 	if campaign != nil {
@@ -284,7 +284,7 @@ func (s *Sender) renderMessage(
 		if settings.Tracking.Clicks {
 			html, err = render.RewriteLinks(html, func(linkNo int, href string) string {
 				token := s.signer.Sign(key.KID, key.Secret, tracking.TokenPayload{
-					DeliveryID: d.ID, Kind: tracking.KindClick, LinkNo: linkNo, Dest: href,
+					TenantID: t.id, DeliveryID: d.ID, Kind: tracking.KindClick, LinkNo: linkNo, Dest: href,
 				})
 				if u := tracking.ClickURL(domain, token, href); u != "" {
 					return u
@@ -297,7 +297,7 @@ func (s *Sender) renderMessage(
 		}
 		if settings.Tracking.Opens {
 			token := s.signer.Sign(key.KID, key.Secret, tracking.TokenPayload{
-				DeliveryID: d.ID, Kind: tracking.KindOpen,
+				TenantID: t.id, DeliveryID: d.ID, Kind: tracking.KindOpen,
 			})
 			html = render.InsertPixel(html, tracking.OpenURL(domain, token))
 		}
@@ -316,7 +316,7 @@ func (s *Sender) renderMessage(
 
 // unsubscribeLinks applies the mode of architecture 9.2.
 func (s *Sender) unsubscribeLinks(
-	settings *store.TenantSettings, deliveryID, dest string,
+	settings *store.TenantSettings, tenantID, deliveryID, dest string,
 	key store.SigningKey, hasKey bool, domain string,
 ) unsubscribeLinks {
 	switch settings.UnsubscribeMode {
@@ -326,7 +326,7 @@ func (s *Sender) unsubscribeLinks(
 		}
 		if hasKey && domain != "" {
 			token := s.signer.Sign(key.KID, key.Secret, tracking.TokenPayload{
-				DeliveryID: deliveryID, Kind: tracking.KindUnsubscribe, Dest: dest,
+				TenantID: tenantID, DeliveryID: deliveryID, Kind: tracking.KindUnsubscribe, Dest: dest,
 			})
 			if u := tracking.UnsubscribeURL(domain, token); u != "" {
 				// RFC 8058 one-click requires an https endpoint.

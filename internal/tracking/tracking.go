@@ -5,11 +5,15 @@
 //
 //	kid "." base64url( body ‖ mac )
 //
-// where body carries delivery_id, kind and link_no (plus the destination for
-// unsubscribe tokens) and mac is an HMAC-SHA256 over delivery_id, kind,
-// link_no *and* the destination URL. Binding the destination into the MAC is
-// what makes the click redirect safe: /t/c/{token}?u={url} only redirects to a
-// u the signer chose, so the route is not an open redirect (architecture 16).
+// where body carries tenant_id, delivery_id, kind and link_no (plus the
+// destination for unsubscribe tokens) and mac is an HMAC-SHA256 over tenant_id,
+// delivery_id, kind, link_no *and* the destination URL. Binding the
+// destination into the MAC is what makes the click redirect safe:
+// /t/c/{token}?u={url} only redirects to a u the signer chose, so the route is
+// not an open redirect (architecture 16).
+//
+// The tenant ID travels in the token as well, so an unauthenticated public
+// route knows whose signing keys to verify against without a lookup.
 //
 // Nothing is stored per recipient: verification is a pure function of the
 // token, the tenant's signing keys and - for clicks - the u parameter.
@@ -82,7 +86,13 @@ func (k Kind) embedsDest() bool { return k == KindUnsubscribe }
 // MessageVersion.Links for clicks and -1 (or 0) elsewhere; Dest is the
 // destination URL, which is always part of the MAC but only embedded for
 // KindUnsubscribe.
+//
+// TenantID travels in the token because the public routes are unauthenticated
+// and the signing keys are per tenant: without it a verifier would have to try
+// every tenant's keys to find out whose token it is holding. It is covered by
+// the MAC like every other field, so it cannot be swapped for another tenant's.
 type TokenPayload struct {
+	TenantID   string
 	DeliveryID string
 	Kind       Kind
 	LinkNo     int
@@ -148,6 +158,9 @@ func signToken(kid string, secret []byte, p TokenPayload) (string, error) {
 	if p.DeliveryID == "" {
 		return "", fmt.Errorf("%w: empty delivery id", ErrNoKey)
 	}
+	if p.TenantID == "" {
+		return "", fmt.Errorf("%w: empty tenant id", ErrNoKey)
+	}
 	body := encodeBody(p)
 	mac := computeMAC(secret, p)
 	buf := make([]byte, 0, len(body)+macSize)
@@ -205,6 +218,36 @@ func (Signer) VerifyDest(keys []store.SigningKey, token, dest string) (TokenPayl
 	return p, nil
 }
 
+// TenantOf reads the tenant ID out of a token *without* checking its MAC.
+//
+// It exists for one job: the public routes are unauthenticated and the signing
+// keys are per tenant, so something has to say which tenant's keys to verify
+// against. The value is attacker-controlled until Verify or VerifyDest has
+// run, so a caller may use it to look up keys and for nothing else - and since
+// the tenant ID is covered by the MAC, a token that then verifies is proof
+// that this is the tenant that signed it.
+func TenantOf(token string) (string, error) {
+	_, rest, ok := strings.Cut(token, kidSep)
+	if !ok || rest == "" {
+		return "", fmt.Errorf("%w: missing key id", ErrMalformedToken)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(rest)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrMalformedToken, err)
+	}
+	if len(raw) <= macSize {
+		return "", fmt.Errorf("%w: too short", ErrMalformedToken)
+	}
+	p, err := decodeBody(raw[:len(raw)-macSize])
+	if err != nil {
+		return "", err
+	}
+	if p.TenantID == "" {
+		return "", fmt.Errorf("%w: no tenant id", ErrMalformedToken)
+	}
+	return p.TenantID, nil
+}
+
 func keyByID(keys []store.SigningKey, kid string) (store.SigningKey, bool) {
 	for _, k := range keys {
 		if k.KID == kid && len(k.Secret) > 0 {
@@ -235,7 +278,8 @@ func SelectKey(keys []store.SigningKey) (store.SigningKey, bool) {
 
 // encodeBody serialises the part of the payload that travels in the token.
 func encodeBody(p TokenPayload) []byte {
-	buf := make([]byte, 0, len(p.DeliveryID)+len(p.Dest)+8)
+	buf := make([]byte, 0, len(p.TenantID)+len(p.DeliveryID)+len(p.Dest)+10)
+	buf = appendString(buf, p.TenantID)
 	buf = appendString(buf, p.DeliveryID)
 	buf = append(buf, byte(p.Kind))
 	buf = binary.AppendVarint(buf, int64(p.LinkNo))
@@ -247,7 +291,12 @@ func encodeBody(p TokenPayload) []byte {
 
 func decodeBody(body []byte) (TokenPayload, error) {
 	var p TokenPayload
-	id, rest, err := takeString(body)
+	tenant, rest, err := takeString(body)
+	if err != nil {
+		return p, err
+	}
+	p.TenantID = tenant
+	id, rest, err := takeString(rest)
 	if err != nil {
 		return p, err
 	}
@@ -286,6 +335,7 @@ func computeMAC(secret []byte, p TokenPayload) []byte {
 	m := hmac.New(sha256.New, secret)
 	m.Write([]byte(macContext))
 	var buf []byte
+	buf = appendString(buf, p.TenantID)
 	buf = appendString(buf, p.DeliveryID)
 	buf = append(buf, byte(p.Kind))
 	buf = binary.AppendVarint(buf, int64(p.LinkNo))

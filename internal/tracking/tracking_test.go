@@ -21,10 +21,10 @@ func TestRoundTrip(t *testing.T) {
 	s := NewSigner()
 	ks := keys()
 	cases := []TokenPayload{
-		{DeliveryID: "d-1", Kind: KindOpen},
-		{DeliveryID: "d-2", Kind: KindClick, LinkNo: 7, Dest: "https://example.com/a?b=c&d=e"},
-		{DeliveryID: "d-3", Kind: KindClick, LinkNo: -1, Dest: "https://example.com/dyn"},
-		{DeliveryID: "d-4", Kind: KindUnsubscribe, Dest: "https://host.example/unsub?u=42"},
+		{TenantID: "t1", DeliveryID: "d-1", Kind: KindOpen},
+		{TenantID: "t1", DeliveryID: "d-2", Kind: KindClick, LinkNo: 7, Dest: "https://example.com/a?b=c&d=e"},
+		{TenantID: "acme", DeliveryID: "d-3", Kind: KindClick, LinkNo: -1, Dest: "https://example.com/dyn"},
+		{TenantID: "t1", DeliveryID: "d-4", Kind: KindUnsubscribe, Dest: "https://host.example/unsub?u=42"},
 	}
 	for _, p := range cases {
 		tok, err := s.SignErr("k2", ks[1].Secret, p)
@@ -43,7 +43,7 @@ func TestRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("verify %v: %v", p, err)
 		}
-		if got.DeliveryID != p.DeliveryID || got.Kind != p.Kind || got.LinkNo != p.LinkNo || got.Dest != p.Dest {
+		if got.TenantID != p.TenantID || got.DeliveryID != p.DeliveryID || got.Kind != p.Kind || got.LinkNo != p.LinkNo || got.Dest != p.Dest {
 			t.Fatalf("round trip: got %+v want %+v", got, p)
 		}
 	}
@@ -54,7 +54,7 @@ func TestUnsubscribeTokenEmbedsDestClickDoesNot(t *testing.T) {
 	ks := keys()
 	dest := "https://host.example/unsub/abc"
 
-	unsub, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{DeliveryID: "d", Kind: KindUnsubscribe, Dest: dest})
+	unsub, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: KindUnsubscribe, Dest: dest})
 	got, err := s.Verify(ks, unsub) // no destination supplied: it is in the token
 	if err != nil {
 		t.Fatalf("verify unsubscribe: %v", err)
@@ -63,7 +63,7 @@ func TestUnsubscribeTokenEmbedsDestClickDoesNot(t *testing.T) {
 		t.Fatalf("embedded dest = %q, want %q", got.Dest, dest)
 	}
 
-	click, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{DeliveryID: "d", Kind: KindClick, LinkNo: 0, Dest: dest})
+	click, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: KindClick, LinkNo: 0, Dest: dest})
 	if _, err := s.Verify(ks, click); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("click token verified without its destination: %v", err)
 	}
@@ -76,14 +76,14 @@ func TestDestMismatchIsRejected(t *testing.T) {
 	s := NewSigner()
 	ks := keys()
 	tok, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{
-		DeliveryID: "d", Kind: KindClick, LinkNo: 3, Dest: "https://example.com/good",
+		TenantID: "t1", DeliveryID: "d", Kind: KindClick, LinkNo: 3, Dest: "https://example.com/good",
 	})
 	if _, err := s.VerifyDest(ks, tok, "https://evil.example/"); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("open redirect accepted: %v", err)
 	}
 
 	unsub, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{
-		DeliveryID: "d", Kind: KindUnsubscribe, Dest: "https://example.com/good",
+		TenantID: "t1", DeliveryID: "d", Kind: KindUnsubscribe, Dest: "https://example.com/good",
 	})
 	if _, err := s.VerifyDest(ks, unsub, "https://evil.example/"); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("unsubscribe destination override accepted: %v", err)
@@ -93,7 +93,7 @@ func TestDestMismatchIsRejected(t *testing.T) {
 func TestTamper(t *testing.T) {
 	s := NewSigner()
 	ks := keys()
-	tok, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{DeliveryID: "delivery-1", Kind: KindOpen})
+	tok, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{TenantID: "t1", DeliveryID: "delivery-1", Kind: KindOpen})
 
 	kid, body, _ := strings.Cut(tok, ".")
 	for i := range body {
@@ -120,7 +120,7 @@ func flip(c byte) byte {
 func TestWrongKID(t *testing.T) {
 	s := NewSigner()
 	ks := keys()
-	tok, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{DeliveryID: "d", Kind: KindOpen})
+	tok, _ := s.SignErr("k1", ks[0].Secret, TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: KindOpen})
 
 	// The key is gone (rotated out).
 	if _, err := s.Verify(ks[1:], tok); !errors.Is(err, ErrUnknownKID) {
@@ -131,7 +131,7 @@ func TestWrongKID(t *testing.T) {
 		t.Fatalf("kid substitution: %v", err)
 	}
 	// Both keys still verify their own tokens after rotation.
-	tok2, _ := s.SignErr("k2", ks[1].Secret, TokenPayload{DeliveryID: "d", Kind: KindOpen})
+	tok2, _ := s.SignErr("k2", ks[1].Secret, TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: KindOpen})
 	if _, err := s.Verify(ks, tok2); err != nil {
 		t.Fatalf("rotated key: %v", err)
 	}
@@ -145,11 +145,12 @@ func TestSignRejectsBadInput(t *testing.T) {
 		secret []byte
 		p      TokenPayload
 	}{
-		{"no kid", "", []byte("x"), TokenPayload{DeliveryID: "d", Kind: KindOpen}},
-		{"kid with separator", "a.b", []byte("x"), TokenPayload{DeliveryID: "d", Kind: KindOpen}},
-		{"no secret", "k", nil, TokenPayload{DeliveryID: "d", Kind: KindOpen}},
-		{"no delivery", "k", []byte("x"), TokenPayload{Kind: KindOpen}},
-		{"bad kind", "k", []byte("x"), TokenPayload{DeliveryID: "d", Kind: Kind(9)}},
+		{"no kid", "", []byte("x"), TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: KindOpen}},
+		{"kid with separator", "a.b", []byte("x"), TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: KindOpen}},
+		{"no secret", "k", nil, TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: KindOpen}},
+		{"no delivery", "k", []byte("x"), TokenPayload{TenantID: "t1", Kind: KindOpen}},
+		{"no tenant", "k", []byte("x"), TokenPayload{DeliveryID: "d", Kind: KindOpen}},
+		{"bad kind", "k", []byte("x"), TokenPayload{TenantID: "t1", DeliveryID: "d", Kind: Kind(9)}},
 	} {
 		if _, err := s.SignErr(tc.kid, tc.secret, tc.p); !errors.Is(err, ErrNoKey) {
 			t.Errorf("%s: err = %v, want ErrNoKey", tc.name, err)
@@ -212,7 +213,7 @@ func TestURLBuilders(t *testing.T) {
 func BenchmarkSign(b *testing.B) {
 	s := NewSigner()
 	secret := []byte("0123456789abcdef")
-	p := TokenPayload{DeliveryID: "0199a0e5-0000-7000-8000-000000000001", Kind: KindClick, LinkNo: 3, Dest: "https://example.com/landing"}
+	p := TokenPayload{TenantID: "t1", DeliveryID: "0199a0e5-0000-7000-8000-000000000001", Kind: KindClick, LinkNo: 3, Dest: "https://example.com/landing"}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = s.Sign("k1", secret, p)
