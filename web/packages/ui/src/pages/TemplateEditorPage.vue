@@ -107,6 +107,28 @@ const modeTabs = computed<TabItem[]>(() =>
   })),
 )
 
+const knownI18nKeys = computed(() => (i18nKeys.data.value?.items ?? []).map((item) => item.key))
+
+/**
+ * Mode switches are confirmed because they move authority over the body.
+ *
+ * Leaving `blocks` keeps the exported MJML in `draft.body` — the code editor
+ * simply takes over editing it — but further code edits no longer reach the
+ * saved GrapesJS project, so the two drift apart. Entering `blocks` re-imports
+ * the MJML, and anything GrapesJS cannot model is dropped on the way in.
+ */
+async function changeMode(next: string) {
+  const mode = next as ContentMode
+  if (mode === draft.value.mode) return
+  const leavingBlocks = draft.value.mode === 'blocks'
+  const enteringBlocks = mode === 'blocks'
+  if (draft.value.body.trim() && (leavingBlocks || enteringBlocks)) {
+    const message = leavingBlocks ? t('blockEditor.switchToCode') : t('blockEditor.switchToBlocks')
+    if (!(await confirm(message))) return
+  }
+  draft.value.mode = mode
+}
+
 const layoutOptions = computed(() =>
   (layouts.data.value?.items ?? []).map((layout) => ({
     value: layout.id ?? '',
@@ -299,10 +321,11 @@ async function importYaml(event: Event) {
         <SpCard :title="t('template.body')" :padded="false">
           <template #header>
             <SpTabs
-              v-model="draft.mode"
+              :model-value="draft.mode"
               :tabs="modeTabs"
               :aria-label="t('template.mode')"
               class="sp-editor__tabs"
+              @update:model-value="changeMode"
             />
           </template>
 
@@ -311,6 +334,8 @@ async function importYaml(event: Event) {
               v-if="draft.mode === 'blocks'"
               v-model="blocks"
               :mjml="draft.body"
+              :locale="draft.default_locale"
+              :i18n-keys="knownI18nKeys"
               @update:mjml="draft.body = $event"
             >
               <slot name="block-editor" />

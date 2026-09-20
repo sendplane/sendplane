@@ -258,9 +258,13 @@ const records = manifest.map((route) => ({
 
 MJML/HTML 탭의 코드 에디터는 `@codemirror/*`를 **동적 import**하므로 별도 청크로
 분리되고, 에디터 화면을 열지 않으면 로드되지 않습니다. 블록 에디터
-(GrapesJS + grapesjs-mjml)는 아직 스파이크 단계라 자리만 잡혀 있고
-"editor spike pending" 플레이스홀더가 동적으로 로드됩니다
-(로드맵 8단계). 호스트가 자체 블록 에디터를 가지고 있다면
+`MjmlBlockEditor.vue`(GrapesJS + grapesjs-mjml, ADR-0009)도 마찬가지로 동적
+import라 **블록 탭을 열 때만** 내려받습니다(콘솔 빌드 기준 약 2.4 MB / gzip
+691 kB). 저장 형식은 `Template.blocks`에
+`{editor, editor_version, project, mjml}`이고 서버는 `Template.body`의 MJML만
+컴파일합니다. 스파이크 결과와 주의사항은
+[`packages/ui/docs/block-editor-spike.md`](packages/ui/docs/block-editor-spike.md)에
+정리해 두었습니다. 호스트가 자체 블록 에디터를 가지고 있다면
 `TemplateEditorPage`의 `#block-editor` 슬롯으로 끼워 넣으면 됩니다.
 
 ---
@@ -304,8 +308,10 @@ pnpm test
 - `packages/api` — fetch 목으로 인증 헤더 주입, `explode=true` 쿼리 직렬화,
   `SendplaneError` 매핑, NDJSON 스트리밍/버퍼링 양쪽 경로, CSV/NDJSON 리더를 검증합니다.
 - `packages/ui` — provider/composable, `StatusBadge`, `Table`의 커서 페이지네이션,
-  목 클라이언트를 물린 `CampaignDetailPage`, `TemplateEditorPage`의 i18n 누락 키 판정을
-  검증합니다.
+  목 클라이언트를 물린 `CampaignDetailPage`, `TemplateEditorPage`의 i18n 누락 키 판정과
+  모드 전환 확인을 검증합니다. 블록 에디터는 순수 헬퍼(`lib/mjml-blocks.ts`)만
+  검증하고 컴포넌트 자체는 **skip**입니다 — happy-dom의 `Attr.nodeName`이 비어 있어
+  GrapesJS 파서가 속성을 전부 잃기 때문입니다(자세한 내용은 스파이크 문서).
 - `apps/console` — 매니페스트로 만든 라우터가 모든 라우트 이름을 등록하는지, API 키 게이트와
   로케일 스위처가 동작하는지 스모크 테스트합니다.
 

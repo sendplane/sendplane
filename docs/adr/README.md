@@ -13,7 +13,7 @@
 | 0006 | 멀티테넌시: shared / routed Provider | accepted |
 | 0007 | 리포지터리 인터페이스 + storetest 적합성 스위트 | accepted |
 | 0008 | 바운스 상관관계(VERP+헤더)와 선택적 내장 suppression | accepted |
-| 0009 | MJML은 publish 시 컴파일, 블록 편집기는 GrapesJS-MJML | proposed(스파이크 대기) |
+| 0009 | MJML은 publish 시 컴파일, 블록 편집기는 GrapesJS-MJML | accepted |
 | 0010 | 프론트 패키지 분리 (api / ui / console) | accepted |
 | 0011 | 트래킹과 수신거부: sendplane 경유 URL, 서명 토큰, 2단계 수신거부 | accepted |
 | 0012 | 헬스체크는 루프백 프로브가 1차, DNS 검사는 진단 계층 | accepted |

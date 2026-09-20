@@ -20,9 +20,19 @@ export default defineConfig({
       cssFileName: 'sendplane-ui',
     },
     rollupOptions: {
-      // The host owns Vue and the client; the code editor is dynamically
-      // imported so it lands in its own chunk in the host's bundle.
-      external: ['vue', 'vue-i18n', '@sendplane/api', /^@codemirror\//, /^@lezer\//],
+      // The host owns Vue and the client; the code editor and the block editor
+      // are dynamically imported so each lands in its own chunk in the host's
+      // bundle. GrapesJS is listed by its exact id so that the stylesheet this
+      // package inlines (`grapesjs/dist/css/…?inline`) is still bundled here.
+      external: [
+        'vue',
+        'vue-i18n',
+        '@sendplane/api',
+        'grapesjs',
+        'grapesjs-mjml',
+        /^@codemirror\//,
+        /^@lezer\//,
+      ],
       output: { chunkFileNames: '[name]-[hash].js' },
     },
   },

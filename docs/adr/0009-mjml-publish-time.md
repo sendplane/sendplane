@@ -1,6 +1,6 @@
 # ADR-0009 MJML은 publish 시 컴파일, 블록 편집기는 GrapesJS-MJML
 
-상태: proposed (편집기 스파이크 대기) · 2026-09-20
+상태: accepted · 2026-09-21 (스파이크 GO: grapesjs 0.23.6 + grapesjs-mjml 1.0.8, BSD-3; 근거는 web/packages/ui/docs/block-editor-spike.md)
 
 ## 맥락
 블록 위지윅과 HTML 직접 편집 둘 다 필요하다. MJML 컴파일은 Node 기반이고 무겁다(수십~수백 ms). 프론트는 Vue.

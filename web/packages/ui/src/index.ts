@@ -1,5 +1,7 @@
 import './theme.css'
 
+import { defineAsyncComponent } from 'vue'
+
 // Provider and context ------------------------------------------------------
 export { default as SendplaneProvider } from './SendplaneProvider.vue'
 export {
@@ -76,6 +78,19 @@ export { default as SpTabs, type TabItem } from './components/SpTabs.vue'
 export { default as SpTextarea } from './components/SpTextarea.vue'
 export { default as SpBlockEditorSlot } from './components/SpBlockEditorSlot.vue'
 
+/**
+ * The GrapesJS + grapesjs-mjml block editor (ADR-0009).
+ *
+ * Exported through `defineAsyncComponent` on purpose: a static re-export would
+ * pull GrapesJS and the MJML compiler into whatever chunk imports this entry
+ * point, which is every screen in the console. `SpBlockEditorSlot` is the seam
+ * the template editor actually uses; this export is for a host that wants to
+ * mount the editor on its own screen.
+ */
+export const MjmlBlockEditor = defineAsyncComponent(
+  () => import('./components/MjmlBlockEditor.vue'),
+)
+
 // Pages ---------------------------------------------------------------------
 export { default as CampaignListPage } from './pages/CampaignListPage.vue'
 export { default as CampaignDetailPage } from './pages/CampaignDetailPage.vue'
@@ -119,3 +134,20 @@ export {
   tryParseJson,
 } from './lib/format.js'
 export { labelKeyFor, toneFor, type StatusKind, type Tone } from './lib/status.js'
+export {
+  BLOCK_EDITOR,
+  BLOCK_EDITOR_VERSION,
+  blockDefinitions,
+  DEFAULT_MJML,
+  extractI18nKeys,
+  finishExport,
+  i18nTag,
+  isMjmlDocument,
+  makeBlockProject,
+  readBlockProject,
+  replaceI18nKey,
+  unescapeLiquid,
+  type BlockDefinition,
+  type BlockEditorProject,
+  type BlockEditorValue,
+} from './lib/mjml-blocks.js'

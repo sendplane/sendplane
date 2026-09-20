@@ -1,6 +1,7 @@
 import type { I18nBundle, I18nKeyList, Template } from '@sendplane/api'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
+import { h } from 'vue'
 
 import TemplateEditorPage from '../src/pages/TemplateEditorPage.vue'
 import { fakeClient, flush, waitFor, withProvider } from './helpers.js'
@@ -54,6 +55,9 @@ function build(overrides: Partial<Record<string, unknown>> = {}) {
       locale: 'en',
       navigate: vi.fn(),
       props: { templateId: 't1' },
+      // The real block editor needs a canvas; the page's `#block-editor` slot
+      // is the seam a host uses for its own, and keeps GrapesJS out of the test.
+      slots: { 'block-editor': () => h('div', { class: 'host-block-editor' }, 'host editor') },
     }),
   )
   return { client, get, wrapper }
@@ -145,16 +149,24 @@ describe('TemplateEditorPage editor tabs', () => {
     expect(tabs[1]!.attributes('aria-selected')).toBe('true')
   })
 
-  it('swaps in the pending block-editor placeholder on the blocks tab', async () => {
+  it('confirms before a mode switch hands the body to another editor', async () => {
     const { wrapper } = build()
     await flush()
+    const ask = vi.fn(() => false)
+    Object.defineProperty(window, 'confirm', { value: ask, configurable: true, writable: true })
 
     await wrapper.findAll('[role="tab"]')[0]!.trigger('click')
-    // Two nested `defineAsyncComponent` layers have to resolve before the
-    // placeholder paints: the slot wrapper, then the placeholder itself.
-    await waitFor(() => wrapper.text().includes('Block editor spike pending'))
+    await flush()
+    expect(ask).toHaveBeenCalledTimes(1)
+    // Declining leaves the template on MJML: the body has not been re-imported.
+    expect(wrapper.findAll('[role="tab"]')[1]!.attributes('aria-selected')).toBe('true')
 
-    expect(wrapper.text()).toContain('Block editor spike pending')
+    ask.mockReturnValue(true)
+    await wrapper.findAll('[role="tab"]')[0]!.trigger('click')
+    await waitFor(() => wrapper.find('.host-block-editor').exists())
+
+    expect(wrapper.findAll('[role="tab"]')[0]!.attributes('aria-selected')).toBe('true')
+    expect(wrapper.text()).toContain('host editor')
   })
 })
 

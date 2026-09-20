@@ -46,14 +46,16 @@ export function withProvider(
   options: Omit<ProvideSendplaneOptions, 'client'> & {
     client: SendplaneClient
     props?: Record<string, unknown>
+    /** Named slots, the way a host fills e.g. `#block-editor`. */
+    slots?: Record<string, () => unknown>
   },
 ): Component {
-  const { props, ...contextOptions } = options
+  const { props, slots, ...contextOptions } = options
   return defineComponent({
     name: 'TestHost',
     setup() {
       provideSendplane(contextOptions)
-      return () => h(page, props)
+      return () => h(page, props, slots as never)
     },
   })
 }

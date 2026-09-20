@@ -235,8 +235,6 @@
       "mjml": "MJML",
       "html": "HTML"
     },
-    "blocksPending": "Block editor spike pending",
-    "blocksPendingHint": "The GrapesJS + grapesjs-mjml wrapper is not built yet (roadmap phase 8). Edit the exported MJML on the MJML tab meanwhile.",
     "i18n": "Translations",
     "i18nKey": "Key",
     "i18nUsedIn": "Used in",
@@ -255,6 +253,27 @@
     "previewWarnings": "Warnings",
     "previewMissing": "Keys that fell through to the key string",
     "editorFailed": "The code editor could not be loaded; editing as plain text."
+  },
+  "blockEditor": {
+    "toolbar": "Editor toolbar",
+    "undo": "Undo",
+    "redo": "Redo",
+    "device": "Preview",
+    "viewMjml": "View MJML",
+    "i18nKey": "Translation key",
+    "keyUnknown": "Not in the bundle yet",
+    "missingKeys": "Keys the bundle does not define",
+    "failed": "The block editor could not be started",
+    "projectFailed": "The saved project could not be restored; the MJML was imported instead.",
+    "switchToCode": "Copy the MJML the block editor exported into the code editor? The block project stays saved, but editing the code here will not update it.",
+    "switchToBlocks": "Import the current MJML into the block editor? Anything the block editor cannot represent is dropped.",
+    "blocks": {
+      "i18nText": "Translated text",
+      "conditional": "Conditional section",
+      "conditionalBody": "Shown when the condition holds.",
+      "unsubscribe": "Unsubscribe link",
+      "unsubscribeLabel": "Unsubscribe"
+    }
   },
   "layout": {
     "title": "Layouts",
