@@ -350,12 +350,25 @@ func appendString(dst []byte, s string) []byte {
 }
 
 func takeString(b []byte) (string, []byte, error) {
+	// A token is attacker-supplied (architecture 9.1), so the declared length
+	// is checked against what is actually left before it is ever used as an
+	// index: n comes off the wire as a uint64 and could name gigabytes.
 	n, used := binary.Uvarint(b)
-	if used <= 0 || uint64(len(b)-used) < n {
+	if used <= 0 || n > uint64(maxTokenFieldLen) {
 		return "", nil, fmt.Errorf("%w: truncated field", ErrMalformedToken)
 	}
-	return string(b[used : used+int(n)]), b[used+int(n):], nil
+	size := int(n)
+	if size > len(b)-used {
+		return "", nil, fmt.Errorf("%w: truncated field", ErrMalformedToken)
+	}
+	return string(b[used : used+size]), b[used+size:], nil
 }
+
+// maxTokenFieldLen bounds one length-prefixed field of a tracking token. The
+// longest one is the click destination, which the link rewriter already caps
+// far below this; the bound exists so a declared length can never be turned
+// into an index.
+const maxTokenFieldLen = 1 << 20
 
 // Route paths of architecture 9.1. control mounts these under the tenant
 // tracking domain.

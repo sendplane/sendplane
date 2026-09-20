@@ -8,8 +8,27 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sendplane/sendplane/internal/sender"
 	"github.com/sendplane/sendplane/store"
 )
+
+// customHeaders validates the caller's `headers` against the very whitelist
+// the sender applies on the wire (architecture 16), so a name it would refuse
+// is a 422 here instead of a delivery that fails at send time. Returning nil
+// for an empty map keeps the stored delivery free of an empty object.
+func customHeaders(in *map[string]string) (map[string]string, error) {
+	if in == nil || len(*in) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(*in))
+	for name, value := range *in {
+		if err := sender.ValidateCustomHeader(name, value); err != nil {
+			return nil, errInvalid("headers: %v", err)
+		}
+		out[name] = value
+	}
+	return out, nil
+}
 
 // maxTransactionalRecipients mirrors the maxItems of MessageRequest.to. One
 // call fans out to one delivery per recipient, so the cap is what keeps a
@@ -44,12 +63,9 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 		return nil, errInvalid("to has %d recipients, the maximum is %d",
 			len(in.To), maxTransactionalRecipients)
 	}
-	if in.Headers != nil && len(*in.Headers) > 0 {
-		// store.Delivery has no place to keep per-message headers, so
-		// accepting them would mean silently dropping them at send time.
-		return nil, errInvalid(
-			"headers are not supported yet: a delivery has no header storage, " +
-				"put the values in vars and render them into the template instead")
+	headers, err := customHeaders(in.Headers)
+	if err != nil {
+		return nil, err
 	}
 
 	version, err := s.resolveVersion(ctx, t, in.TemplateId, in.VersionId)
@@ -127,6 +143,7 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 			Email:     string(r.Email), EmailNorm: norm,
 			Name: deref(r.Name), Locale: locale,
 			Vars:          mergeVars(varsOf(in.Vars), varsOf(r.Vars)),
+			Headers:       headers,
 			NextAttemptAt: now, CreatedAt: now, UpdatedAt: now,
 		}
 		if status == store.DeliverySuppressed {

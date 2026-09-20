@@ -36,7 +36,7 @@ func (c *Control) StartCampaign(ctx context.Context, st store.Store, id string, 
 	if cam.Status != store.CampaignDraft {
 		return invalidTransition(cam, "start")
 	}
-	if cam.VersionID == "" {
+	if cam.VersionID == "" && cam.TemplateID == "" {
 		return fmt.Errorf("%w: campaign %s", ErrNoVersion, id)
 	}
 	if cam.SenderID == "" {
@@ -58,9 +58,15 @@ func (c *Control) StartCampaign(ctx context.Context, st store.Store, id string, 
 
 	at = store.TruncateTime(at)
 	if !at.IsZero() && at.After(now) {
+		// A scheduled campaign is pinned when the scheduler promotes it, not
+		// now: "the published version at start time" is the version that is
+		// published when the mail actually goes out.
 		cam.Status = store.CampaignScheduled
 		cam.ScheduleAt = at
 	} else {
+		if err := resolveCampaignVersion(ctx, st, cam); err != nil {
+			return err
+		}
 		cam.Status = store.CampaignRunning
 		cam.StartedAt = now
 	}
@@ -70,6 +76,32 @@ func (c *Control) StartCampaign(ctx context.Context, st store.Store, id string, 
 	if cam.Status == store.CampaignRunning {
 		return enqueueCampaignEvent(ctx, st, cam, EventCampaignStarted, now, nil)
 	}
+	return nil
+}
+
+// resolveCampaignVersion binds a campaign that named a template to that
+// template's currently published version. A campaign may be created from a
+// template that has never been published; the binding happens here, at start,
+// so a template edited and republished in between is the one that goes out
+// (architecture 7.1). A campaign that pinned VersionID itself is left alone.
+func resolveCampaignVersion(ctx context.Context, st store.Store, cam *store.Campaign) error {
+	if cam.VersionID != "" {
+		return nil
+	}
+	if cam.TemplateID == "" {
+		return fmt.Errorf("%w: campaign %s", ErrNoVersion, cam.ID)
+	}
+	tpl, err := st.Templates().Get(ctx, cam.TemplateID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%w: template %s does not exist", ErrNoVersion, cam.TemplateID)
+		}
+		return err
+	}
+	if tpl.PublishedVersionID == "" {
+		return fmt.Errorf("%w: template %s has never been published", ErrNoVersion, tpl.ID)
+	}
+	cam.VersionID = tpl.PublishedVersionID
 	return nil
 }
 

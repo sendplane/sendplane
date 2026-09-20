@@ -92,7 +92,7 @@ func TestPublishMJMLRawSurvives(t *testing.T) {
 		if iff < 0 || note < 0 || end < 0 {
 			t.Fatalf("%s: mj-raw control flow lost: if=%d note=%d endif=%d", part.name, iff, note, end)
 		}
-		if !(iff < note && note < end) {
+		if iff >= note || note >= end {
 			t.Errorf("%s: mj-raw control flow reordered: if=%d note=%d endif=%d", part.name, iff, note, end)
 		}
 	}
@@ -106,7 +106,7 @@ func TestPublishChecksumStability(t *testing.T) {
 	}
 
 	tpl, layout := fixture(t)
-	tpl.Subject = tpl.Subject + "!"
+	tpl.Subject += "!"
 	c, _, err := Publish(context.Background(), tpl, layout, PublishOptions{})
 	if err != nil {
 		t.Fatalf("publish: %v", err)

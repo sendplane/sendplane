@@ -46,12 +46,15 @@ func TestCampaignFlow(t *testing.T) {
 		t.Fatalf("preview html = %q", preview.Html)
 	}
 
-	// template_id resolves the published version; version_id would pin one.
+	// template_id is kept and resolved at start; version_id would pin one now.
 	camp := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
 		Name: "spring", SenderId: *snd.Id, TemplateId: tpl.Id, DefaultLocale: ptr("en"),
 	}), http.StatusCreated)
-	if camp.VersionId == nil || *camp.VersionId != version.Id {
-		t.Fatalf("campaign version_id = %v, want the published %v", camp.VersionId, version.Id)
+	if camp.TemplateId == nil || *camp.TemplateId != *tpl.Id {
+		t.Fatalf("campaign template_id = %v, want %v", camp.TemplateId, *tpl.Id)
+	}
+	if camp.VersionId != nil {
+		t.Fatalf("campaign version_id = %v, want it unpinned until start", camp.VersionId)
 	}
 	if camp.Status != CampaignStatusDraft {
 		t.Fatalf("new campaign status = %q, want draft", camp.Status)
@@ -88,6 +91,10 @@ func TestCampaignFlow(t *testing.T) {
 		"/api/v1/campaigns/"+camp.Id.String()+"/start", nil), http.StatusOK)
 	if started.Status != CampaignStatusRunning {
 		t.Fatalf("status after start = %q, want running", started.Status)
+	}
+	// Start is where the template's published version gets pinned.
+	if started.VersionId == nil || *started.VersionId != version.Id {
+		t.Fatalf("version_id after start = %v, want the published %v", started.VersionId, version.Id)
 	}
 
 	// A running campaign no longer accepts recipients.

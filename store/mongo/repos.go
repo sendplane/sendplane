@@ -37,6 +37,36 @@ func (r *probeRunRepo) ListBySender(ctx context.Context, senderID string, p stor
 	return r.listWhere(ctx, bson.D{{Key: "sender_id", Value: senderID}}, p)
 }
 
+func (r *probeRunRepo) ListPending(ctx context.Context, p store.Page) (store.Result[store.ProbeRun], error) {
+	return r.listWhere(ctx, bson.D{{Key: "pending", Value: true}}, p)
+}
+
+// --- bounce mailboxes --------------------------------------------------
+
+type bounceMailboxRepo struct {
+	*table[store.BounceMailbox, bounceMailboxDoc, *bounceMailboxDoc]
+}
+
+// ListEnabled returns the whole enabled set in one call; the partial index
+// bounce_mailbox_enabled covers it.
+func (r *bounceMailboxRepo) ListEnabled(ctx context.Context) ([]store.BounceMailbox, error) {
+	cur, err := r.coll().Find(ctx,
+		r.s.scope(bson.E{Key: "enabled", Value: true}),
+		options.Find().SetSort(listSort))
+	if err != nil {
+		return nil, wrap("list enabled bounce mailboxes", err)
+	}
+	var docs []bounceMailboxDoc
+	if err := cur.All(ctx, &docs); err != nil {
+		return nil, wrap("list enabled bounce mailboxes", err)
+	}
+	out := make([]store.BounceMailbox, 0, len(docs))
+	for i := range docs {
+		out = append(out, *r.m.dec(&docs[i]))
+	}
+	return out, nil
+}
+
 // --- bounces -----------------------------------------------------------
 
 type bounceRepo struct {
@@ -275,6 +305,24 @@ func (r *suppressionRepo) List(ctx context.Context, p store.Page) (store.Result[
 	return listPage[store.Suppression, suppressionDoc](ctx, r.coll(), r.s.scope(), p, decSuppression)
 }
 
+// DeleteBefore removes expired entries only: a zero ExpiresAt is stored as
+// null and never matches (store.SuppressionRepo).
+func (r *suppressionRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	filter := r.s.scope(bson.E{Key: "expires_at", Value: bson.D{
+		{Key: "$ne", Value: nil},
+		{Key: "$lte", Value: ts(before)},
+	}})
+	ids, err := findIDs(ctx, r.coll(), filter, idSort, limit)
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	res, err := r.coll().DeleteMany(ctx, r.s.scope(inIDs(ids)))
+	if err != nil {
+		return 0, wrap("delete suppressions", err)
+	}
+	return int(res.DeletedCount), nil
+}
+
 func (r *suppressionRepo) Delete(ctx context.Context, emailNorm string) error {
 	id := key(r.s.tenant, emailNorm)
 	res, err := r.coll().DeleteOne(ctx, r.s.scope(bson.E{Key: "_id", Value: id}))
@@ -310,7 +358,7 @@ func (r *trackingRepo) InsertEvents(ctx context.Context, evs []store.TrackingEve
 		docs = append(docs, &trackingDoc{
 			Base:       Base{ID: e.ID, TenantID: r.s.tenant, CreatedAt: ts(e.CreatedAt)},
 			DeliveryID: e.DeliveryID, CampaignID: e.CampaignID, Kind: int32(e.Kind),
-			URL: e.URL, LinkNo: int32(e.LinkNo), UserAgent: e.UserAgent,
+			URL: e.URL, LinkNo: i32(e.LinkNo), UserAgent: e.UserAgent,
 			IPHash: e.IPHash, SuspectedBot: e.SuspectedBot,
 		})
 	}
@@ -347,7 +395,7 @@ func (r *trackingRepo) CountUnique(ctx context.Context, campaignID string) (stor
 		return out, wrap("count unique tracking", err)
 	}
 	for _, row := range rows {
-		switch store.TrackingKind(row.Kind) {
+		switch store.TrackingKind(enum8(row.Kind)) {
 		case store.TrackingOpen:
 			out.UniqueOpens = row.N
 		case store.TrackingClick:
@@ -488,6 +536,41 @@ func (r *outboxRepo) ClaimPending(ctx context.Context, limit int, lease time.Dur
 		out = append(out, *decOutbox(&docs[i]))
 	}
 	return out, nil
+}
+
+func (r *outboxRepo) Get(ctx context.Context, id string) (*store.OutboxEvent, error) {
+	var d outboxDoc
+	err := r.coll().FindOne(ctx, r.s.scope(bson.E{Key: "_id", Value: id})).Decode(&d)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, notFound("outbox event", id)
+		}
+		return nil, wrap("get outbox event", err)
+	}
+	return decOutbox(&d), nil
+}
+
+// Reset is the replay verb: pending again, due now, with a full attempt
+// budget.
+func (r *outboxRepo) Reset(ctx context.Context, id string, now time.Time) error {
+	res, err := r.coll().UpdateOne(ctx, r.s.scope(bson.E{Key: "_id", Value: id}),
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "status", Value: string(store.OutboxPending)},
+			{Key: "attempts", Value: int32(0)},
+			{Key: "last_error", Value: ""},
+			{Key: "next_attempt_at", Value: ts(now)},
+			{Key: "delivered_at", Value: nil},
+			{Key: "lease_owner", Value: ""},
+			{Key: "lease_until", Value: nil},
+			{Key: "claim_token", Value: ""},
+		}}})
+	if err != nil {
+		return wrap("reset outbox event", err)
+	}
+	if res.MatchedCount == 0 {
+		return notFound("outbox event", id)
+	}
+	return nil
 }
 
 func (r *outboxRepo) MarkDelivered(ctx context.Context, id string, at time.Time) error {
@@ -649,7 +732,7 @@ func (r *workerRepo) Heartbeat(ctx context.Context, w store.Worker) error {
 		{Key: "worker_id", Value: w.ID},
 		{Key: "role", Value: w.Role},
 		{Key: "lanes", Value: laneInts(w.Lanes)},
-		{Key: "concurrency", Value: int32(w.Concurrency)},
+		{Key: "concurrency", Value: i32(w.Concurrency)},
 		{Key: "last_seen_at", Value: ts(lastSeen)},
 	}
 	update := bson.D{{Key: "$set", Value: set}}

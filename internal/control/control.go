@@ -144,7 +144,7 @@ func (c *Control) loopSpecs() []loopSpec {
 	} else {
 		c.log.Warn("control: no EventSink configured, the event outbox will not be dispatched")
 	}
-	return specs
+	return append(specs, c.cfg.extraLoops...)
 }
 
 func (c *Control) tenantLog(loop, tenantID string) *slog.Logger {

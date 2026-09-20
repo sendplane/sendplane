@@ -54,6 +54,16 @@ type ProbeRun struct {
 	MailboxID string
 	// DeliveryID is the lane=probe delivery that carried the mail.
 	DeliveryID string
+	// GroupID ties together the runs one trigger created, one per mailbox, so
+	// a caller can ask for "the result of this trigger" without guessing from
+	// StartedAt.
+	GroupID string
+
+	// Pending is true while the run is still waiting for its mail. A finished
+	// run carries one of green/yellow/red; Pending is the explicit marker
+	// rather than an inference from Status == unknown, because a DNS-only run
+	// can legitimately finish as unknown.
+	Pending bool
 
 	Status HealthStatus
 	// Reason explains a non-green status ("not delivered", "dkim=fail").
@@ -89,9 +99,18 @@ type ProbeRun struct {
 	CreatedAt  time.Time
 }
 
-// ProbeRunRepo stores immutable run history.
+// ProbeRunRepo stores run history. A run is written pending and updated once,
+// when its mail arrives or its timeout passes; nothing else ever changes it.
 type ProbeRunRepo interface {
 	Create(ctx context.Context, r *ProbeRun) error
+	// Update writes the pending -> finished transition. It takes no part in
+	// optimistic concurrency: only the collector writes a run, and it holds
+	// the control leader lease.
+	Update(ctx context.Context, r *ProbeRun) error
 	Get(ctx context.Context, id string) (*ProbeRun, error)
 	ListBySender(ctx context.Context, senderID string, p Page) (Result[ProbeRun], error)
+	// ListPending returns the runs still waiting for their mail, oldest
+	// first, so the collector does not page through finished history to find
+	// them.
+	ListPending(ctx context.Context, p Page) (Result[ProbeRun], error)
 }

@@ -126,16 +126,18 @@ func (s *server) DeleteCampaign(ctx context.Context, req DeleteCampaignRequestOb
 
 // applyCampaign validates and copies the mutable half of a campaign.
 //
-// The store keeps no template_id on a campaign, only the pinned VersionID, so
-// `template_id` is resolved to the template's published version here rather
-// than at start. A campaign is therefore never bound to a version that did not
-// exist when it was created, which is also what makes control.StartCampaign's
-// "has a version" precondition satisfiable.
+// `template_id` is kept on the campaign and resolved to the template's
+// published version at start (control.StartCampaign), which is what the spec
+// says: a template edited and republished between creating and starting a
+// campaign is the one that goes out. Only the existence of the template is
+// checked here — it does not have to be published yet. Passing `version_id`
+// pins an exact version and start leaves it alone.
 func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign, in CampaignUpdate) error {
 	if err := requireNonEmpty("name", in.Name); err != nil {
 		return err
 	}
 	versionID := idPtrOf(in.VersionId)
+	templateID := ""
 	switch {
 	case versionID != "":
 		if _, err := t.st.Versions().Get(ctx, versionID); err != nil {
@@ -152,11 +154,7 @@ func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign
 			}
 			return err
 		}
-		if tpl.PublishedVersionID == "" {
-			return newErr(422, ErrorCodeTemplateNotPublished,
-				"template %s has never been published", tpl.ID)
-		}
-		versionID = tpl.PublishedVersionID
+		templateID = tpl.ID
 	default:
 		return errInvalid("one of template_id or version_id is required")
 	}
@@ -168,6 +166,7 @@ func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign
 	}
 
 	c.Name = in.Name
+	c.TemplateID = templateID
 	c.VersionID = versionID
 	c.SenderID = idOf(in.SenderId)
 	c.DefaultLocale = deref(in.DefaultLocale)
@@ -183,7 +182,8 @@ func campaignOut(v *store.Campaign) Campaign {
 	}
 	return Campaign{
 		Id: uuidPtrOf(v.ID), Name: v.Name,
-		VersionId: uuidPtrOf(v.VersionID), SenderId: uuidOf(v.SenderID),
+		TemplateId: uuidPtrOf(v.TemplateID),
+		VersionId:  uuidPtrOf(v.VersionID), SenderId: uuidOf(v.SenderID),
 		DefaultLocale: strPtr(v.DefaultLocale), Vars: varsOut(v.Vars),
 		Status:     campaignStatusOut(v.Status),
 		ScheduleAt: timePtr(v.ScheduleAt), StartedAt: timePtr(v.StartedAt),

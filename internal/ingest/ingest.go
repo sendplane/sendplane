@@ -452,6 +452,10 @@ func (r *run) parse(line []byte) (store.Delivery, error) {
 func (r *run) fill(d *store.Delivery) {
 	d.TenantID = r.camp.TenantID
 	d.CampaignID = r.camp.ID
+	// Empty while the campaign was created from a template and has not started
+	// yet: start pins the published version on the campaign row and the sender
+	// falls back to it, so nothing here has to be rewritten later
+	// (control.StartCampaign, internal/sender.process).
 	d.VersionID = r.camp.VersionID
 	d.SenderID = r.camp.SenderID
 	d.Lane = store.LaneBulk

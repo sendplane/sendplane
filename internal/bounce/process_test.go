@@ -43,6 +43,20 @@ func newEnv(t *testing.T, suppression bool, opts ...func(*Options)) *fixtureEnv 
 	return &fixtureEnv{provider: p, st: st, proc: NewProcessor(o)}
 }
 
+// setRetainRaw flips TenantSettings.BounceRetainRaw for this tenant.
+func (e *fixtureEnv) setRetainRaw(t *testing.T, on bool) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := e.st.TenantSettings().Get(ctx)
+	if err != nil {
+		t.Fatalf("get settings: %v", err)
+	}
+	s.BounceRetainRaw = on
+	if err := e.st.TenantSettings().Update(ctx, s); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+}
+
 func (e *fixtureEnv) seed(t *testing.T, d store.Delivery) {
 	t.Helper()
 	if _, err := e.st.Deliveries().InsertBatch(context.Background(), []store.Delivery{d}); err != nil {
@@ -365,7 +379,10 @@ func TestHandleUnknownDeliveryIsRecorded(t *testing.T) {
 }
 
 func TestHandleRetainRaw(t *testing.T) {
-	e := newEnv(t, true, func(o *Options) { o.RetainRaw = true })
+	// Raw retention is the tenant's setting, not the processor's: one
+	// Processor serves every tenant the poller reads for (architecture 10).
+	e := newEnv(t, true)
+	e.setRetainRaw(t, true)
 	e.seed(t, sentDelivery(testDelivery, "nosuch@example.org"))
 	e.handle(t, "postfix_hard.eml")
 

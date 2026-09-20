@@ -47,6 +47,7 @@ const (
 	collTransport      = "transport"
 	collSender         = "sender"
 	collDomain         = "sending_domain"
+	collBounceMailbox  = "bounce_mailbox"
 	collProbeMailbox   = "probe_mailbox"
 	collProbeRun       = "probe_run"
 	collLayout         = "layout"
@@ -168,6 +169,30 @@ func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// knownTenantCollections are the configuration collections Tenants unions
+// over: the small, tenant-keyed ones (store.Provider.Tenants).
+var knownTenantCollections = []string{
+	collTenantSettings, collTransport, collSender, collDomain,
+	collBounceMailbox, collProbeMailbox, collLayout, collTemplate, collCampaign,
+}
+
+// Tenants lists every tenant with a settings row or a configuration row
+// (store.Provider).
+func (p *Provider) Tenants(ctx context.Context) ([]string, error) {
+	seen := map[string]bool{}
+	for _, coll := range knownTenantCollections {
+		if err := p.distinctTenants(ctx, seen, coll, bson.D{}); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // distinctTenants adds the tenants matching filter in one collection to seen,
 // skipping the system scope: it holds the leader lock, never work.
 func (p *Provider) distinctTenants(ctx context.Context, seen map[string]bool, coll string, filter bson.D) error {
@@ -217,6 +242,7 @@ func indexes() []index {
 		listIndex(collTransport),
 		listIndex(collSender),
 		listIndex(collDomain),
+		listIndex(collBounceMailbox),
 		listIndex(collProbeMailbox),
 		listIndex(collLayout),
 		listIndex(collTemplate),
@@ -234,6 +260,39 @@ func indexes() []index {
 			{Key: "tenant_id", Value: 1}, {Key: "template_id", Value: 1},
 			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
 		}},
+		{
+			coll: collBounceMailbox, name: "tenant_enabled",
+			keys: bson.D{
+				{Key: "tenant_id", Value: 1}, {Key: "created_at", Value: 1},
+				{Key: "_id", Value: 1},
+			},
+			opt: func(b *options.IndexOptionsBuilder) *options.IndexOptionsBuilder {
+				return b.SetPartialFilterExpression(bson.D{
+					{Key: "enabled", Value: true}})
+			},
+		},
+		{
+			coll: collProbeRun, name: "tenant_pending",
+			keys: bson.D{
+				{Key: "tenant_id", Value: 1}, {Key: "created_at", Value: 1},
+				{Key: "_id", Value: 1},
+			},
+			opt: func(b *options.IndexOptionsBuilder) *options.IndexOptionsBuilder {
+				return b.SetPartialFilterExpression(bson.D{
+					{Key: "pending", Value: true}})
+			},
+		},
+		{
+			coll: collSuppression, name: "tenant_expiry",
+			keys: bson.D{
+				{Key: "tenant_id", Value: 1}, {Key: "expires_at", Value: 1},
+			},
+			opt: func(b *options.IndexOptionsBuilder) *options.IndexOptionsBuilder {
+				// "never expires" is stored as null and is outside this index.
+				return b.SetPartialFilterExpression(bson.D{
+					{Key: "expires_at", Value: bson.D{{Key: "$type", Value: "date"}}}})
+			},
+		},
 		{coll: collProbeRun, name: "tenant_sender", keys: bson.D{
 			{Key: "tenant_id", Value: 1}, {Key: "sender_id", Value: 1},
 			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
@@ -360,8 +419,10 @@ type tenantStore struct {
 	senders        *table[store.Sender, senderDoc, *senderDoc]
 	domains        *table[store.SendingDomain, domainDoc, *domainDoc]
 	probeMailboxes *table[store.ProbeMailbox, probeMailboxDoc, *probeMailboxDoc]
-	layouts        *table[store.Layout, layoutDoc, *layoutDoc]
-	templates      *table[store.Template, templateDoc, *templateDoc]
+
+	bounceMailboxes *bounceMailboxRepo
+	layouts         *table[store.Layout, layoutDoc, *layoutDoc]
+	templates       *table[store.Template, templateDoc, *templateDoc]
 
 	versions  *versionRepo
 	probeRuns *probeRunRepo
@@ -387,6 +448,7 @@ func newTenantStore(p *Provider, tenant string) *tenantStore {
 	s.senders = newTable(s, collSender, senderMeta())
 	s.domains = newTable(s, collDomain, domainMeta())
 	s.probeMailboxes = newTable(s, collProbeMailbox, probeMailboxMeta())
+	s.bounceMailboxes = &bounceMailboxRepo{newTable(s, collBounceMailbox, bounceMailboxMeta())}
 	s.layouts = newTable(s, collLayout, layoutMeta())
 	s.templates = newTable(s, collTemplate, templateMeta())
 
@@ -420,6 +482,7 @@ func (s *tenantStore) TenantSettings() store.TenantSettingsRepo  { return s.sett
 func (s *tenantStore) Transports() store.TransportRepo           { return s.transports }
 func (s *tenantStore) Senders() store.SenderRepo                 { return s.senders }
 func (s *tenantStore) Domains() store.DomainRepo                 { return s.domains }
+func (s *tenantStore) BounceMailboxes() store.BounceMailboxRepo  { return s.bounceMailboxes }
 func (s *tenantStore) ProbeMailboxes() store.ProbeMailboxRepo    { return s.probeMailboxes }
 func (s *tenantStore) ProbeRuns() store.ProbeRunRepo             { return s.probeRuns }
 func (s *tenantStore) Layouts() store.LayoutRepo                 { return s.layouts }

@@ -117,19 +117,30 @@ var claimSort = bson.D{
 func (r *deliveryRepo) Claim(ctx context.Context, req store.ClaimRequest) ([]store.Delivery, error) {
 	filter := r.s.scope(
 		bson.E{Key: "lane", Value: int32(req.Lane)},
-		bson.E{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(claimable)}}},
 		bson.E{Key: "next_attempt_at", Value: bson.D{{Key: "$lte", Value: ts(req.Now)}}},
 	)
-	if req.CampaignIDs != nil {
-		noCampaign := bson.D{{Key: "campaign_id", Value: bson.D{{Key: "$exists", Value: false}}}}
-		if len(req.CampaignIDs) == 0 {
-			filter = append(filter, noCampaign...)
-		} else {
-			filter = append(filter, bson.E{Key: "$or", Value: bson.A{
-				noCampaign,
-				bson.D{{Key: "campaign_id", Value: bson.D{{Key: "$in", Value: req.CampaignIDs}}}},
-			}})
-		}
+	// Queued and deferred are always claimable; pending only for a campaign
+	// the caller named, which is what makes starting a campaign a one-row
+	// write (store.DeliveryRepo.Claim).
+	ready := bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(claimable)}}}}
+	noCampaign := bson.D{{Key: "campaign_id", Value: bson.D{{Key: "$exists", Value: false}}}}
+	switch {
+	case req.CampaignIDs == nil:
+		filter = append(filter, ready...)
+	case len(req.CampaignIDs) == 0:
+		filter = append(filter, ready...)
+		filter = append(filter, noCampaign...)
+	default:
+		inCampaigns := bson.D{{Key: "campaign_id", Value: bson.D{{Key: "$in", Value: req.CampaignIDs}}}}
+		// Two independent $or clauses, so they go under one $and: a bson.D
+		// with the key twice would silently keep only the last.
+		filter = append(filter, bson.E{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$or", Value: bson.A{noCampaign, inCampaigns}}},
+			bson.D{{Key: "$or", Value: bson.A{
+				ready,
+				and(bson.D{{Key: "status", Value: int32(store.DeliveryPending)}}, inCampaigns),
+			}}},
+		}})
 	}
 
 	ids, err := findIDs(ctx, r.coll(), filter, claimSort, req.Limit)
@@ -182,7 +193,7 @@ func (r *deliveryRepo) Complete(ctx context.Context, results []store.DeliveryRes
 		set := bson.D{
 			{Key: "status", Value: int32(res.NewStatus)},
 			{Key: "last_error_class", Value: int32(res.ErrorClass)},
-			{Key: "last_smtp_code", Value: int32(res.SMTPCode)},
+			{Key: "last_smtp_code", Value: i32(res.SMTPCode)},
 			{Key: "last_error", Value: lit(res.Error)},
 			{Key: "lease_owner", Value: lit("")},
 			{Key: "lease_until", Value: nil},
@@ -361,7 +372,7 @@ func (r *deliveryRepo) CountByStatus(ctx context.Context, campaignID string) (ma
 	}
 	out := make(map[store.DeliveryStatus]int64, len(rows))
 	for _, row := range rows {
-		out[store.DeliveryStatus(row.Status)] = row.N
+		out[store.DeliveryStatus(enum8(row.Status))] = row.N
 	}
 	return out, nil
 }

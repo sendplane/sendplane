@@ -39,7 +39,16 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 			return s.configResult(d, "campaign", err)
 		}
 	}
-	version, err := t.version(ctx, d.VersionID, started)
+	// A campaign delivery may carry no version of its own: a campaign created
+	// from a template is only bound to a published version at start
+	// (control.StartCampaign), and its rows were ingested while it was still a
+	// draft. The campaign row is the single source of truth, which is what
+	// keeps start a one-row write instead of a backfill over a million rows.
+	versionID := d.VersionID
+	if versionID == "" && campaign != nil {
+		versionID = campaign.VersionID
+	}
+	version, err := t.version(ctx, versionID, started)
 	if err != nil {
 		return s.configResult(d, "message version", err)
 	}
@@ -238,13 +247,25 @@ func (s *Sender) renderMessage(
 		Email: d.Email, EmailNorm: d.EmailNorm, Name: d.Name,
 		Locale: d.Locale, Vars: d.Vars,
 	}
-	dest, err := s.unsubscribeDest(ctx, t, settings, d, campaign, rc)
-	if err != nil {
-		return nil, unsubscribeLinks{}, err
-	}
-	key, hasKey := tracking.SelectKey(settings.Tracking.SigningKeys)
+	// A probe mail is a health check, not a message to a subscriber: it takes
+	// no part in statistics, tracking or unsubscribe (architecture 11.2,
+	// ADR-0012). Rewriting its links or pixelling it would file open and click
+	// events against a mailbox sendplane owns, and an unsubscribe header on it
+	// is meaningless.
+	tracked := d.Lane != store.LaneProbe
+
+	var unsub unsubscribeLinks
+	var key store.SigningKey
+	var hasKey bool
 	domain := settings.Tracking.Domain
-	unsub := s.unsubscribeLinks(settings, t.id, d.ID, dest, key, hasKey, domain)
+	if tracked {
+		dest, err := s.unsubscribeDest(ctx, t, settings, d, campaign, rc)
+		if err != nil {
+			return nil, unsubscribeLinks{}, err
+		}
+		key, hasKey = tracking.SelectKey(settings.Tracking.SigningKeys)
+		unsub = s.unsubscribeLinks(settings, t.id, d.ID, dest, key, hasKey, domain)
+	}
 
 	locales := []string{d.Locale}
 	if campaign != nil {
@@ -280,7 +301,7 @@ func (s *Sender) renderMessage(
 	}
 
 	html := out.HTML
-	if hasKey && domain != "" {
+	if tracked && hasKey && domain != "" {
 		if settings.Tracking.Clicks {
 			html, err = render.RewriteLinks(html, func(linkNo int, href string) string {
 				token := s.signer.Sign(key.KID, key.Secret, tracking.TokenPayload{
@@ -305,13 +326,28 @@ func (s *Sender) renderMessage(
 
 	return &host.OutboundMessage{
 		TenantID: t.id, DeliveryID: d.ID, CampaignID: d.CampaignID,
-		VersionID: d.VersionID, SenderID: d.SenderID, Lane: d.Lane,
+		VersionID: version.ID, SenderID: d.SenderID, Lane: d.Lane,
 		Recipient: rc,
 		FromName:  snd.FromName, From: snd.FromEmail, ReplyTo: snd.ReplyTo,
 		Subject: out.Subject, HTML: html, Text: out.Text,
-		Headers:        map[string]string{},
+		Headers:        outboundHeaders(d),
 		UnsubscribeURL: unsub.body,
 	}, unsub, nil
+}
+
+// outboundHeaders is the caller-supplied header set: what POST /messages put
+// on the delivery, plus the probe token on a lane=probe mail. Both go through
+// the same whitelist as a Hooks.BeforeSend header (validateOutbound), so a
+// name that is not allowed fails the delivery instead of reaching the wire.
+func outboundHeaders(d *store.Delivery) map[string]string {
+	out := make(map[string]string, len(d.Headers)+1)
+	for name, value := range d.Headers {
+		out[name] = value
+	}
+	if tok, ok := d.Vars["probe_token"].(string); ok && tok != "" {
+		out[HeaderProbe] = tok
+	}
+	return out
 }
 
 // unsubscribeLinks applies the mode of architecture 9.2.

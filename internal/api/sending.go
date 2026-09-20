@@ -710,8 +710,9 @@ func (s *server) GetProbeRun(ctx context.Context, req GetProbeRunRequestObject) 
 func probeRunOut(v *store.ProbeRun) ProbeRun {
 	out := ProbeRun{
 		Id: uuidOf(v.ID), SenderId: uuidOf(v.SenderID), MailboxId: uuidOf(v.MailboxID),
-		DeliveryId: uuidPtrOf(v.DeliveryID),
-		Status:     healthOut(v.Status), Reason: strPtr(v.Reason),
+		DeliveryId: uuidPtrOf(v.DeliveryID), GroupId: uuidPtrOf(v.GroupID),
+		Pending: ptr(v.Pending),
+		Status:  healthOut(v.Status), Reason: strPtr(v.Reason),
 		Delivered: ptr(v.Delivered), Folder: strPtr(v.Folder),
 		Spf: strPtr(v.SPF), Dkim: strPtr(v.DKIM), Dmarc: strPtr(v.DMARC),
 		DkimDomain: strPtr(v.DKIMDomain), DkimSelector: strPtr(v.DKIMSelector),

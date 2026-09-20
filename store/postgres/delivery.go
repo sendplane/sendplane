@@ -19,7 +19,7 @@ import (
 var deliveryColumns = []string{
 	"id", "tenant_id", "campaign_id", "version_id", "sender_id", "lane",
 	"priority", "status", "email", "email_norm", "name", "locale", "vars",
-	"unsubscribe_url", "attempt_count", "retry_gen",
+	"unsubscribe_url", "headers", "attempt_count", "retry_gen",
 	"next_attempt_at", "lease_owner", "lease_until",
 	"last_error_class", "last_smtp_code", "last_error", "message_id",
 	"sent_at", "finished_at",
@@ -47,10 +47,14 @@ func deliveryValues(d *store.Delivery) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	headers, err := jsonIn(d.Headers)
+	if err != nil {
+		return nil, err
+	}
 	return []any{
 		d.ID, d.TenantID, idIn(d.CampaignID), d.VersionID, d.SenderID,
 		i16(d.Lane), d.Priority, i16(d.Status), d.Email, d.EmailNorm, d.Name,
-		d.Locale, vars, d.UnsubscribeURL, d.AttemptCount, d.RetryGen,
+		d.Locale, vars, d.UnsubscribeURL, headers, d.AttemptCount, d.RetryGen,
 		tsInNN(d.NextAttemptAt), d.LeaseOwner, tsIn(d.LeaseUntil),
 		i16(d.LastErrorClass), d.LastSMTPCode, d.LastError, d.MessageID,
 		tsIn(d.SentAt), tsIn(d.FinishedAt),
@@ -62,14 +66,14 @@ func deliveryValues(d *store.Delivery) ([]any, error) {
 func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	var d store.Delivery
 	var campaign *string
-	var vars []byte
+	var vars, headers []byte
 	var lane, status, errClass int16
 	var nextAt time.Time
 	var leaseUntil, sentAt, finishedAt, opened, clicked, unsubscribed *time.Time
 	if err := r.Scan(
 		&d.ID, &d.TenantID, &campaign, &d.VersionID, &d.SenderID, &lane,
 		&d.Priority, &status, &d.Email, &d.EmailNorm, &d.Name, &d.Locale,
-		&vars, &d.UnsubscribeURL, &d.AttemptCount, &d.RetryGen,
+		&vars, &d.UnsubscribeURL, &headers, &d.AttemptCount, &d.RetryGen,
 		&nextAt, &d.LeaseOwner, &leaseUntil,
 		&errClass, &d.LastSMTPCode, &d.LastError, &d.MessageID,
 		&sentAt, &finishedAt, &opened, &clicked, &unsubscribed,
@@ -89,6 +93,9 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	d.FirstClickedAt = tsOut(clicked)
 	d.UnsubscribedAt = tsOut(unsubscribed)
 	d.CreatedAt, d.UpdatedAt = d.CreatedAt.UTC(), d.UpdatedAt.UTC()
+	if err := jsonOut(headers, &d.Headers); err != nil {
+		return nil, err
+	}
 	return &d, jsonOut(vars, &d.Vars)
 }
 
@@ -316,16 +323,21 @@ func (r *deliveryRepo) Claim(ctx context.Context, req store.ClaimRequest) ([]sto
 	a := &args{}
 	where := "tenant_id = " + a.add(r.tenant) +
 		" AND lane = " + a.add(i16(req.Lane)) +
-		" AND status IN (1, 3)" + // queued, deferred
 		" AND next_attempt_at <= " + a.add(tsInNN(req.Now))
+	// queued, deferred: always claimable. pending: only for a campaign the
+	// caller named, which is how a started campaign's million ingested rows
+	// become sendable without a bulk update (store.DeliveryRepo.Claim).
 	switch {
 	case req.CampaignIDs == nil:
-		// no campaign filter at all
+		// No campaign filter at all, so no pending row is claimable either.
+		where += " AND status IN (1, 3)"
 	case len(req.CampaignIDs) == 0:
-		where += " AND campaign_id IS NULL"
+		where += " AND status IN (1, 3) AND campaign_id IS NULL"
 	default:
-		where += " AND (campaign_id IS NULL OR campaign_id = ANY(" +
-			a.add(req.CampaignIDs) + "::text[]))"
+		ids := a.add(req.CampaignIDs)
+		where += " AND (campaign_id IS NULL OR campaign_id = ANY(" + ids + "::text[]))" +
+			" AND (status IN (1, 3)" +
+			" OR (status = 0 AND campaign_id = ANY(" + ids + "::text[])))"
 	}
 	q := "WITH c AS (SELECT id FROM delivery WHERE " + where +
 		" ORDER BY priority DESC, next_attempt_at, id LIMIT " +

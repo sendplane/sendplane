@@ -85,16 +85,22 @@ func TestPartialLimitsKeepDefaults(t *testing.T) {
 // copies: a sendplane.Hooks must be usable wherever a host.Hooks is, or the
 // internal packages and the host would be talking about different types.
 func TestPublicTypesAliasHost(t *testing.T) {
-	var (
-		_ host.Hooks            = sendplane.Hooks{}
-		_ sendplane.Hooks       = host.Hooks{}
-		_ host.Limits           = sendplane.Limits{}
-		_ host.Principal        = sendplane.Principal{}
-		_ host.Action           = sendplane.ActionCampaignSend
-		_ host.Resource         = sendplane.Resource{}
-		_ host.Metrics          = sendplane.NopMetrics{}
-		_ host.RecipientContext = sendplane.RecipientContext{}
-	)
+	// These are identity assertions, not assignability assertions: two
+	// distinct structs with identical fields are assignable to each other, and
+	// "distinct but identical" is exactly the regression this test exists to
+	// catch. sameType can only compile when both arguments really are one
+	// type, because one type parameter cannot be two.
+	sameType(host.Hooks{}, sendplane.Hooks{})
+	sameType(host.Limits{}, sendplane.Limits{})
+	sameType(host.Principal{}, sendplane.Principal{})
+	sameType(host.Resource{}, sendplane.Resource{})
+	sameType(host.RecipientContext{}, sendplane.RecipientContext{})
+	sameType(host.ActionCampaignSend, sendplane.ActionCampaignSend)
+
+	// NopMetrics is a struct and Metrics an interface, so this one is an
+	// implements-check rather than an identity check.
+	var _ host.Metrics = sendplane.NopMetrics{}
+
 	if !errors.Is(sendplane.ErrSkip, host.ErrSkip) {
 		t.Error("sendplane.ErrSkip is not host.ErrSkip")
 	}
@@ -108,6 +114,11 @@ func TestPublicTypesAliasHost(t *testing.T) {
 		t.Error("sendplane.DefaultLimits differs from host.DefaultLimits")
 	}
 }
+
+// sameType compiles only when a and b have exactly the same type. It takes
+// its arguments by value and ignores them: the assertion is the instantiation
+// itself, which happens at compile time.
+func sameType[T any](_, _ T) {}
 
 // RunControl and RunSender block until the context is done. A cancelled
 // context therefore has to come straight back out, which is also what a
@@ -161,13 +172,26 @@ func TestRunSenderStopsWithTheContext(t *testing.T) {
 	}
 }
 
-func TestBounceIsNotImplementedYet(t *testing.T) {
+// RunBounce polls every tenant's enabled bounce mailboxes and, like the other
+// role entry points, returns nil on a cancelled context. A provider with no
+// bounce mailbox at all is the interesting case: the poller must come up and
+// shut down cleanly rather than treating "nothing to poll" as an error.
+func TestRunBounceReturnsOnACancelledContext(t *testing.T) {
 	s, err := sendplane.New(sendplane.Options{Store: memstore.New(), Auth: staticAuth{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if err := s.RunBounce(context.Background()); !errors.Is(err, sendplane.ErrNotImplemented) {
-		t.Errorf("RunBounce = %v, want ErrNotImplemented", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.RunBounce(ctx, sendplane.BounceConfig{WorkerID: "b1"}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunBounce on a cancelled context = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunBounce did not return on a cancelled context")
 	}
 }
 

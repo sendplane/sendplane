@@ -71,9 +71,9 @@ func transportMeta() meta[store.Transport, transportDoc] {
 			return &transportDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
-				Name: v.Name, Host: v.Host, Port: int32(v.Port), TLS: string(v.TLS),
+				Name: v.Name, Host: v.Host, Port: i32(v.Port), TLS: string(v.TLS),
 				Username: v.Username, Password: v.Password,
-				MaxConns: int32(v.MaxConns), RatePerSecond: v.RatePerSecond,
+				MaxConns: i32(v.MaxConns), RatePerSecond: v.RatePerSecond,
 				DomainRatePerSecond: v.DomainRatePerSecond,
 				Status:              int32(v.Status), StatusReason: v.StatusReason,
 				StatusChangedAt: encTime(v.StatusChangedAt), StatusUntil: encTime(v.StatusUntil),
@@ -86,7 +86,7 @@ func transportMeta() meta[store.Transport, transportDoc] {
 				Username: d.Username, Password: d.Password,
 				MaxConns: int(d.MaxConns), RatePerSecond: d.RatePerSecond,
 				DomainRatePerSecond: d.DomainRatePerSecond,
-				Status:              store.TransportStatus(d.Status), StatusReason: d.StatusReason,
+				Status:              store.TransportStatus(enum8(d.Status)), StatusReason: d.StatusReason,
 				StatusChangedAt: decTime(d.StatusChangedAt), StatusUntil: decTime(d.StatusUntil),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
@@ -132,7 +132,7 @@ func senderMeta() meta[store.Sender, senderDoc] {
 				ID: d.ID, TenantID: d.TenantID, Name: d.Name,
 				FromName: d.FromName, FromEmail: d.FromEmail, ReplyTo: d.ReplyTo,
 				TransportID: d.TransportID, DomainID: d.DomainID,
-				Health: store.HealthStatus(d.Health), HealthReason: d.HealthReason,
+				Health: store.HealthStatus(enum8(d.Health)), HealthReason: d.HealthReason,
 				HealthCheckedAt: decTime(d.HealthCheckedAt),
 				Version:         d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
@@ -180,9 +180,56 @@ func domainMeta() meta[store.SendingDomain, domainDoc] {
 				DKIMSelector: d.DKIMSelector, DKIMPrivateKey: d.DKIMPrivateKey,
 				ReturnPathDomain: d.ReturnPathDomain, ExpectedSPF: d.ExpectedSPF,
 				OutboundIPs: d.OutboundIPs,
-				Health:      store.HealthStatus(d.Health), HealthReason: d.HealthReason,
+				Health:      store.HealthStatus(enum8(d.Health)), HealthReason: d.HealthReason,
 				HealthCheckedAt: decTime(d.HealthCheckedAt),
 				Version:         d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
+			}
+		},
+	}
+}
+
+// --- bounce mailbox ----------------------------------------------------
+
+type bounceMailboxDoc struct {
+	Base         `bson:",inline"`
+	Name         string `bson:"name"`
+	Address      string `bson:"address"`
+	Protocol     string `bson:"protocol"`
+	Host         string `bson:"host"`
+	Port         int32  `bson:"port"`
+	TLS          string `bson:"tls"`
+	Username     string `bson:"username"`
+	Password     []byte `bson:"password"`
+	Folder       string `bson:"folder"`
+	AfterProcess string `bson:"after_process"`
+	Enabled      bool   `bson:"enabled"`
+}
+
+func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
+	return meta[store.BounceMailbox, bounceMailboxDoc]{
+		kind:    "bounce mailbox",
+		id:      func(v *store.BounceMailbox) *string { return &v.ID },
+		tenant:  func(v *store.BounceMailbox) *string { return &v.TenantID },
+		version: func(v *store.BounceMailbox) *int64 { return &v.Version },
+		created: func(v *store.BounceMailbox) *time.Time { return &v.CreatedAt },
+		updated: func(v *store.BounceMailbox) *time.Time { return &v.UpdatedAt },
+		enc: func(v *store.BounceMailbox) *bounceMailboxDoc {
+			return &bounceMailboxDoc{
+				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+				Name: v.Name, Address: v.Address, Protocol: v.Protocol,
+				Host: v.Host, Port: i32(v.Port), TLS: string(v.TLS),
+				Username: v.Username, Password: v.Password,
+				Folder: v.Folder, AfterProcess: v.AfterProcess, Enabled: v.Enabled,
+			}
+		},
+		dec: func(d *bounceMailboxDoc) *store.BounceMailbox {
+			return &store.BounceMailbox{
+				ID: d.ID, TenantID: d.TenantID, Name: d.Name, Address: d.Address,
+				Protocol: d.Protocol, Host: d.Host, Port: int(d.Port),
+				TLS: store.TLSMode(d.TLS), Username: d.Username, Password: d.Password,
+				Folder: d.Folder, AfterProcess: d.AfterProcess, Enabled: d.Enabled,
+				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
 		},
 	}
@@ -217,7 +264,7 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 			return &probeMailboxDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
-				Name: v.Name, Address: v.Address, Host: v.Host, Port: int32(v.Port),
+				Name: v.Name, Address: v.Address, Host: v.Host, Port: i32(v.Port),
 				TLS: string(v.TLS), Username: v.Username, Password: v.Password,
 				InboxFolder: v.InboxFolder, SpamFolder: v.SpamFolder,
 				AuthServID: v.AuthServID, Enabled: v.Enabled,
@@ -366,6 +413,8 @@ type probeRunDoc struct {
 	SenderID     string     `bson:"sender_id"`
 	MailboxID    string     `bson:"mailbox_id"`
 	DeliveryID   string     `bson:"delivery_id"`
+	GroupID      string     `bson:"group_id"`
+	Pending      bool       `bson:"pending"`
 	Status       int32      `bson:"status"`
 	Reason       string     `bson:"reason"`
 	Delivered    bool       `bson:"delivered"`
@@ -397,6 +446,7 @@ func probeRunMeta() meta[store.ProbeRun, probeRunDoc] {
 			return &probeRunDoc{
 				Base:     Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ts(v.CreatedAt)},
 				SenderID: v.SenderID, MailboxID: v.MailboxID, DeliveryID: v.DeliveryID,
+				GroupID: v.GroupID, Pending: v.Pending,
 				Status: int32(v.Status), Reason: v.Reason, Delivered: v.Delivered,
 				Folder: v.Folder, Latency: int64(v.Latency),
 				SPF: v.SPF, DKIM: v.DKIM, DMARC: v.DMARC,
@@ -410,7 +460,8 @@ func probeRunMeta() meta[store.ProbeRun, probeRunDoc] {
 			return &store.ProbeRun{
 				ID: d.ID, TenantID: d.TenantID, SenderID: d.SenderID,
 				MailboxID: d.MailboxID, DeliveryID: d.DeliveryID,
-				Status: store.HealthStatus(d.Status), Reason: d.Reason,
+				GroupID: d.GroupID, Pending: d.Pending,
+				Status: store.HealthStatus(enum8(d.Status)), Reason: d.Reason,
 				Delivered: d.Delivered, Folder: d.Folder, Latency: time.Duration(d.Latency),
 				SPF: d.SPF, DKIM: d.DKIM, DMARC: d.DMARC,
 				DKIMDomain: d.DKIMDomain, DKIMSelector: d.DKIMSelector, DMARCPolicy: d.DMARCPolicy,
@@ -453,6 +504,7 @@ func decStats(d statsDoc) store.CampaignStats {
 type campaignDoc struct {
 	Base          `bson:",inline"`
 	Name          string         `bson:"name"`
+	TemplateID    string         `bson:"template_id"`
 	VersionID     string         `bson:"version_id"`
 	SenderID      string         `bson:"sender_id"`
 	DefaultLocale string         `bson:"default_locale"`
@@ -476,7 +528,8 @@ func campaignMeta() meta[store.Campaign, campaignDoc] {
 			return &campaignDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
-				Name: v.Name, VersionID: v.VersionID, SenderID: v.SenderID,
+				Name: v.Name, TemplateID: v.TemplateID, VersionID: v.VersionID,
+				SenderID:      v.SenderID,
 				DefaultLocale: v.DefaultLocale, Vars: v.Vars, Status: int32(v.Status),
 				ScheduleAt: encTime(v.ScheduleAt), StartedAt: encTime(v.StartedAt),
 				CompletedAt: encTime(v.CompletedAt), Stats: encStats(v.Stats),
@@ -485,9 +538,9 @@ func campaignMeta() meta[store.Campaign, campaignDoc] {
 		dec: func(d *campaignDoc) *store.Campaign {
 			return &store.Campaign{
 				ID: d.ID, TenantID: d.TenantID, Name: d.Name,
-				VersionID: d.VersionID, SenderID: d.SenderID,
+				TemplateID: d.TemplateID, VersionID: d.VersionID, SenderID: d.SenderID,
 				DefaultLocale: d.DefaultLocale, Vars: d.Vars,
-				Status:     store.CampaignStatus(d.Status),
+				Status:     store.CampaignStatus(enum8(d.Status)),
 				ScheduleAt: decTime(d.ScheduleAt), StartedAt: decTime(d.StartedAt),
 				CompletedAt: decTime(d.CompletedAt), Stats: decStats(d.Stats),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
@@ -531,7 +584,7 @@ func bounceMeta() meta[store.BounceEvent, bounceDoc] {
 		dec: func(d *bounceDoc) *store.BounceEvent {
 			return &store.BounceEvent{
 				ID: d.ID, TenantID: d.TenantID, DeliveryID: d.DeliveryID,
-				Type: store.BounceType(d.Type), Source: store.BounceSource(d.Source),
+				Type: store.BounceType(enum8(d.Type)), Source: store.BounceSource(d.Source),
 				Verified: d.Verified, Recipient: d.Recipient, EmailNorm: d.EmailNorm,
 				SMTPStatus: d.SMTPStatus, DiagnosticCode: d.DiagnosticCode,
 				MessageID: d.MessageID, Raw: decRaw(d.Raw),
@@ -562,6 +615,7 @@ type settingsDoc struct {
 	MaxAttempts            int32             `bson:"retry_max_attempts"`
 	RetentionDays          int32             `bson:"retention_days"`
 	SuppressionEnabled     bool              `bson:"suppression_enabled"`
+	BounceRetainRaw        bool              `bson:"bounce_retain_raw"`
 	UnsubscribeMode        string            `bson:"unsubscribe_mode"`
 	UnsubscribeURLTemplate string            `bson:"unsubscribe_url_template"`
 	UnsubscribeOneClick    bool              `bson:"unsubscribe_one_click"`
@@ -581,8 +635,9 @@ func encSettings(v *store.TenantSettings) *settingsDoc {
 	return &settingsDoc{
 		Base: Base{ID: v.TenantID, TenantID: v.TenantID, Version: v.Version,
 			CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
-		BackoffNS: backoff, MaxAttempts: int32(v.Retry.MaxAttempts),
-		RetentionDays: int32(v.RetentionDays), SuppressionEnabled: v.SuppressionEnabled,
+		BackoffNS: backoff, MaxAttempts: i32(v.Retry.MaxAttempts),
+		RetentionDays: i32(v.RetentionDays), SuppressionEnabled: v.SuppressionEnabled,
+		BounceRetainRaw:        v.BounceRetainRaw,
 		UnsubscribeMode:        string(v.UnsubscribeMode),
 		UnsubscribeURLTemplate: v.UnsubscribeURLTemplate,
 		UnsubscribeOneClick:    v.UnsubscribeOneClick,
@@ -608,6 +663,7 @@ func decSettings(d *settingsDoc) *store.TenantSettings {
 		Retry:                  store.RetryPolicy{Backoff: backoff, MaxAttempts: int(d.MaxAttempts)},
 		RetentionDays:          int(d.RetentionDays),
 		SuppressionEnabled:     d.SuppressionEnabled,
+		BounceRetainRaw:        d.BounceRetainRaw,
 		UnsubscribeMode:        store.UnsubscribeMode(d.UnsubscribeMode),
 		UnsubscribeURLTemplate: d.UnsubscribeURLTemplate,
 		UnsubscribeOneClick:    d.UnsubscribeOneClick,
@@ -740,33 +796,34 @@ type deliveryDoc struct {
 	// CampaignID is omitted entirely for transactional and probe mail, which
 	// is what keeps those rows out of the unique (campaign_id, email_norm)
 	// partial index.
-	CampaignID     string         `bson:"campaign_id,omitempty"`
-	VersionID      string         `bson:"version_id"`
-	SenderID       string         `bson:"sender_id"`
-	Lane           int32          `bson:"lane"`
-	Priority       int32          `bson:"priority"`
-	Status         int32          `bson:"status"`
-	Email          string         `bson:"email"`
-	EmailNorm      string         `bson:"email_norm"`
-	Name           string         `bson:"name"`
-	Locale         string         `bson:"locale"`
-	Vars           map[string]any `bson:"vars"`
-	UnsubscribeURL string         `bson:"unsubscribe_url"`
-	AttemptCount   int32          `bson:"attempt_count"`
-	RetryGen       int32          `bson:"retry_gen"`
-	NextAttemptAt  *time.Time     `bson:"next_attempt_at"`
-	LeaseOwner     string         `bson:"lease_owner"`
-	LeaseUntil     *time.Time     `bson:"lease_until"`
-	ClaimToken     string         `bson:"claim_token"`
-	LastErrorClass int32          `bson:"last_error_class"`
-	LastSMTPCode   int32          `bson:"last_smtp_code"`
-	LastError      string         `bson:"last_error"`
-	MessageID      string         `bson:"message_id"`
-	SentAt         *time.Time     `bson:"sent_at"`
-	FinishedAt     *time.Time     `bson:"finished_at"`
-	FirstOpenedAt  *time.Time     `bson:"first_opened_at"`
-	FirstClickedAt *time.Time     `bson:"first_clicked_at"`
-	UnsubscribedAt *time.Time     `bson:"unsubscribed_at"`
+	CampaignID     string            `bson:"campaign_id,omitempty"`
+	VersionID      string            `bson:"version_id"`
+	SenderID       string            `bson:"sender_id"`
+	Lane           int32             `bson:"lane"`
+	Priority       int32             `bson:"priority"`
+	Status         int32             `bson:"status"`
+	Email          string            `bson:"email"`
+	EmailNorm      string            `bson:"email_norm"`
+	Name           string            `bson:"name"`
+	Locale         string            `bson:"locale"`
+	Vars           map[string]any    `bson:"vars"`
+	UnsubscribeURL string            `bson:"unsubscribe_url"`
+	Headers        map[string]string `bson:"headers"`
+	AttemptCount   int32             `bson:"attempt_count"`
+	RetryGen       int32             `bson:"retry_gen"`
+	NextAttemptAt  *time.Time        `bson:"next_attempt_at"`
+	LeaseOwner     string            `bson:"lease_owner"`
+	LeaseUntil     *time.Time        `bson:"lease_until"`
+	ClaimToken     string            `bson:"claim_token"`
+	LastErrorClass int32             `bson:"last_error_class"`
+	LastSMTPCode   int32             `bson:"last_smtp_code"`
+	LastError      string            `bson:"last_error"`
+	MessageID      string            `bson:"message_id"`
+	SentAt         *time.Time        `bson:"sent_at"`
+	FinishedAt     *time.Time        `bson:"finished_at"`
+	FirstOpenedAt  *time.Time        `bson:"first_opened_at"`
+	FirstClickedAt *time.Time        `bson:"first_clicked_at"`
+	UnsubscribedAt *time.Time        `bson:"unsubscribed_at"`
 }
 
 func encDelivery(v *store.Delivery) *deliveryDoc {
@@ -774,13 +831,13 @@ func encDelivery(v *store.Delivery) *deliveryDoc {
 		Base: Base{ID: v.ID, TenantID: v.TenantID,
 			CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 		CampaignID: v.CampaignID, VersionID: v.VersionID, SenderID: v.SenderID,
-		Lane: int32(v.Lane), Priority: int32(v.Priority), Status: int32(v.Status),
+		Lane: int32(v.Lane), Priority: i32(v.Priority), Status: int32(v.Status),
 		Email: v.Email, EmailNorm: v.EmailNorm, Name: v.Name, Locale: v.Locale,
-		Vars: v.Vars, UnsubscribeURL: v.UnsubscribeURL,
-		AttemptCount: int32(v.AttemptCount), RetryGen: int32(v.RetryGen),
+		Vars: v.Vars, UnsubscribeURL: v.UnsubscribeURL, Headers: v.Headers,
+		AttemptCount: i32(v.AttemptCount), RetryGen: i32(v.RetryGen),
 		NextAttemptAt: encTime(v.NextAttemptAt),
 		LeaseOwner:    v.LeaseOwner, LeaseUntil: encTime(v.LeaseUntil),
-		LastErrorClass: int32(v.LastErrorClass), LastSMTPCode: int32(v.LastSMTPCode),
+		LastErrorClass: int32(v.LastErrorClass), LastSMTPCode: i32(v.LastSMTPCode),
 		LastError: v.LastError, MessageID: v.MessageID,
 		SentAt: encTime(v.SentAt), FinishedAt: encTime(v.FinishedAt),
 		FirstOpenedAt: encTime(v.FirstOpenedAt), FirstClickedAt: encTime(v.FirstClickedAt),
@@ -792,14 +849,14 @@ func decDelivery(d *deliveryDoc) *store.Delivery {
 	return &store.Delivery{
 		ID: d.ID, TenantID: d.TenantID, CampaignID: d.CampaignID,
 		VersionID: d.VersionID, SenderID: d.SenderID,
-		Lane: store.Lane(d.Lane), Priority: int(d.Priority),
-		Status: store.DeliveryStatus(d.Status),
+		Lane: store.Lane(enum8(d.Lane)), Priority: int(d.Priority),
+		Status: store.DeliveryStatus(enum8(d.Status)),
 		Email:  d.Email, EmailNorm: d.EmailNorm, Name: d.Name, Locale: d.Locale,
-		Vars: d.Vars, UnsubscribeURL: d.UnsubscribeURL,
+		Vars: d.Vars, UnsubscribeURL: d.UnsubscribeURL, Headers: d.Headers,
 		AttemptCount: int(d.AttemptCount), RetryGen: int(d.RetryGen),
 		NextAttemptAt: decTime(d.NextAttemptAt),
 		LeaseOwner:    d.LeaseOwner, LeaseUntil: decTime(d.LeaseUntil),
-		LastErrorClass: store.ErrorClass(d.LastErrorClass), LastSMTPCode: int(d.LastSMTPCode),
+		LastErrorClass: store.ErrorClass(enum8(d.LastErrorClass)), LastSMTPCode: int(d.LastSMTPCode),
 		LastError: d.LastError, MessageID: d.MessageID,
 		SentAt: decTime(d.SentAt), FinishedAt: decTime(d.FinishedAt),
 		FirstOpenedAt: decTime(d.FirstOpenedAt), FirstClickedAt: decTime(d.FirstClickedAt),
@@ -827,10 +884,10 @@ type attemptDoc struct {
 func encAttempt(v *store.DeliveryAttempt) *attemptDoc {
 	return &attemptDoc{
 		Base:       Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ts(v.CreatedAt)},
-		DeliveryID: v.DeliveryID, AttemptNo: int32(v.AttemptNo), RetryGen: int32(v.RetryGen),
+		DeliveryID: v.DeliveryID, AttemptNo: i32(v.AttemptNo), RetryGen: i32(v.RetryGen),
 		TransportID: v.TransportID,
 		StartedAt:   encTime(v.StartedAt), FinishedAt: encTime(v.FinishedAt),
-		SMTPCode: int32(v.SMTPCode), EnhancedCode: v.EnhancedCode,
+		SMTPCode: i32(v.SMTPCode), EnhancedCode: v.EnhancedCode,
 		ErrorClass: int32(v.ErrorClass), Error: v.Error,
 	}
 }
@@ -841,7 +898,7 @@ func decAttempt(d *attemptDoc) *store.DeliveryAttempt {
 		AttemptNo: int(d.AttemptNo), RetryGen: int(d.RetryGen), TransportID: d.TransportID,
 		StartedAt: decTime(d.StartedAt), FinishedAt: decTime(d.FinishedAt),
 		SMTPCode: int(d.SMTPCode), EnhancedCode: d.EnhancedCode,
-		ErrorClass: store.ErrorClass(d.ErrorClass), Error: d.Error,
+		ErrorClass: store.ErrorClass(enum8(d.ErrorClass)), Error: d.Error,
 		CreatedAt: decTime(&d.CreatedAt),
 	}
 }

@@ -516,7 +516,9 @@ IP는 기본 저장하지 않고(테넌트 설정으로 해시 저장), UA는 �
 - 상관관계 근거 3중화: ① VERP `Return-Path: bounce+{deliveryID}.{hmac8}@{bounce_domain}` ② 헤더 `X-Sendplane-ID: {tenant}/{deliveryID}` ③ `Message-ID: <{deliveryID}@{domain}>`. DSN에 원본 헤더가 없어도 ①로, 릴레이가 envelope sender를 덮어써도 ②③로 찾습니다. HMAC으로 위조 바운스 주입 차단.
 - 파서: `message/delivery-status`(RFC 3464) → Action/Status/Diagnostic-Code, `message/feedback-report`(RFC 5965) → complaint, 그 외 휴리스틱(제목/본문 패턴, Final-Recipient) → 신뢰도 낮음으로 표시.
 - 결과: `BounceEvent` 저장(raw 보존은 테넌트 설정) → delivery `bounced|complained` 전이(이미 `sent`인 경우만) → suppression 삽입(테넌트 설정) → 이벤트 발행.
-- 폴러: `emersion/go-imap/v2`(IDLE 지원 시 사용, 아니면 주기 폴링), POP3는 `knadh/go-pop3` 계열. 처리 후 삭제/이동 정책 설정. 메일박스 하나당 폴러 하나(스토어 lock으로 보장) → 여러 레플리카가 같은 메일을 이중 처리하지 않음.
+- 폴러: `emersion/go-imap/v2`(IDLE 지원 시 사용, 아니면 주기 폴링), POP3는 직접 구현(`internal/mailbox/pop3.go`). 처리 후 삭제/이동 정책 설정. 메일박스 하나당 폴러 하나(스토어 lock으로 보장) → 여러 레플리카가 같은 메일을 이중 처리하지 않음.
+- 메일박스는 테넌트 리소스입니다: `store.BounceMailbox`(프로토콜·호스트·자격증명·폴더·`after_process`·`enabled`) + `/api/v1/bounce-mailboxes`. 폴러는 `Provider.Tenants`(활성 여부와 무관한 전체 테넌트)를 돌며 각 테넌트의 enabled 메일박스를 읽습니다 — 바운스는 캠페인이 끝나고 한참 뒤에 옵니다.
+- raw 보존은 `TenantSettings.BounceRetainRaw`(기본 off), suppression 보존기간은 `SuppressionRepo.DeleteBefore`로 control의 retention 루프가 정리합니다.
 - 프로바이더 webhook(SES/SendGrid 등)은 같은 `BounceEvent` 경로로 들어오는 어댑터로 후순위 추가.
 
 **suppression에 대한 결정**: "email DB 없음" 원칙과 약간 긴장 관계에 있지만, hard bounce/complaint 주소로의 재발송은 도메인 평판을 직접 해치므로 **테넌트 설정으로 켜고 끌 수 있는 내장 suppression(기본 on)**을 둡니다. 호스트가 자체 관리하려면 끄고 `BeforeSend` 훅(또는 API 호출 전 필터링)을 쓰면 됩니다. 저장 항목은 `email_norm, reason, source_delivery_id, created_at, expires_at`뿐이며 보존기간이 있습니다(ADR-0008).
@@ -550,7 +552,9 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
   DNS 정적 검사(§11.3) 병행 → ProbeRun 저장 → 요약 상태 계산 → 변화 시 sender.health_changed 이벤트
 ```
 
-- 프로브 delivery는 `lane=probe`로 캠페인 통계·트래킹·suppression에서 제외됩니다.
+- 프로브 delivery는 `lane=probe`로 캠페인 통계·트래킹(오픈 픽셀·링크 재작성·수신거부)·suppression에서 제외됩니다. `X-Sendplane-Probe`는 `Delivery.Vars["probe_token"]`에서 나옵니다.
+- 두 루프(트리거 5분, 회수 1분)는 control 리더에만 등록됩니다(`control.WithLoop`). 메일박스 접속은 루트가 `internal/mailbox`를 `probe.MailboxOpener`로 감싸고, 받은편지함과 스팸함에 각각 커넥션을 엽니다.
+- 프로세스 단위 설정은 `Options.Probe`(`host.ProbeConfig`: `Enabled`, `HMACKey`, `Nameservers`, `Interval`, `Timeout`)입니다. 꺼져 있으면 `POST /senders/{id}/probe`는 501입니다.
 - 여러 메일박스 결과의 "최악 값"이 요약 상태이고 상세는 메일박스별로 표시합니다.
 - 프로브 발송이 transport 상태(§8.3)도 갱신하므로 별도 SMTP 연결 테스트 버튼은 "프로브 즉시 실행"으로 대체합니다.
 

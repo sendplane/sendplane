@@ -210,13 +210,12 @@ func toString(v any) string {
 // Prepared.Render call, so its mutable warning list is never shared between
 // goroutines.
 type i18nState struct {
-	bundle    store.I18nBundle
-	sum       string   // bundle checksum, part of the translation cache key
-	chain     []string // locale fallback chain, most specific first
-	depth     int
-	warnings  []Warning
-	warned    map[Warning]struct{}
-	escapeOut bool
+	bundle   store.I18nBundle
+	sum      string   // bundle checksum, part of the translation cache key
+	chain    []string // locale fallback chain, most specific first
+	depth    int
+	warnings []Warning
+	warned   map[Warning]struct{}
 }
 
 func newI18nState(bundle store.I18nBundle, sum string, chain []string) *i18nState {

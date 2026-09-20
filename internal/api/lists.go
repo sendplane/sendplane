@@ -219,7 +219,7 @@ func (s *server) GetEvent(ctx context.Context, req GetEventRequestObject) (GetEv
 	if err != nil {
 		return nil, err
 	}
-	ev, err := findOutboxEvent(ctx, t, req.EventId.String())
+	ev, err := t.st.Outbox().Get(ctx, req.EventId.String())
 	if err != nil {
 		return nil, err
 	}
@@ -233,51 +233,24 @@ func (s *server) ReplayEvent(ctx context.Context, req ReplayEventRequestObject) 
 	if err != nil {
 		return nil, err
 	}
-	ev, err := findOutboxEvent(ctx, t, req.EventId.String())
+	ev, err := t.st.Outbox().Get(ctx, req.EventId.String())
 	if err != nil {
 		return nil, err
 	}
 	if ev.Status == store.OutboxDelivered {
 		return nil, errConflict(ErrorCodeInvalidState, "event %s was already delivered", ev.ID)
 	}
-	now := s.now()
-	// OutboxRepo has no "reset" verb. MarkFailed with a due timestamp is the
-	// one transition that puts a row back to pending; it also increments
-	// Attempts, so a replayed event has one attempt left less than a fresh
-	// one. That matters only if the sink fails again immediately.
-	if err := t.st.Outbox().MarkFailed(ctx, ev.ID, now, ""); err != nil {
+	// Reset, not MarkFailed: a replay is what an operator does after fixing
+	// the cause, so the event gets a full attempt budget again rather than
+	// one fewer than a fresh one.
+	if err := t.st.Outbox().Reset(ctx, ev.ID, s.now()); err != nil {
 		return nil, err
 	}
-	ev, err = findOutboxEvent(ctx, t, ev.ID)
+	ev, err = t.st.Outbox().Get(ctx, ev.ID)
 	if err != nil {
 		return nil, err
 	}
 	return ReplayEvent202JSONResponse(outboxOut(ev)), nil
-}
-
-// maxOutboxScanPages bounds the walk findOutboxEvent does. OutboxRepo has no
-// Get(id), so a single event is found by paging the listing; the bound keeps a
-// lookup on a huge queue from turning into an unbounded scan.
-const maxOutboxScanPages = 200
-
-func findOutboxEvent(ctx context.Context, t *tenant, id string) (*store.OutboxEvent, error) {
-	page := store.Page{Limit: store.MaxPageLimit}
-	for i := 0; i < maxOutboxScanPages; i++ {
-		res, err := t.st.Outbox().List(ctx, "", page)
-		if err != nil {
-			return nil, err
-		}
-		for j := range res.Items {
-			if res.Items[j].ID == id {
-				return &res.Items[j], nil
-			}
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		page.Cursor = res.NextCursor
-	}
-	return nil, errNotFound("event", id)
 }
 
 func outboxStatusIn(v OutboxStatus) (store.OutboxStatus, error) {

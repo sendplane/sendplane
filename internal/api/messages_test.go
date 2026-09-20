@@ -117,6 +117,44 @@ func TestSendMessageSuppressesKnownAddresses(t *testing.T) {
 	}
 }
 
+// Headers are stored on the delivery and merged into the outbound message by
+// the sender, through the same whitelist a Hooks.BeforeSend header passes.
+func TestSendMessageHeaders(t *testing.T) {
+	e := newEnv(t)
+	snd, version := e.publishedTemplate()
+
+	got := decodeInto[MessageResult](t, e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
+		SenderId: *snd.Id, VersionId: &version.Id,
+		To:      []MessageRecipient{{Email: "a@example.com"}},
+		Headers: &map[string]string{"X-Campaign-Tag": "spring", "In-Reply-To": "<x@example.com>"},
+	}), http.StatusAccepted)
+
+	d, err := e.st.Deliveries().Get(t.Context(), got.Deliveries[0].DeliveryId.String())
+	if err != nil {
+		t.Fatalf("store get: %v", err)
+	}
+	if d.Headers["X-Campaign-Tag"] != "spring" || d.Headers["In-Reply-To"] != "<x@example.com>" {
+		t.Fatalf("stored headers = %v, want both of them", d.Headers)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"not on the whitelist", map[string]string{"Bcc": "spy@example.com"}},
+		{"set by sendplane", map[string]string{"Message-ID": "<mine@example.com>"}},
+		{"header injection", map[string]string{"X-Tag": "a\r\nBcc: spy@example.com"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
+				SenderId: *snd.Id, VersionId: &version.Id,
+				To: []MessageRecipient{{Email: "b@example.com"}}, Headers: &tc.headers,
+			})
+			decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
+		})
+	}
+}
+
 func TestSendMessageValidation(t *testing.T) {
 	e := newEnv(t)
 	snd, version := e.publishedTemplate()

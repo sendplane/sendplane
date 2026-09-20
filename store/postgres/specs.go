@@ -132,6 +132,67 @@ var domainSpec = spec[store.SendingDomain]{
 	updated:  func(v *store.SendingDomain) *time.Time { return &v.UpdatedAt },
 }
 
+// --- bounce mailbox ----------------------------------------------------
+
+var bounceMailboxSpec = spec[store.BounceMailbox]{
+	table: "bounce_mailbox",
+	cols: []string{
+		"name", "address", "protocol", "host", "port", "tls", "username",
+		"password", "folder", "after_process", "enabled",
+	},
+	args: func(v *store.BounceMailbox) ([]any, error) {
+		return []any{
+			v.Name, v.Address, v.Protocol, v.Host, v.Port, string(v.TLS),
+			v.Username, v.Password, v.Folder, v.AfterProcess, v.Enabled,
+		}, nil
+	},
+	scan: func(r rowScanner) (*store.BounceMailbox, error) {
+		var v store.BounceMailbox
+		var tls string
+		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Address, &v.Protocol,
+			&v.Host, &v.Port, &tls, &v.Username, &v.Password, &v.Folder,
+			&v.AfterProcess, &v.Enabled,
+			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
+			return nil, err
+		}
+		v.TLS = store.TLSMode(tls)
+		v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
+		return &v, nil
+	},
+	id:       func(v *store.BounceMailbox) *string { return &v.ID },
+	tenantID: func(v *store.BounceMailbox) *string { return &v.TenantID },
+	version:  func(v *store.BounceMailbox) *int64 { return &v.Version },
+	created:  func(v *store.BounceMailbox) *time.Time { return &v.CreatedAt },
+	updated:  func(v *store.BounceMailbox) *time.Time { return &v.UpdatedAt },
+}
+
+type bounceMailboxRepo struct{ *crud[store.BounceMailbox] }
+
+// ListEnabled returns the whole enabled set in one call; the partial index
+// bounce_mailbox_enabled covers it.
+func (r *bounceMailboxRepo) ListEnabled(ctx context.Context) ([]store.BounceMailbox, error) {
+	if err := r.p.check(); err != nil {
+		return nil, err
+	}
+	a := &args{}
+	q := "SELECT " + r.s.selectList() + " FROM bounce_mailbox WHERE tenant_id = " +
+		a.add(r.tenant) + " AND enabled ORDER BY created_at, id"
+	rows, err := r.p.pool.Query(ctx, q, a.v...)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []store.BounceMailbox
+	for rows.Next() {
+		v, err := r.s.scan(rows)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, *v)
+	}
+	return out, mapErr(rows.Err())
+}
+
 // --- probe mailbox -----------------------------------------------------
 
 var mailboxSpec = spec[store.ProbeMailbox]{
@@ -171,7 +232,8 @@ var mailboxSpec = spec[store.ProbeMailbox]{
 var probeRunSpec = spec[store.ProbeRun]{
 	table: "probe_run",
 	cols: []string{
-		"sender_id", "mailbox_id", "delivery_id", "status", "reason",
+		"sender_id", "mailbox_id", "delivery_id", "group_id", "pending",
+		"status", "reason",
 		"delivered", "folder", "latency", "spf", "dkim", "dmarc",
 		"dkim_domain", "dkim_selector", "dmarc_policy", "tls", "observed_ip",
 		"ptr", "ptr_match", "dns", "raw_headers", "started_at", "received_at",
@@ -182,7 +244,8 @@ var probeRunSpec = spec[store.ProbeRun]{
 			return nil, err
 		}
 		return []any{
-			v.SenderID, v.MailboxID, v.DeliveryID, i16(v.Status), v.Reason,
+			v.SenderID, v.MailboxID, v.DeliveryID, v.GroupID, v.Pending,
+			i16(v.Status), v.Reason,
 			v.Delivered, v.Folder, int64(v.Latency), v.SPF, v.DKIM, v.DMARC,
 			v.DKIMDomain, v.DKIMSelector, v.DMARCPolicy, v.TLS, v.ObservedIP,
 			v.PTR, v.PTRMatch, dns, v.RawHeaders,
@@ -196,7 +259,8 @@ var probeRunSpec = spec[store.ProbeRun]{
 		var dns []byte
 		var started, received *time.Time
 		if err := r.Scan(&v.ID, &v.TenantID, &v.SenderID, &v.MailboxID,
-			&v.DeliveryID, &status, &v.Reason, &v.Delivered, &v.Folder,
+			&v.DeliveryID, &v.GroupID, &v.Pending,
+			&status, &v.Reason, &v.Delivered, &v.Folder,
 			&latency, &v.SPF, &v.DKIM, &v.DMARC, &v.DKIMDomain,
 			&v.DKIMSelector, &v.DMARCPolicy, &v.TLS, &v.ObservedIP, &v.PTR,
 			&v.PTRMatch, &dns, &v.RawHeaders, &started, &received,
@@ -213,6 +277,10 @@ var probeRunSpec = spec[store.ProbeRun]{
 	id:       func(v *store.ProbeRun) *string { return &v.ID },
 	tenantID: func(v *store.ProbeRun) *string { return &v.TenantID },
 	created:  func(v *store.ProbeRun) *time.Time { return &v.CreatedAt },
+	// A probe run is written pending and rewritten once when it finishes. It
+	// has no version column: only the control leader's collector updates it,
+	// so there is nothing to race with (store.ProbeRunRepo).
+	mutableWithoutVersion: true,
 }
 
 type probeRunRepo struct{ *crud[store.ProbeRun] }
@@ -221,6 +289,10 @@ func (r *probeRunRepo) ListBySender(ctx context.Context, senderID string, p stor
 	return r.listWhere(ctx, p, func(a *args) string {
 		return " AND sender_id = " + a.add(senderID)
 	})
+}
+
+func (r *probeRunRepo) ListPending(ctx context.Context, p store.Page) (store.Result[store.ProbeRun], error) {
+	return r.listWhere(ctx, p, func(*args) string { return " AND pending" })
 }
 
 // --- layout ------------------------------------------------------------
@@ -345,8 +417,8 @@ func (r *versionRepo) ListByTemplate(ctx context.Context, templateID string, p s
 var campaignSpec = spec[store.Campaign]{
 	table: "campaign",
 	cols: []string{
-		"name", "version_id", "sender_id", "default_locale", "vars", "status",
-		"schedule_at", "started_at", "completed_at", "stats",
+		"name", "template_id", "version_id", "sender_id", "default_locale",
+		"vars", "status", "schedule_at", "started_at", "completed_at", "stats",
 	},
 	args: func(v *store.Campaign) ([]any, error) {
 		vars, err := jsonIn(v.Vars)
@@ -358,7 +430,7 @@ var campaignSpec = spec[store.Campaign]{
 			return nil, err
 		}
 		return []any{
-			v.Name, v.VersionID, v.SenderID, v.DefaultLocale, vars,
+			v.Name, v.TemplateID, v.VersionID, v.SenderID, v.DefaultLocale, vars,
 			i16(v.Status), tsIn(v.ScheduleAt), tsIn(v.StartedAt),
 			tsIn(v.CompletedAt), stats,
 		}, nil
@@ -368,7 +440,8 @@ var campaignSpec = spec[store.Campaign]{
 		var status int16
 		var vars, stats []byte
 		var schedule, started, completed *time.Time
-		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.VersionID, &v.SenderID,
+		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.TemplateID, &v.VersionID,
+			&v.SenderID,
 			&v.DefaultLocale, &vars, &status, &schedule, &started, &completed,
 			&stats, &v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err

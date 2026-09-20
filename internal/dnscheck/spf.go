@@ -120,7 +120,6 @@ type spfEval struct {
 	matched string
 	// hasAll reports whether the top-level record ended with all or redirect.
 	hasAll bool
-	depth  int
 }
 
 // check is RFC 7208's check_host() reduced to what a diagnostic needs: no

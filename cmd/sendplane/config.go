@@ -50,6 +50,8 @@ type Config struct {
 	Authz   AuthzConfig   `yaml:"authz"`
 	Events  EventsConfig  `yaml:"events"`
 	Sender  SenderConfig  `yaml:"sender"`
+	Bounce  BounceConfig  `yaml:"bounce"`
+	Probe   ProbeConfig   `yaml:"probe"`
 	Limits  LimitsConfig  `yaml:"limits"`
 	Log     LogConfig     `yaml:"log"`
 }
@@ -128,6 +130,52 @@ type SenderConfig struct {
 	DefaultRatePerSecond float64     `yaml:"default_rate_per_second"`
 }
 
+// BounceConfig configures the bounce role.
+type BounceConfig struct {
+	WorkerID        string   `yaml:"worker_id"` // default: "bounce-" + hostname
+	PollInterval    Duration `yaml:"poll_interval"`
+	RefreshInterval Duration `yaml:"refresh_interval"`
+	// UseIdle is on by default; set it to false to force plain polling.
+	UseIdle *bool `yaml:"use_idle"`
+}
+
+// ProbeConfig configures the loopback health probe (architecture 11). The
+// mailboxes are tenant rows managed through the API; this is the process-wide
+// half. Probing is enabled by the presence of this section's hmac_key or an
+// explicit `enabled: true`.
+type ProbeConfig struct {
+	Enabled *bool `yaml:"enabled"`
+	// HMACKey is base64 (standard encoding). It signs the probe token, so a
+	// mail somebody else drops in the probe mailbox cannot produce a verdict.
+	HMACKey string `yaml:"hmac_key"`
+	// Nameservers are queried directly for the DNS diagnostic layer; an entry
+	// may carry a port. Empty uses /etc/resolv.conf.
+	Nameservers []string `yaml:"nameservers"`
+	Interval    Duration `yaml:"interval"`
+	Timeout     Duration `yaml:"timeout"`
+}
+
+// ToHost converts to host.ProbeConfig, decoding the base64 HMAC key.
+func (p ProbeConfig) ToHost() (host.ProbeConfig, error) {
+	out := host.ProbeConfig{
+		Enabled:     p.HMACKey != "",
+		Nameservers: p.Nameservers,
+		Interval:    time.Duration(p.Interval),
+		Timeout:     time.Duration(p.Timeout),
+	}
+	if p.Enabled != nil {
+		out.Enabled = *p.Enabled
+	}
+	if p.HMACKey != "" {
+		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(p.HMACKey))
+		if err != nil {
+			return host.ProbeConfig{}, fmt.Errorf("probe.hmac_key: not base64: %w", err)
+		}
+		out.HMACKey = key
+	}
+	return out, nil
+}
+
 // LimitsConfig maps onto host.Limits.
 type LimitsConfig struct {
 	MaxRecipientsPerCampaign int   `yaml:"max_recipients_per_campaign"`
@@ -176,6 +224,15 @@ func (c *Config) applyDefaults() {
 			c.Sender.WorkerID = "sendplane-sender"
 		}
 	}
+	if c.Bounce.WorkerID == "" {
+		// A different lease owner from the sender's: the two roles hold
+		// different locks, and sharing one ID makes a log line ambiguous.
+		c.Bounce.WorkerID = "bounce-" + c.Sender.WorkerID
+	}
+	if c.Bounce.UseIdle == nil {
+		on := true
+		c.Bounce.UseIdle = &on
+	}
 	if c.Auth.Mode == "" {
 		c.Auth.Mode = "none"
 	}
@@ -205,7 +262,9 @@ func (c *Config) applyDefaults() {
 // validate; call Validate separately once the caller knows whether the
 // process actually needs secrets (a --migrate run does not).
 func LoadConfig(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	// The path is this process's own --config flag (or SENDPLANE_CONFIG), not
+	// anything a request can influence, so reading it by name is the point.
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied config path
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}

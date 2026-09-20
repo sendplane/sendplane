@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,35 @@ func decTime(t *time.Time) time.Time {
 // for the right-hand side of range filters, where the bound has to be
 // truncated the same way the stored value was.
 func ts(t time.Time) time.Time { return store.TruncateTime(t) }
+
+// --- integer narrowing -------------------------------------------------
+
+// i32 narrows an int to the int32 a BSON document stores. Everything that
+// reaches it is a port, a count or a byte size the API already bounds far
+// below int32, so the clamp is a guard rail, not a behaviour: a value that hit
+// it would be a bug upstream, and wrapping silently would be worse than
+// storing the bound.
+func i32(v int) int32 {
+	switch {
+	case v > math.MaxInt32:
+		return math.MaxInt32
+	case v < math.MinInt32:
+		return math.MinInt32
+	}
+	return int32(v)
+}
+
+// enum8 narrows a stored int32 back to the int8 every sendplane enum is
+// (store/enums.go). A document written by another version could hold any
+// number; one outside int8 becomes 0, which each enum spells as its zero value
+// and String() renders as "unknown", rather than wrapping into a neighbouring
+// state.
+func enum8(v int32) int8 {
+	if v < math.MinInt8 || v > math.MaxInt8 {
+		return 0
+	}
+	return int8(v)
+}
 
 // --- enums -------------------------------------------------------------
 
@@ -93,7 +123,7 @@ func lanesFrom(vs []int32) []store.Lane {
 	}
 	out := make([]store.Lane, len(vs))
 	for i, v := range vs {
-		out[i] = store.Lane(v)
+		out[i] = store.Lane(enum8(v))
 	}
 	return out
 }

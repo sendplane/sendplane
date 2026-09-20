@@ -22,8 +22,9 @@ type rowScanner interface{ Scan(dest ...any) error }
 // and scan must read them in exactly that order.
 //
 // version and updated are nil for the immutable aggregates (message versions,
-// probe runs, bounce events), which have neither optimistic concurrency nor an
-// updated_at column.
+// bounce events), which have neither optimistic concurrency nor an updated_at
+// column, and for probe runs, which are rewritten once without either (see
+// mutableWithoutVersion).
 type spec[T any] struct {
 	table    string
 	cols     []string
@@ -34,6 +35,11 @@ type spec[T any] struct {
 	version  func(*T) *int64
 	created  func(*T) *time.Time
 	updated  func(*T) *time.Time
+	// mutableWithoutVersion marks a table that has neither updated_at nor a
+	// version column but is still updated in place (probe_run: written
+	// pending, rewritten once by the control leader's collector). Update
+	// rewrites the data columns and leaves the bookkeeping alone.
+	mutableWithoutVersion bool
 }
 
 func (s spec[T]) versioned() bool { return s.version != nil }
@@ -134,7 +140,10 @@ func (c *crud[T]) Update(ctx context.Context, v *T) error {
 		return err
 	}
 	if !c.s.versioned() {
-		return fmt.Errorf("%w: %s is immutable", store.ErrInvalid, c.s.table)
+		if !c.s.mutableWithoutVersion {
+			return fmt.Errorf("%w: %s is immutable", store.ErrInvalid, c.s.table)
+		}
+		return c.updateUnversioned(ctx, v)
 	}
 	id := *c.s.id(v)
 	*c.s.tenantID(v) = c.tenant
@@ -166,6 +175,32 @@ func (c *crud[T]) Update(ctx context.Context, v *T) error {
 	*c.s.created(v) = created.UTC()
 	*c.s.updated(v) = updated.UTC()
 	*c.s.version(v) = version
+	return nil
+}
+
+// updateUnversioned rewrites the data columns of a table with no version and
+// no updated_at. There is no CAS: the one writer holds the control leader
+// lease, and a row that is gone is ErrNotFound rather than a silent no-op.
+func (c *crud[T]) updateUnversioned(ctx context.Context, v *T) error {
+	vals, err := c.s.args(v)
+	if err != nil {
+		return err
+	}
+	id := *c.s.id(v)
+	a := &args{}
+	sets := make([]string, 0, len(c.s.cols))
+	for i, col := range c.s.cols {
+		sets = append(sets, col+" = "+a.add(vals[i]))
+	}
+	q := fmt.Sprintf("UPDATE %s SET %s WHERE id = %s AND tenant_id = %s",
+		c.s.table, strings.Join(sets, ", "), a.add(id), a.add(c.tenant))
+	tag, err := c.p.pool.Exec(ctx, q, a.v...)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s %s", store.ErrNotFound, c.s.table, id)
+	}
 	return nil
 }
 

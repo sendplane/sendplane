@@ -34,6 +34,12 @@ import (
 // (drain 30s)".
 const drainTimeout = 30 * time.Second
 
+// readHeaderTimeout bounds how long a client may take to send its request
+// headers. It is deliberately generous: the API is called by servers, not by
+// browsers on bad mobile links, and the only thing it has to stop is a
+// connection held open forever with a trickle of header bytes.
+const readHeaderTimeout = 20 * time.Second
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "sendplane:", err)
@@ -186,6 +192,15 @@ func buildSendplane(ctx context.Context, cfg *Config, provider store.Provider, l
 		hooks.Events = newWebhookSink(cfg.Events.Webhook, logger)
 	}
 
+	probeCfg, err := cfg.Probe.ToHost()
+	if err != nil {
+		return nil, err
+	}
+	if probeCfg.Enabled && len(probeCfg.HMACKey) == 0 {
+		logger.Warn("probe is enabled with no probe.hmac_key: " +
+			"any mail in a probe mailbox can produce a verdict")
+	}
+
 	sp, err := sendplane.New(sendplane.Options{
 		Store:   provider,
 		Auth:    authenticator,
@@ -193,6 +208,7 @@ func buildSendplane(ctx context.Context, cfg *Config, provider store.Provider, l
 		Hooks:   hooks,
 		Secrets: cipher,
 		Limits:  cfg.Limits.ToHost(),
+		Probe:   probeCfg,
 		Logger:  logger,
 	})
 	if err != nil {
@@ -244,14 +260,27 @@ func openStore(ctx context.Context, cfg StoreConfig) (store.Provider, error) {
 // when the control role is present; other roles serve /healthz alone.
 func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *sendplane.Sendplane, logger *slog.Logger) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
 	if roles.control {
+		// sendplane's own router already serves GET /healthz, and it answers
+		// the JSON body api/openapi.yaml documents. Registering a plain-text
+		// one here as well would shadow it: net/http's mux prefers the more
+		// specific pattern, so "/healthz" would win over "/".
 		mux.Handle("/", sp.Handler())
+	} else {
+		// A sender- or bounce-only pod serves no API, but Kubernetes still
+		// probes it.
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		})
 	}
-	httpServer := &http.Server{Addr: flags.listen, Handler: mux}
+	httpServer := &http.Server{
+		Addr:    flags.listen,
+		Handler: mux,
+		// Bounds the slow-header attack: the body size is already bounded by
+		// host.Limits, the header phase was not (gosec G112).
+		ReadHeaderTimeout: readHeaderTimeout,
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -284,18 +313,26 @@ func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *
 	}
 	if roles.bounce {
 		g.Go(func() error {
-			logger.Info("bounce role starting")
-			err := sp.RunBounce(gctx)
-			if errors.Is(err, sendplane.ErrNotImplemented) {
-				logger.Warn("bounce role is not implemented in this build; the process will keep running its other roles")
-				<-gctx.Done()
-				return nil
-			}
-			return err
+			logger.Info("bounce role starting", "worker_id", cfg.Bounce.WorkerID)
+			return sp.RunBounce(gctx, bounceConfigFrom(cfg.Bounce))
 		})
 	}
 
 	return g.Wait()
+}
+
+// bounceConfigFrom maps the config file's bounce section onto
+// sendplane.BounceConfig.
+func bounceConfigFrom(cfg BounceConfig) sendplane.BounceConfig {
+	out := sendplane.BounceConfig{
+		WorkerID:        cfg.WorkerID,
+		PollInterval:    time.Duration(cfg.PollInterval),
+		RefreshInterval: time.Duration(cfg.RefreshInterval),
+	}
+	if cfg.UseIdle != nil {
+		out.UseIdle = *cfg.UseIdle
+	}
+	return out
 }
 
 // senderConfigFrom maps the config file's sender section onto

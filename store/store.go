@@ -36,6 +36,27 @@ type Provider interface {
 	//
 	// SystemTenantID is never returned.
 	ActiveTenants(ctx context.Context) ([]string, error)
+	// Tenants lists every tenant this provider knows of, active or not. It is
+	// what the bounce poller iterates: a DSN arrives hours or days after a
+	// campaign finished, long after the tenant left ActiveTenants, so a bounce
+	// mailbox belonging to an idle tenant would never be polled if the poller
+	// only saw active ones.
+	//
+	// A tenant is known when it has a settings row or a row in one of the
+	// configuration aggregates: transports, senders, sending domains, bounce
+	// mailboxes, probe mailboxes, layouts, templates or campaigns. Those are
+	// the small, tenant-keyed tables, so the scan stays cheap; the per-
+	// recipient tables (deliveries, attempts, tracking) are deliberately not
+	// scanned, and a tenant that somehow only has those is reached through
+	// ActiveTenants instead.
+	//
+	// It is not a lifecycle API: sendplane does not create or delete tenants
+	// (ADR-0006), and a routed Provider may return its configured mapping
+	// instead. Implementations may be expensive, so callers refresh it on an
+	// interval rather than per operation.
+	//
+	// SystemTenantID is never returned, and the result is sorted.
+	Tenants(ctx context.Context) ([]string, error)
 	// Migrate brings the schema (or indexes) up to date.
 	Migrate(ctx context.Context) error
 	Close() error
@@ -47,6 +68,7 @@ type Store interface {
 	Transports() TransportRepo
 	Senders() SenderRepo
 	Domains() DomainRepo
+	BounceMailboxes() BounceMailboxRepo
 	ProbeMailboxes() ProbeMailboxRepo
 	ProbeRuns() ProbeRunRepo
 	Layouts() LayoutRepo

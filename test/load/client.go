@@ -97,7 +97,7 @@ func (c *apiClient) do(
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -131,7 +131,7 @@ func (c *apiClient) postNDJSON(
 	go func() {
 		pw.CloseWithError(write(pw))
 	}()
-	defer pr.Close()
+	defer func() { _ = pr.Close() }()
 
 	hdr := map[string]string{}
 	if idempotencyKey != "" {
@@ -298,7 +298,7 @@ func fetchChaosStats(ctx context.Context, hc *http.Client, base string) (chaosSt
 	if err != nil {
 		return out, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return out, fmt.Errorf("chaos-smtp /stats: HTTP %d", resp.StatusCode)
 	}

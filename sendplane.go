@@ -24,6 +24,7 @@ import (
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/api"
 	"github.com/sendplane/sendplane/internal/control"
+	"github.com/sendplane/sendplane/internal/probe"
 	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/internal/sender"
 	"github.com/sendplane/sendplane/store"
@@ -47,6 +48,12 @@ type Sendplane struct {
 	// across requests.
 	rendererOnce sync.Once
 	renderer     *render.Renderer
+
+	// probe is the loopback health probe runner, shared between the manual
+	// trigger the HTTP layer exposes and the control leader's loops. It stays
+	// nil when Options.Probe.Enabled is false.
+	probeOnce sync.Once
+	probe     *probe.Runner
 }
 
 // SenderConfig configures one sender process (RunSender). Every field except
@@ -136,7 +143,7 @@ func (s *Sendplane) Handler() http.Handler {
 			return
 		}
 		c.Tracking().Start(context.Background())
-		s.handler = api.New(api.Deps{
+		deps := api.Deps{
 			Provider: s.opts.Store,
 			Auth:     s.opts.Auth,
 			Authz:    s.opts.Authz,
@@ -149,18 +156,53 @@ func (s *Sendplane) Handler() http.Handler {
 			Logger:   s.opts.Logger,
 			Clock:    s.opts.Clock,
 			Metrics:  s.opts.Metrics,
-		})
+		}
+		// Assigned through a nil check rather than unconditionally: a typed
+		// nil in the interface field would make POST /senders/{id}/probe call
+		// into a runner that does not exist instead of answering 501.
+		if r := s.probeRunner(); r != nil {
+			deps.Probe = r
+		}
+		s.handler = api.New(deps)
 	})
 	return s.handler
 }
 
 // controlPlane returns the process-wide control plane, building it once.
+//
+// The probe loops are registered here rather than in RunControl so that the
+// registration happens exactly once, whichever of Handler and RunControl is
+// called first.
 func (s *Sendplane) controlPlane() (*control.Control, error) {
 	s.controlOnce.Do(func() {
 		s.control, s.controlErr = control.New(
-			s.opts.Store, s.opts.Hooks, s.opts.Logger, s.opts.Clock)
+			s.opts.Store, s.opts.Hooks, s.opts.Logger, s.opts.Clock,
+			s.probeLoopOptions()...)
 	})
 	return s.control, s.controlErr
+}
+
+// probeLoopOptions registers the two loops of architecture 11.2 with the
+// control leader, so they run on one replica: two of them would send twice the
+// probe mail and race to delete the same message from the mailbox.
+//
+// With probing disabled it returns nothing and nothing is registered.
+func (s *Sendplane) probeLoopOptions() []control.Option {
+	r := s.probeRunner()
+	if r == nil {
+		return nil
+	}
+	opener := probeOpener{secrets: s.opts.Secrets}
+	return []control.Option{
+		control.WithLoop("probe-trigger", probeTriggerInterval,
+			func(st store.Store, _ string) control.TickLoop {
+				return probeTrigger{r: r, st: st}
+			}),
+		control.WithLoop("probe-collect", probeCollectInterval,
+			func(st store.Store, _ string) control.TickLoop {
+				return probeCollect{r: r, st: st, opener: opener}
+			}),
+	}
 }
 
 func (s *Sendplane) sharedRenderer() *render.Renderer {
@@ -209,6 +251,3 @@ func (s *Sendplane) RunSender(ctx context.Context, c SenderConfig) error {
 	}
 	return snd.Run(ctx)
 }
-
-// RunBounce runs the IMAP/POP3 bounce mailbox poller.
-func (s *Sendplane) RunBounce(ctx context.Context) error { return ErrNotImplemented }

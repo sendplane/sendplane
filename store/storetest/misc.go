@@ -52,6 +52,22 @@ func testSuppressions(t *testing.T, p store.Provider) {
 	must(t, "List", err)
 	eq(t, "list size", len(list.Items), 2)
 
+	// DeleteBefore is the ADR-0008 retention path: only entries that actually
+	// expire are eligible, and "never expires" survives any cutoff.
+	n, err := r.DeleteBefore(ctx, now.Add(24*time.Hour), 10)
+	must(t, "DeleteBefore", err)
+	eq(t, "only the expiring entry", n, 1)
+	ok, _, err = r.IsSuppressed(ctx, "hard@example.com", now)
+	must(t, "IsSuppressed after DeleteBefore", err)
+	eq(t, "permanent entry survived", ok, true)
+	list, err = r.List(ctx, store.Page{Limit: 100})
+	must(t, "List after DeleteBefore", err)
+	eq(t, "one row left", len(list.Items), 1)
+
+	n, err = r.DeleteBefore(ctx, now.Add(24*time.Hour), 10)
+	must(t, "DeleteBefore again", err)
+	eq(t, "nothing left to expire", n, 0)
+
 	must(t, "Delete", r.Delete(ctx, "hard@example.com"))
 	ok, _, err = r.IsSuppressed(ctx, "hard@example.com", now)
 	must(t, "IsSuppressed after delete", err)
@@ -238,6 +254,33 @@ func testOutbox(t *testing.T, p store.Provider) {
 
 	mustBe(t, "MarkDelivered unknown", r.MarkDelivered(ctx, store.NewID(), now), store.ErrNotFound)
 	mustBe(t, "MarkFailed unknown", r.MarkFailed(ctx, store.NewID(), now, "x"), store.ErrNotFound)
+
+	// Get reads one row by ID; Reset is the replay verb and gives a dead
+	// letter a full attempt budget again.
+	one, err := r.Get(ctx, dead.Items[0].ID)
+	must(t, "Get", err)
+	eq(t, "Get id", one.ID, dead.Items[0].ID)
+	eq(t, "Get status", one.Status, store.OutboxFailed)
+	eq(t, "Get tenant", one.TenantID, tenantID)
+	if one.Attempts == 0 {
+		t.Fatalf("Get attempts = 0, want the failed count")
+	}
+	_, err = r.Get(ctx, store.NewID())
+	mustBe(t, "Get unknown", err, store.ErrNotFound)
+
+	replayAt := now.Add(3 * time.Minute)
+	must(t, "Reset", r.Reset(ctx, one.ID, replayAt))
+	one, err = r.Get(ctx, one.ID)
+	must(t, "Get after Reset", err)
+	eq(t, "Reset status", one.Status, store.OutboxPending)
+	eq(t, "Reset attempts", one.Attempts, 0)
+	eq(t, "Reset last error", one.LastError, "")
+	eqTime(t, "Reset next attempt", one.NextAttemptAt, replayAt)
+	replayed, err := r.ClaimPending(ctx, 10, time.Minute, "d3", replayAt)
+	must(t, "ClaimPending after Reset", err)
+	eq(t, "replayed event is claimable", len(replayed), 1)
+	must(t, "MarkFailed replayed", r.MarkFailed(ctx, replayed[0].ID, time.Time{}, "gave up again"))
+	mustBe(t, "Reset unknown", r.Reset(ctx, store.NewID(), now), store.ErrNotFound)
 
 	// Retention only ever removes dispatched rows: a pending event is still
 	// owed to the host however old it is.

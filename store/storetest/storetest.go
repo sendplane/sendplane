@@ -36,6 +36,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 	t.Run("Transports", func(t *testing.T) { testTransports(t, p) })
 	t.Run("Senders", func(t *testing.T) { testSenders(t, p) })
 	t.Run("Domains", func(t *testing.T) { testDomains(t, p) })
+	t.Run("BounceMailboxes", func(t *testing.T) { testBounceMailboxes(t, p) })
 	t.Run("ProbeMailboxes", func(t *testing.T) { testProbeMailboxes(t, p) })
 	t.Run("ProbeRuns", func(t *testing.T) { testProbeRuns(t, p) })
 	t.Run("Layouts", func(t *testing.T) { testLayouts(t, p) })
@@ -72,6 +73,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 	t.Run("Workers", func(t *testing.T) { testWorkers(t, p) })
 	t.Run("ActiveTenants", func(t *testing.T) { testActiveTenants(t, p) })
 	t.Run("ActiveTenantsCampaignOnly", func(t *testing.T) { testActiveTenantsCampaignOnly(t, p) })
+	t.Run("Tenants", func(t *testing.T) { testTenants(t, p) })
 	t.Run("LoadTenantSettings", func(t *testing.T) { testLoadTenantSettings(t, p) })
 }
 
@@ -256,11 +258,19 @@ func testTenantSettings(t *testing.T, p store.Provider) {
 	eq(t, "backoff length", len(got.Retry.Backoff), 6)
 
 	eq(t, "one-click default", got.UnsubscribeOneClick, false)
+	eq(t, "bounce raw retention default", got.BounceRetainRaw, false)
+	// A default row carries a usable tracking key: opens, clicks and one-click
+	// unsubscribe all sign with one (store.DefaultTenantSettings).
+	eq(t, "default signing keys", len(got.Tracking.SigningKeys), 1)
+	if k := got.Tracking.SigningKeys[0]; k.KID == "" || len(k.Secret) != 32 {
+		t.Fatalf("default signing key = %+v, want a kid and a 32-byte secret", k)
+	}
 
 	stale := *got
 	got.RetentionDays = 30
 	got.UnsubscribeMode = store.UnsubscribeHost
 	got.UnsubscribeOneClick = true
+	got.BounceRetainRaw = true
 	got.Tracking.Domain = "t.example.com"
 	got.Tracking.SigningKeys = []store.SigningKey{{KID: "k1", Secret: []byte("s"), CreatedAt: time.Now().UTC()}}
 	must(t, "Update", r.Update(ctx, got))
@@ -274,8 +284,71 @@ func testTenantSettings(t *testing.T, p store.Provider) {
 	eq(t, "retention", after.RetentionDays, 30)
 	eq(t, "unsubscribe mode", after.UnsubscribeMode, store.UnsubscribeHost)
 	eq(t, "one-click", after.UnsubscribeOneClick, true)
+	eq(t, "bounce raw retention", after.BounceRetainRaw, true)
 	eq(t, "tracking domain", after.Tracking.Domain, "t.example.com")
 	eq(t, "signing keys", len(after.Tracking.SigningKeys), 1)
+}
+
+// Tenants reports a tenant that is configured but idle: that is exactly the
+// tenant whose bounce mailbox still has to be polled days after its campaign
+// finished (store.Provider.Tenants).
+func testTenants(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, tenantID := fresh(t, p)
+
+	// A tenant nothing has been written for is not known yet.
+	before, err := p.Tenants(ctx)
+	must(t, "Tenants before", err)
+	for _, id := range before {
+		if id == tenantID {
+			t.Fatalf("Tenants %v contains %s before it has any row", before, tenantID)
+		}
+		if id == store.SystemTenantID {
+			t.Fatalf("Tenants returned %s", store.SystemTenantID)
+		}
+	}
+
+	// A configuration row is enough: this tenant has no delivery and no
+	// campaign, so ActiveTenants does not see it.
+	must(t, "Create bounce mailbox", s.BounceMailboxes().Create(ctx, &store.BounceMailbox{
+		Name: "bounces", Host: "imap.example.com", Port: 993, Enabled: true,
+	}))
+
+	active, err := p.ActiveTenants(ctx)
+	must(t, "ActiveTenants", err)
+	for _, id := range active {
+		if id == tenantID {
+			t.Fatalf("ActiveTenants %v contains %s, which has no work", active, tenantID)
+		}
+	}
+
+	after, err := p.Tenants(ctx)
+	must(t, "Tenants", err)
+	found := false
+	for i, id := range after {
+		if id == tenantID {
+			found = true
+		}
+		if i > 0 && after[i-1] > id {
+			t.Fatalf("Tenants %v is not sorted", after)
+		}
+	}
+	if !found {
+		t.Fatalf("Tenants %v does not contain %s, which has a bounce mailbox", after, tenantID)
+	}
+
+	// A settings row alone also makes a tenant known.
+	s2, tenant2 := fresh(t, p)
+	_, err = store.LoadTenantSettings(ctx, s2, tenant2, time.Now().UTC())
+	must(t, "LoadTenantSettings", err)
+	withSettings, err := p.Tenants(ctx)
+	must(t, "Tenants with settings", err)
+	for _, id := range withSettings {
+		if id == tenant2 {
+			return
+		}
+	}
+	t.Fatalf("Tenants %v does not contain %s, which has a settings row", withSettings, tenant2)
 }
 
 // LoadTenantSettings creates the default row on first access and is a plain
@@ -366,6 +439,55 @@ func testDomains(t *testing.T, p store.Provider) {
 		mutate: func(v *store.SendingDomain) { v.Health = store.HealthRed; v.HealthReason = "spf fail" },
 		label:  func(v *store.SendingDomain) string { return v.Health.String() + "/" + v.HealthReason },
 	})
+}
+
+func testBounceMailboxes(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, tenantID := fresh(t, p)
+	runCRUD(t, tenantID, crudSpec[store.BounceMailbox]{
+		repo: s.BounceMailboxes(),
+		make: func(i int) *store.BounceMailbox {
+			return &store.BounceMailbox{
+				Name: fmt.Sprintf("bounces-%d", i), Address: fmt.Sprintf("bounce+%d@example.com", i),
+				Protocol: "imap", Host: "imap.example.com", Port: 993, TLS: store.TLSImplicit,
+				Username: "bounces", Password: []byte("enc"),
+				Folder: "INBOX", AfterProcess: "move:Handled", Enabled: true,
+			}
+		},
+		id:     func(v *store.BounceMailbox) string { return v.ID },
+		tenant: func(v *store.BounceMailbox) string { return v.TenantID },
+		ver:    func(v *store.BounceMailbox) int64 { return v.Version },
+		mutate: func(v *store.BounceMailbox) { v.Enabled = false; v.AfterProcess = "delete" },
+		label:  func(v *store.BounceMailbox) string { return v.AfterProcess },
+	})
+
+	// ListEnabled is what the poller reads: the whole enabled set, unpaginated.
+	s2, _ := fresh(t, p)
+	r := s2.BounceMailboxes()
+	on := &store.BounceMailbox{
+		Name: "on", Address: "b@example.com", Protocol: "pop3",
+		Host: "pop.example.com", Port: 995, TLS: store.TLSImplicit,
+		Username: "u", Password: []byte("enc"), AfterProcess: "delete", Enabled: true,
+	}
+	must(t, "Create enabled", r.Create(ctx, on))
+	must(t, "Create disabled", r.Create(ctx, &store.BounceMailbox{
+		Name: "off", Host: "pop.example.com", Port: 995, Enabled: false,
+	}))
+
+	enabled, err := r.ListEnabled(ctx)
+	must(t, "ListEnabled", err)
+	eq(t, "ListEnabled count", len(enabled), 1)
+	eq(t, "ListEnabled id", enabled[0].ID, on.ID)
+	eq(t, "ListEnabled protocol", enabled[0].Protocol, "pop3")
+	eq(t, "ListEnabled after-process", enabled[0].AfterProcess, "delete")
+	eq(t, "ListEnabled password", string(enabled[0].Password), "enc")
+
+	// Disabling a mailbox takes it out of the poller's set.
+	on.Enabled = false
+	must(t, "Update", r.Update(ctx, on))
+	enabled, err = r.ListEnabled(ctx)
+	must(t, "ListEnabled after disable", err)
+	eq(t, "ListEnabled empty", len(enabled), 0)
 }
 
 func testProbeMailboxes(t *testing.T, p store.Provider) {
@@ -472,9 +594,11 @@ func testProbeRuns(t *testing.T, p store.Provider) {
 	r := s.ProbeRuns()
 
 	senderA, senderB := store.NewID(), store.NewID()
+	groupID := store.NewID()
 	run := &store.ProbeRun{
 		SenderID: senderA, MailboxID: store.NewID(), DeliveryID: store.NewID(),
-		Status: store.HealthGreen, Delivered: true, Folder: "inbox",
+		GroupID: groupID,
+		Status:  store.HealthGreen, Delivered: true, Folder: "inbox",
 		Latency: 12 * time.Second, SPF: "pass", DKIM: "pass", DMARC: "pass",
 		DKIMDomain: "example.com", DKIMSelector: "sp", DMARCPolicy: "reject",
 		TLS: true, ObservedIP: "203.0.113.10", PTR: "mail.example.com", PTRMatch: true,
@@ -491,9 +615,45 @@ func testProbeRuns(t *testing.T, p store.Provider) {
 	eq(t, "status", got.Status, store.HealthGreen)
 	eq(t, "latency", got.Latency, 12*time.Second)
 
+	eq(t, "group", got.GroupID, groupID)
+
 	res, err := r.ListBySender(ctx, senderA, store.Page{Limit: 10})
 	must(t, "ListBySender", err)
 	eq(t, "ListBySender count", len(res.Items), 1)
+
+	// A run is created pending and updated once when its mail arrives or its
+	// timeout passes. ListPending is what the collector reads.
+	pending := &store.ProbeRun{
+		SenderID: senderA, MailboxID: store.NewID(), DeliveryID: store.NewID(),
+		GroupID: groupID, Pending: true, Status: store.HealthUnknown,
+		StartedAt: time.Now().UTC(),
+	}
+	must(t, "Create pending", r.Create(ctx, pending))
+
+	list, err := r.ListPending(ctx, store.Page{Limit: 10})
+	must(t, "ListPending", err)
+	eq(t, "ListPending count", len(list.Items), 1)
+	eq(t, "ListPending item", list.Items[0].ID, pending.ID)
+	eq(t, "ListPending flag", list.Items[0].Pending, true)
+
+	pending.Pending = false
+	pending.Status = store.HealthYellow
+	pending.Reason = "spam folder"
+	pending.ReceivedAt = time.Now().UTC()
+	must(t, "Update", r.Update(ctx, pending))
+
+	got, err = r.Get(ctx, pending.ID)
+	must(t, "Get after Update", err)
+	eq(t, "updated status", got.Status, store.HealthYellow)
+	eq(t, "updated reason", got.Reason, "spam folder")
+	eq(t, "no longer pending", got.Pending, false)
+	eqTime(t, "received at", got.ReceivedAt, pending.ReceivedAt)
+
+	list, err = r.ListPending(ctx, store.Page{Limit: 10})
+	must(t, "ListPending after Update", err)
+	eq(t, "nothing pending", len(list.Items), 0)
+
+	mustBe(t, "Update unknown", r.Update(ctx, &store.ProbeRun{ID: store.NewID()}), store.ErrNotFound)
 }
 
 func testCampaigns(t *testing.T, p store.Provider) {
@@ -503,7 +663,8 @@ func testCampaigns(t *testing.T, p store.Provider) {
 		repo: s.Campaigns(),
 		make: func(i int) *store.Campaign {
 			return &store.Campaign{
-				Name: fmt.Sprintf("campaign-%d", i), VersionID: store.NewID(),
+				Name:       fmt.Sprintf("campaign-%d", i),
+				TemplateID: store.NewID(), VersionID: store.NewID(),
 				SenderID: store.NewID(), DefaultLocale: "en",
 				Vars:   map[string]any{"product": "sendplane"},
 				Status: store.CampaignDraft,
@@ -521,6 +682,15 @@ func testCampaigns(t *testing.T, p store.Provider) {
 	paused := &store.Campaign{Name: "paused", Status: store.CampaignPaused}
 	must(t, "Create running", r.Create(ctx, running))
 	must(t, "Create paused", r.Create(ctx, paused))
+
+	// TemplateID round-trips: a campaign created from a template with no
+	// published version yet keeps the template and resolves it at start.
+	unpinned := &store.Campaign{Name: "unpinned", TemplateID: store.NewID(), Status: store.CampaignDraft}
+	must(t, "Create unpinned", r.Create(ctx, unpinned))
+	back, err := r.Get(ctx, unpinned.ID)
+	must(t, "Get unpinned", err)
+	eq(t, "template id", back.TemplateID, unpinned.TemplateID)
+	eq(t, "no version pinned", back.VersionID, "")
 
 	res, err := r.ListByStatus(ctx, []store.CampaignStatus{store.CampaignPaused}, store.Page{Limit: 10})
 	must(t, "ListByStatus", err)

@@ -247,7 +247,7 @@ func (c Config) dialConn(ctx context.Context) (net.Conn, error) {
 	}
 	tc := tls.Client(conn, c.tlsConfig())
 	if err := tc.HandshakeContext(dialCtx); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("mailbox: tls handshake %s: %w", c.Addr(), err)
 	}
 	return tc, nil

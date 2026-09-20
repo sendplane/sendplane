@@ -37,4 +37,12 @@ type SuppressionRepo interface {
 	IsSuppressed(ctx context.Context, emailNorm string, now time.Time) (bool, *Suppression, error)
 	List(ctx context.Context, p Page) (Result[Suppression], error)
 	Delete(ctx context.Context, emailNorm string) error
+	// DeleteBefore removes entries whose ExpiresAt is non-zero and at or
+	// before the cutoff, at most limit of them, and returns how many it
+	// deleted. It is what makes ADR-0008's retention period real: without it
+	// an ExpiresAt is only read by IsSuppressed and the row lives forever.
+	//
+	// Entries with a zero ExpiresAt ("never expires") are never deleted,
+	// whatever the cutoff. A limit <= 0 means "every match".
+	DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error)
 }

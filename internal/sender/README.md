@@ -24,14 +24,14 @@ Run
 ## process(d)
 
 1. 테넌트 설정(짧은 TTL 캐시, `store.LoadTenantSettings` — 행이 없으면 기본값으로 **만들고** 읽습니다) → 캠페인 / MessageVersion(불변, 영구 캐시) / Sender / Transport / SendingDomain
-2. suppression (`SuppressionEnabled` && lane ≠ probe) → `suppressed`
+2. suppression (`SuppressionEnabled` && lane ≠ probe) → `suppressed`. `lane=probe`는 수신거부·클릭 재작성·오픈 픽셀에서도 전부 빠집니다(§11.2, ADR-0012)
 3. transport를 쓸 수 있는지 판정(아래 "transport 상태") — 못 쓰면 delivery는 **queued 유지**(시도 미소모)
 4. 수신거부 목적지: **수신자 변수(`Delivery.UnsubscribeURL` → `Vars["unsubscribe_url"]`) > 테넌트 Liquid 템플릿 > `Hooks.UnsubscribeURL`**
 5. 모드별 링크 결정(아래 표) → `{{ unsubscribe_url }}` 바인딩에 **렌더 전에** 주입
 6. `PrepareChain(version, recipient.locale, campaign.default_locale)` → `Render`
 7. 클릭 재작성(링크마다 토큰) → 오픈 픽셀 삽입 (§9.2)
 8. `Hooks.BeforeSend` — `ErrSkip` → `suppressed`, 그 밖의 에러 → transient(재시도 소모)
-9. MIME 조립 + 헤더 인젝션 검사 + 선택적 DKIM 서명
+9. MIME 조립 + 헤더 인젝션 검사 + 선택적 DKIM 서명. 커스텀 헤더는 `Delivery.Headers`(POST /messages) + `Vars["probe_token"]`(→ `X-Sendplane-Probe`) + `BeforeSend`가 더한 것이고, 셋 다 같은 화이트리스트(`ValidateCustomHeader`)를 통과해야 합니다
 10. 레이트리밋 대기(transport 버킷, (transport, 수신 도메인) 버킷)
 11. 풀 커넥션으로 전송 → `Classify` → 250이면 **즉시 `MarkSent`**, 결과는 배치 `Complete`
 

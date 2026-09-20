@@ -55,20 +55,20 @@ func dialPOP3(ctx context.Context, cfg Config, password string) (Client, error) 
 	m.reset(conn)
 
 	_ = conn.SetDeadline(deadline(ctx, cfg.DialTimeout))
-	defer conn.SetDeadline(time.Time{})
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
 	if _, err := m.readStatus(); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("mailbox: pop3 greeting %s: %w", cfg.Addr(), err)
 	}
 	if cfg.TLS == store.TLSSTARTTLS {
 		if _, err := m.cmd("STLS"); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("mailbox: pop3 stls %s: %w", cfg.Addr(), err)
 		}
 		tc := tls.Client(conn, cfg.tlsConfig())
 		if err := tc.HandshakeContext(ctx); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("mailbox: pop3 tls handshake %s: %w", cfg.Addr(), err)
 		}
 		m.conn = tc
@@ -76,11 +76,11 @@ func dialPOP3(ctx context.Context, cfg Config, password string) (Client, error) 
 		_ = tc.SetDeadline(deadline(ctx, cfg.DialTimeout))
 	}
 	if _, err := m.cmd("USER " + cfg.Username); err != nil {
-		m.conn.Close()
+		_ = m.conn.Close()
 		return nil, fmt.Errorf("mailbox: pop3 user %s: %w", cfg.Username, err)
 	}
 	if _, err := m.cmd("PASS " + password); err != nil {
-		m.conn.Close()
+		_ = m.conn.Close()
 		return nil, fmt.Errorf("mailbox: pop3 login %s: %w", cfg.Username, err)
 	}
 	return m, nil
@@ -95,7 +95,7 @@ func (m *pop3Mailbox) reset(conn net.Conn) {
 // arrival order.
 func (m *pop3Mailbox) Fetch(ctx context.Context, max int) ([]Message, error) {
 	_ = m.conn.SetDeadline(deadline(ctx, m.cfg.Timeout))
-	defer m.conn.SetDeadline(time.Time{})
+	defer func() { _ = m.conn.SetDeadline(time.Time{}) }()
 
 	lines, err := m.multi("UIDL")
 	if err != nil {
@@ -149,7 +149,7 @@ func (m *pop3Mailbox) Ack(ctx context.Context, ids []string, action Action) erro
 		return fmt.Errorf("mailbox: unknown after-process action %q", action)
 	}
 	_ = m.conn.SetDeadline(deadline(ctx, m.cfg.Timeout))
-	defer m.conn.SetDeadline(time.Time{})
+	defer func() { _ = m.conn.SetDeadline(time.Time{}) }()
 
 	for _, id := range ids {
 		num, ok := m.nums[id]

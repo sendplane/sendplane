@@ -83,7 +83,8 @@ func (r *report) write(jsonPath, summaryPath string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(jsonPath, append(raw, '\n'), 0o644); err != nil {
+		// G703: jsonPath is this generator's own --json flag, not input.
+		if err := os.WriteFile(jsonPath, append(raw, '\n'), 0o600); err != nil { //nolint:gosec
 			return err
 		}
 	}
@@ -91,11 +92,11 @@ func (r *report) write(jsonPath, summaryPath string) error {
 		return nil
 	}
 	// Appended, because $GITHUB_STEP_SUMMARY is a file several steps write to.
-	f, err := os.OpenFile(summaryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(summaryPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // G304: the path is this generator's own --summary flag
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = f.WriteString(r.markdown())
 	return err
 }

@@ -15,8 +15,10 @@ import (
 // of draft (architecture 7.1).
 //
 // Nothing else happens on start. The million delivery rows stay pending and
-// the sender picks them up because the campaign entered its running set
-// (ADR-0002), which is why start and pause are one-row writes.
+// the sender picks them up because the campaign entered its running set: a
+// pending row is claimable exactly while its campaign is in the claimer's
+// ClaimRequest.CampaignIDs (store.DeliveryRepo.Claim). That is why start and
+// pause are one-row writes and ADR-0002 needed no bulk update.
 type scheduler struct {
 	st   store.Store
 	log  *slog.Logger
@@ -27,6 +29,16 @@ func (s *scheduler) Tick(ctx context.Context, now time.Time) error {
 	return eachCampaign(ctx, s.st, []store.CampaignStatus{store.CampaignScheduled}, s.page,
 		func(c store.Campaign) error {
 			if c.ScheduleAt.After(now) {
+				return nil
+			}
+			// A campaign created from a template is bound to that template's
+			// published version here, at the moment it actually starts. A
+			// template still unpublished leaves the campaign scheduled so the
+			// next tick can pick it up once somebody publishes it, rather than
+			// starting a send with no version.
+			if err := resolveCampaignVersion(ctx, s.st, &c); err != nil {
+				s.log.Error("control: cannot start scheduled campaign",
+					"campaign", c.ID, "err", err)
 				return nil
 			}
 			c.Status = store.CampaignRunning

@@ -2,7 +2,6 @@ package sendplane
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -10,9 +9,6 @@ import (
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
-
-// ErrNotImplemented marks the parts of the API that are not built yet.
-var ErrNotImplemented = errors.New("sendplane: not implemented")
 
 // Options configures New. Store and Auth are required; everything else has a
 // default (see New).
@@ -24,8 +20,12 @@ type Options struct {
 	Hooks   Hooks
 	Secrets SecretCipher // at-rest encryption for SMTP/IMAP passwords and DKIM keys
 	Limits  Limits       // zero fields fall back to DefaultLimits
-	Logger  *slog.Logger // default: slog.Default()
-	Clock   func() time.Time
+	// Probe configures the loopback health probe (architecture 11). It is off
+	// by default: probing needs mailboxes the deployment owns, and a trigger
+	// nothing collects is worse than none at all.
+	Probe  ProbeConfig
+	Logger *slog.Logger // default: slog.Default()
+	Clock  func() time.Time
 	// Metrics receives the counters and histograms the sender emits. Default:
 	// host.NopMetrics.
 	Metrics Metrics
@@ -54,6 +54,9 @@ type (
 	TenantResolver = host.TenantResolver
 	// SecretCipher encrypts secrets before they reach the store.
 	SecretCipher = host.SecretCipher
+	// ProbeConfig is the process-wide half of the loopback probe setup; the
+	// mailboxes themselves are tenant rows managed through the API.
+	ProbeConfig = host.ProbeConfig
 
 	// Hooks are the optional Go escape hatches.
 	Hooks = host.Hooks

@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -298,7 +299,7 @@ func (r *runner) setup(ctx context.Context) error {
 		"version": cur.Version,
 		"retry": retryPolicy{
 			Backoff:     []string{"5s", "10s", "15s", "20s", "30s"},
-			MaxAttempts: int32(r.opt.maxAttempts),
+			MaxAttempts: int32(min(r.opt.maxAttempts, math.MaxInt32)), //nolint:gosec // bounded just above
 		},
 		"retention_days":           7,
 		"suppression_enabled":      true,
@@ -574,6 +575,8 @@ func (r *runner) killAndRestartSender(ctx context.Context) error {
 	victim := lines[len(lines)-1]
 
 	r.logf("killing sender container %s with SIGKILL", victim[:min(12, len(victim))])
+	//nolint:gosec // G204: the docker command and the container name are this
+	// generator's own flags and its own compose project, not request input.
 	if out, err := exec.CommandContext(ctx, r.opt.dockerCmd, "kill", "--signal=KILL", victim).CombinedOutput(); err != nil {
 		return fmt.Errorf("docker kill: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -606,6 +609,8 @@ func (r *runner) composeOutput(ctx context.Context, args ...string) (string, err
 	full = append(full, argv[1:]...)
 	full = append(full, "-f", r.opt.composeFile)
 	full = append(full, args...)
+	//nolint:gosec // G204: argv and the compose file come from this
+	// generator's own flags.
 	out, err := exec.CommandContext(ctx, argv[0], full...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s %s: %w: %s", argv[0], strings.Join(full, " "), err, strings.TrimSpace(string(out)))
@@ -768,7 +773,7 @@ func (r *runner) assertLinks(ctx context.Context) {
 // number is dominated by how long a row waits, which is exactly the trend the
 // artifact is for.
 func (r *runner) sampleLatency(ctx context.Context) {
-	rnd := rand.New(rand.NewPCG(r.opt.seed, uint64(r.opt.recipients)))
+	rnd := rand.New(rand.NewPCG(r.opt.seed, uint64(max(r.opt.recipients, 0)))) //nolint:gosec // non-negative
 	var ms []float64
 	for range r.opt.sample {
 		i := rnd.IntN(r.opt.recipients)
@@ -818,7 +823,7 @@ func (r *runner) measureDB(ctx context.Context) {
 		r.logf("database size unavailable: %v", err)
 		return
 	}
-	defer conn.Close(context.Background())
+	defer func() { _ = conn.Close(context.Background()) }()
 
 	var size int64
 	if err := conn.QueryRow(ctx, "SELECT pg_database_size(current_database())").Scan(&size); err != nil {

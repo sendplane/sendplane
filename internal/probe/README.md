@@ -14,7 +14,7 @@ Trigger(st, senderID)                 ← API POST /senders/{id}/probe, 또는 T
   메일박스마다:
     Delivery{Lane: probe, SenderID, VersionID: 내장 프로브 버전,
              Email: mailbox.Address, Vars: {run_id, probe_token, mailbox}}
-    ProbeRun{Status: unknown(=pending), MailboxID, DeliveryID, StartedAt: now}
+    ProbeRun{Pending: true, GroupID: 트리거당 하나, MailboxID, DeliveryID, StartedAt: now}
         ↓ (sender가 렌더·서명·발송. 제목은 "[sendplane probe {run_id}]")
 Collect(st, fetcher, now)             ← 주기 호출
   pending run마다:
@@ -89,15 +89,14 @@ runner := probe.New(probe.Options{
    | `probeTrigger` | 5m | `Runner.Tick` — 만기 sender 트리거 |
    | `probeCollect` | 1m | `Runner.CollectWith` — 메일박스 회수·판정 |
 
-2. **메일박스 어댑터**: 루트가 `internal/mailbox` 의 `Client`(`Fetch`/`FetchByHeader`/`Ack`/`Close`)를
-   `probe.MailboxOpener` 로 감쌉니다. `probe` 는 `internal/mailbox` 를 import하지 않습니다(이 패키지가 먼저 필요했고,
-   좁은 인터페이스면 충분합니다).
+2. **메일박스 어댑터**: 루트의 [`probe.go`](../../probe.go) 가 `internal/mailbox` 의 `Client` 를
+   `probe.MailboxOpener` 로 감쌉니다(`probeOpener`/`probeFetcher`). `probe` 는 `internal/mailbox` 를
+   import하지 않습니다 — 필요한 건 두 메서드뿐이고, 두 패키지를 다 아는 곳은 루트입니다.
 
-   ```go
-   type mailboxOpener struct{ /* SecretCipher 등 */ }
-   func (o mailboxOpener) Open(ctx context.Context, m *store.ProbeMailbox) (probe.MailboxFetcher, error)
-   // FetchByHeader → []probe.RawMessage{ID, Folder, Raw, ReceivedAt}, Delete → Ack/EXPUNGE
-   ```
+   - `FetchByHeader` → `[]probe.RawMessage{ID, Folder, Raw, ReceivedAt}`, `Delete` → `Ack(..., ActionDelete)`.
+   - IMAP 커넥션은 폴더 하나를 SELECT하므로 **받은편지함과 스팸함에 각각 커넥션을 엽니다.**
+     받은편지함만 보면 스팸함에 들어간 메일이 "미수신"으로 보입니다 — 그게 yellow 판정이 존재하는 이유입니다.
+     UID는 폴더 안에서만 유일하므로 ID에 폴더를 붙여(`folder\x00uid`) `Delete` 가 올바른 커넥션으로 보냅니다.
 
    `Open` 이 돌려준 fetcher가 `io.Closer` 면 그 메일박스를 끝낸 뒤 닫습니다.
    단일 fetcher만 있는 경우를 위해 `Collect(ctx, st, fetcher, now)` 도 있습니다(테스트·단일 메일박스용).
@@ -108,50 +107,28 @@ runner := probe.New(probe.Options{
 4. **API**: `POST /senders/{id}/probe` → `Trigger` → 반환된 run id. 프로브 메일박스가 하나도 없으면
    `ErrNoMailbox`(DNS 체커가 있으면 DNS 전용 run으로 대체하고 "loopback 미구성"을 상태 사유에 남깁니다, ADR-0012).
 
-## sender에 필요한 한 줄
+## sender 쪽
 
-§11.2는 프로브 메일에 `X-Sendplane-Probe: {run_id}/{hmac}` 가 붙기를 요구하지만,
-현재 sender는 **커스텀 헤더를 `Hooks.BeforeSend` 로만** 받습니다. `Delivery` 에는 `Headers` 필드가 없고,
-`Delivery.Vars` 도 헤더로 옮겨지지 않습니다(`internal/sender/process.go` 의 `Headers: map[string]string{}`).
-프로브 패키지가 훅에 의존할 수는 없으므로 **지금은 제목의 run id가 검색 키**입니다(`Collect` 이 헤더 → 제목 순으로 찾습니다).
+`renderMessage` 가 `Delivery.Vars["probe_token"]` 을 `X-Sendplane-Probe` 헤더로 내보내므로
+`Collect` 의 헤더 검색이 1순위로 동작하고 제목 폴백은 호환 경로로만 남습니다.
+`X-` 접두사는 헤더 화이트리스트를 통과합니다(`internal/sender/message.go`).
 
-sender 쪽 변경은 `internal/sender/process.go` 의 `renderMessage` 마지막 리턴 한 줄입니다:
+`lane=probe` 는 **트래킹(오픈 픽셀·링크 재작성·수신거부)과 suppression에서 모두 제외**됩니다(§11.2, ADR-0012).
+프로브 메일은 sendplane이 소유한 메일박스로 가므로 오픈/클릭 이벤트를 남길 이유가 없습니다.
 
-```go
--		Headers:        map[string]string{},
-+		Headers:        probeHeaders(d),   // d.Vars["probe_token"] 이 있으면 {"X-Sendplane-Probe": tok}
-```
+## 스토어 계약
 
-`X-` 접두사는 이미 헤더 화이트리스트를 통과하므로(`internal/sender/message.go`) 추가 허용은 필요 없습니다.
-그때가 되면 `Collect` 의 헤더 검색이 그대로 1순위로 동작하고 제목 폴백은 호환 경로로 남습니다.
+`ProbeRunRepo` 는 `Create`/`Update`/`Get`/`ListBySender`/`ListPending` 입니다. run은 `Pending: true` 로
+쓰이고 메일이 도착하거나 타임아웃이 지날 때 한 번 갱신됩니다(타입 단언 없이 `Update` 를 그대로 부릅니다).
+`Collect` 과 `Tick` 은 `ListPending` 을 한 번 읽습니다 — sender마다 전체 이력을 페이징하지 않습니다.
+한 번의 `Trigger` 가 만든 run들은 `GroupID` 를 공유하고 API의 `ProbeRun` 스키마에 `group_id`/`pending` 으로 나옵니다.
 
-## 스토어 갭 (이 패키지 범위 밖, 변경 제안)
+남은 갭:
 
-1. **`store.ProbeRunRepo` 에 `Update` 가 없습니다.** pending → finished 전이가 필요합니다.
-   `memstore`/`postgres`/`mongo` 세 구현 모두 공용 CRUD에서 `Update` 를 이미 갖고 있어 런타임 타입 단언으로 동작하지만,
-   인터페이스에 한 줄 추가하는 것이 옳습니다. 없으면 `Collect` 이 `ErrRunsImmutable` 을 돌려줍니다.
-   ```go
-   type ProbeRunRepo interface {
-       Create(ctx context.Context, r *ProbeRun) error
-       Update(ctx context.Context, r *ProbeRun) error   // ← 추가
-       Get(ctx context.Context, id string) (*ProbeRun, error)
-       ListBySender(ctx context.Context, senderID string, p Page) (Result[ProbeRun], error)
-   }
-   ```
-2. **pending 상태 필드가 없습니다.** `Status == unknown && ReceivedAt.IsZero()` 를 pending으로 씁니다.
-   완료된 run은 항상 green/yellow/red 중 하나라는 불변식에 기대는 것이라, `ProbeRun.Pending bool` 이나
-   전용 열거형이 있으면 더 낫습니다.
-3. **run 묶음 ID가 없습니다.** 한 번의 `Trigger` 는 메일박스 수만큼 run을 만드는데 이를 묶는 필드가 없어
-   `StartedAt` 이 같은 것으로 묶습니다. `ProbeRun.GroupID string` 이면 API가 "이 트리거의 결과"를 그대로 조회할 수 있습니다.
-   (현재 `Trigger` 는 첫 메일박스의 run ID를 돌려줍니다.)
-4. **pending run 조회가 `ListBySender` 밖에 없습니다.** `Collect` 이 sender마다 전체 이력을 페이징합니다.
-   보존기간이 이력을 잘라 주기 전까지는 비용이 이력 길이에 비례합니다. `ListPending(ctx, p)` 가 있으면 좋습니다.
-5. **`lane=probe` 가 트래킹에서 제외되지 않습니다.** §11.2는 "통계·트래킹·suppression에서 제외"라고 하는데
-   `internal/sender/process.go` 는 suppression만 건너뜁니다(`d.Lane != store.LaneProbe`). 프로브 메일에 오픈 픽셀과
-   클릭 재작성이 들어갑니다(프로브 본문에 링크는 없어 클릭 재작성은 무해, 픽셀은 들어감).
-   같은 조건을 트래킹 블록에도 걸면 됩니다.
-6. **`SendingDomain.OutboundIPs` 를 갱신하지 않습니다.** 관측 IP는 `ProbeRun.ObservedIP` 에만 남깁니다.
+1. **`SendingDomain.OutboundIPs` 를 갱신하지 않습니다.** 관측 IP는 `ProbeRun.ObservedIP` 에만 남깁니다.
    도메인 행까지 쓰려면 낙관적 갱신 한 번이 더 필요하고, 그 소유권은 control에 두는 편이 맞아 보여 남겨 뒀습니다.
+2. **`Trigger` 는 여전히 첫 메일박스의 run ID를 돌려줍니다.** `GroupID` 로 묶어 한 번에 조회하려면
+   `ProbeRunRepo.ListByGroup` 이 있어야 합니다(지금은 API가 그 한 run만 보고합니다).
 
 ## 테스트
 

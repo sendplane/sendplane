@@ -79,12 +79,40 @@ func (r *versionRepo) ListByTemplate(_ context.Context, templateID string, p sto
 	return r.listWhere(p, func(v *store.MessageVersion) bool { return v.TemplateID == templateID })
 }
 
+// --- bounce mailboxes --------------------------------------------------
+
+type bounceMailboxRepo struct{ table[store.BounceMailbox] }
+
+func (r *bounceMailboxRepo) ListEnabled(_ context.Context) ([]store.BounceMailbox, error) {
+	r.p.mu.Lock()
+	defer r.p.mu.Unlock()
+	if err := r.p.check(); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(r.rows))
+	for id, m := range r.rows {
+		if m.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	out := make([]store.BounceMailbox, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, *r.rows[id])
+	}
+	return out, nil
+}
+
 // --- probe runs --------------------------------------------------------
 
 type probeRunRepo struct{ table[store.ProbeRun] }
 
 func (r *probeRunRepo) ListBySender(_ context.Context, senderID string, p store.Page) (store.Result[store.ProbeRun], error) {
 	return r.listWhere(p, func(v *store.ProbeRun) bool { return v.SenderID == senderID })
+}
+
+func (r *probeRunRepo) ListPending(_ context.Context, p store.Page) (store.Result[store.ProbeRun], error) {
+	return r.listWhere(p, func(v *store.ProbeRun) bool { return v.Pending })
 }
 
 // --- campaigns ---------------------------------------------------------
@@ -209,6 +237,32 @@ func (r *suppressionRepo) List(_ context.Context, p store.Page) (store.Result[st
 	}
 	// Suppressions are keyed by email_norm, so that is also the cursor.
 	return paginate(r.s.d.suppressions, p, nil), nil
+}
+
+// DeleteBefore removes expired entries only: a zero ExpiresAt means "never
+// expires" and is not eligible whatever the cutoff (store.SuppressionRepo).
+func (r *suppressionRepo) DeleteBefore(_ context.Context, before time.Time, limit int) (int, error) {
+	r.s.p.mu.Lock()
+	defer r.s.p.mu.Unlock()
+	if err := r.s.p.check(); err != nil {
+		return 0, err
+	}
+	before = store.TruncateTime(before)
+	keys := make([]string, 0, len(r.s.d.suppressions))
+	for k, v := range r.s.d.suppressions {
+		if v.ExpiresAt.IsZero() || v.ExpiresAt.After(before) {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if limit > 0 && len(keys) > limit {
+		keys = keys[:limit]
+	}
+	for _, k := range keys {
+		delete(r.s.d.suppressions, k)
+	}
+	return len(keys), nil
 }
 
 func (r *suppressionRepo) Delete(_ context.Context, emailNorm string) error {
@@ -406,6 +460,40 @@ func (r *outboxRepo) ClaimPending(_ context.Context, limit int, lease time.Durat
 		out = append(out, *e)
 	}
 	return out, nil
+}
+
+func (r *outboxRepo) Get(_ context.Context, id string) (*store.OutboxEvent, error) {
+	r.s.p.mu.Lock()
+	defer r.s.p.mu.Unlock()
+	if err := r.s.p.check(); err != nil {
+		return nil, err
+	}
+	e, ok := r.s.d.outbox[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: outbox %s", store.ErrNotFound, id)
+	}
+	cp := *e
+	return &cp, nil
+}
+
+// Reset is the replay verb: a full attempt budget again, due now.
+func (r *outboxRepo) Reset(_ context.Context, id string, now time.Time) error {
+	r.s.p.mu.Lock()
+	defer r.s.p.mu.Unlock()
+	if err := r.s.p.check(); err != nil {
+		return err
+	}
+	e, ok := r.s.d.outbox[id]
+	if !ok {
+		return fmt.Errorf("%w: outbox %s", store.ErrNotFound, id)
+	}
+	e.Status = store.OutboxPending
+	e.Attempts = 0
+	e.LastError = ""
+	e.NextAttemptAt = store.TruncateTime(now)
+	e.LeaseOwner, e.LeaseUntil = "", time.Time{}
+	e.DeliveredAt = time.Time{}
+	return nil
 }
 
 func (r *outboxRepo) MarkDelivered(_ context.Context, id string, at time.Time) error {

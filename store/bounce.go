@@ -55,3 +55,56 @@ type BounceRepo interface {
 	// (architecture 16). A limit <= 0 means "every match".
 	DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error)
 }
+
+// BounceMailbox is an IMAP/POP3 account the bounce poller reads DSNs and
+// feedback reports from (architecture 10). It has the same shape as
+// ProbeMailbox — the two are different accounts with different jobs, and a
+// single mailbox row could not carry both an AfterProcess policy and the
+// inbox/spam folder mapping a probe verdict needs — plus the post-processing
+// policy the poller applies to a handled message.
+type BounceMailbox struct {
+	ID       string
+	TenantID string
+	Name     string
+
+	// Address is the mailbox's own address. It is informational: the poller
+	// dials Host/Port, and correlation comes from the message, not from here.
+	// It is what an operator recognizes the row by next to the return-path
+	// domain it belongs to.
+	Address string
+
+	// Protocol is "imap" or "pop3"; empty means imap.
+	Protocol string
+	Host     string
+	Port     int
+	TLS      TLSMode
+	Username string
+	// Password is encrypted at rest by the host's SecretCipher.
+	Password []byte
+
+	// Folder is the IMAP mailbox to read. Empty means INBOX; POP3 ignores it.
+	Folder string
+	// AfterProcess is what happens to a handled message: "keep" (the default),
+	// "delete" or "move:<folder>" (IMAP only). internal/mailbox.ParseAction
+	// validates it.
+	AfterProcess string
+
+	Enabled bool
+
+	Version   int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// BounceMailboxRepo is the CRUD surface plus the listing the poller needs.
+type BounceMailboxRepo interface {
+	Create(ctx context.Context, m *BounceMailbox) error
+	Get(ctx context.Context, id string) (*BounceMailbox, error)
+	Update(ctx context.Context, m *BounceMailbox) error
+	Delete(ctx context.Context, id string) error
+	List(ctx context.Context, p Page) (Result[BounceMailbox], error)
+	// ListEnabled returns every enabled mailbox of the tenant in one call,
+	// unpaginated: the poller re-reads the whole set every RefreshInterval and
+	// a tenant has a handful of bounce mailboxes, not a page of them.
+	ListEnabled(ctx context.Context) ([]BounceMailbox, error)
+}

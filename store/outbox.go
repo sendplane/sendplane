@@ -41,7 +41,15 @@ type OutboxRepo interface {
 	Enqueue(ctx context.Context, evs []OutboxEvent) error
 	// ClaimPending leases due pending events for one dispatcher.
 	ClaimPending(ctx context.Context, limit int, lease time.Duration, owner string, now time.Time) ([]OutboxEvent, error)
+	// Get reads one event. It is what GET /events/{id} uses; without it a
+	// caller has to page the whole listing looking for an ID.
+	Get(ctx context.Context, id string) (*OutboxEvent, error)
 	MarkDelivered(ctx context.Context, id string, at time.Time) error
+	// Reset puts an event back to pending, due at now, with Attempts zeroed
+	// and LastError and the lease cleared. It is the replay verb: a dead
+	// letter the host fixed the cause of gets a full budget of attempts
+	// again, which MarkFailed could not express (it only ever increments).
+	Reset(ctx context.Context, id string, now time.Time) error
 	// MarkFailed schedules a retry; an empty nextAttempt moves the event to
 	// the dead letter state.
 	MarkFailed(ctx context.Context, id string, nextAttempt time.Time, errMsg string) error

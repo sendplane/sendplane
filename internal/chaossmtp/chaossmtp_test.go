@@ -54,10 +54,10 @@ func TestAcceptAndRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	c := dial(t, s)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if err := send(c, "bounce+abc@bounce.example", "a@example.com", message("a@example.com", 1)); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -140,14 +140,14 @@ func TestOutcomesMatchDecide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	for i := 0; i < 40; i++ {
 		rcpt := fmt.Sprintf("r%d@example.com", i)
 		want := Decide(7, r, rcpt, 3)
 		c := dial(t, s)
 		err := send(c, "s@example.com", rcpt, message(rcpt, 3))
-		c.Close()
+		_ = c.Close()
 
 		switch want {
 		case Accept:
@@ -207,12 +207,12 @@ func TestAttemptFallbackCountsPerRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// No attempt header: the server counts per recipient.
 	noHeader := []byte("From: <s@example.com>\r\nSubject: x\r\n\r\nbody\r\n")
 	c := dial(t, s)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	for i := 1; i <= 3; i++ {
 		_ = send(c, "s@example.com", "x@example.com", noHeader)
 		_ = c.Reset()
@@ -233,10 +233,10 @@ func TestRateLimitAfter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	c := dial(t, s)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	for i := 1; i <= 2; i++ {
 		if err := send(c, "s@example.com", "a@example.com", message("a@example.com", i)); err != nil {
 			t.Fatalf("message %d: %v", i, err)
@@ -253,7 +253,7 @@ func TestRateLimitAfter(t *testing.T) {
 
 	// A fresh connection starts over.
 	c2 := dial(t, s)
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 	if err := send(c2, "s@example.com", "a@example.com", message("a@example.com", 4)); err != nil {
 		t.Fatalf("new connection: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	host, _, _ := net.SplitHostPort(s.Addr())
 
 	// Without AUTH, MAIL is refused.
@@ -274,7 +274,7 @@ func TestAuth(t *testing.T) {
 	if !asProto(err, &pe) || pe.Code != 530 {
 		t.Fatalf("unauthenticated MAIL: %v, want 530", err)
 	}
-	c.Close()
+	_ = c.Close()
 
 	for _, auth := range []struct {
 		name string
@@ -290,11 +290,11 @@ func TestAuth(t *testing.T) {
 		if err := send(c, "s@example.com", "a@example.com", message("a@example.com", 1)); err != nil {
 			t.Fatalf("%s: send: %v", auth.name, err)
 		}
-		c.Close()
+		_ = c.Close()
 	}
 
 	c = dial(t, s)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if err := c.Auth(smtp.PlainAuth("", "user", "wrong", host, true)); err == nil {
 		t.Fatal("wrong password accepted")
 	}
@@ -308,9 +308,9 @@ func TestLatency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	c := dial(t, s)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	start := time.Now()
 	if err := send(c, "s@example.com", "a@example.com", message("a@example.com", 1)); err != nil {
 		t.Fatal(err)
@@ -330,7 +330,7 @@ func TestThroughput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	const conns, per = 8, 250
 	var wg sync.WaitGroup
@@ -350,7 +350,7 @@ func TestThroughput(t *testing.T) {
 				t.Errorf("client: %v", err)
 				return
 			}
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			for j := 0; j < per; j++ {
 				rcpt := fmt.Sprintf("u%d-%d@example.com", i, j)
 				if err := send(c, "s@example.com", rcpt, message(rcpt, 1)); err != nil {
@@ -384,9 +384,9 @@ func TestBounceHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	c := dial(t, s)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if err := send(c, "s@example.com", "a@example.com", message("a@example.com", 1)); err != nil {
 		t.Fatal(err)
 	}
@@ -400,5 +400,51 @@ func TestBounceHook(t *testing.T) {
 func TestRejectsImpossibleRates(t *testing.T) {
 	if _, err := Start(Options{Rates: Rates{TempFailRate: 0.7, PermFailRate: 0.4}}); err == nil {
 		t.Fatal("rates over 1 accepted")
+	}
+}
+
+// KeepMessages bounds what a long-running server remembers. The default (a
+// zero Options) still keeps everything, because every other test asserts on
+// Messages().
+func TestKeepMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		keep int
+		want int
+	}{
+		{"default keeps everything", 0, 3},
+		{"keep none", KeepNone, 0},
+		{"ring keeps the most recent", 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, err := Start(Options{KeepMessages: tc.keep})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = srv.Close() }()
+			c := dial(t, srv)
+			defer func() { _ = c.Close() }()
+			for i := range 3 {
+				rcpt := fmt.Sprintf("r%d@example.com", i)
+				if err := send(c, "s@example.com", rcpt, message(rcpt, 1)); err != nil {
+					t.Fatalf("send %s: %v", rcpt, err)
+				}
+			}
+			s := srv
+			msgs := s.Messages()
+			if len(msgs) != tc.want {
+				t.Fatalf("Messages() = %d, want %d", len(msgs), tc.want)
+			}
+			if tc.keep == 2 {
+				// The ring drops from the front, so the newest survive.
+				if msgs[0].Rcpts[0] != "r1@example.com" || msgs[1].Rcpts[0] != "r2@example.com" {
+					t.Fatalf("ring kept %v, want the two most recent", msgs)
+				}
+			}
+			// The counters are unaffected by what is remembered.
+			if got := s.Stats().Accepted; got != 3 {
+				t.Fatalf("Accepted = %d, want 3", got)
+			}
+		})
 	}
 }

@@ -113,6 +113,8 @@ tags:
     description: From identities bound to a transport and a sending domain.
   - name: Sending Domains
     description: DKIM material, return-path domain and observed outbound IPs.
+  - name: Bounce Mailboxes
+    description: IMAP/POP3 accounts DSNs and feedback reports are polled from (architecture 10).
   - name: Probe Mailboxes
     description: IMAP accounts loopback probe mail is recovered from.
   - name: Probe Runs
@@ -558,6 +560,103 @@ paths:
       operationId: deleteSendingDomain
       summary: Delete a sending domain
       tags: [Sending Domains]
+      x-sendplane-action: sender.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/bounce-mailboxes:
+    get:
+      operationId: listBounceMailboxes
+      summary: List bounce mailboxes
+      tags: [Bounce Mailboxes]
+      x-sendplane-action: sender.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of bounce mailboxes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BounceMailboxList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createBounceMailbox
+      summary: Create a bounce mailbox
+      tags: [Bounce Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BounceMailboxInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BounceMailbox' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/bounce-mailboxes/{mailboxId}:
+    parameters:
+      - { $ref: '#/components/parameters/BounceMailboxId' }
+    get:
+      operationId: getBounceMailbox
+      summary: Read a bounce mailbox
+      tags: [Bounce Mailboxes]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: The bounce mailbox.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BounceMailbox' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateBounceMailbox
+      summary: Replace a bounce mailbox
+      description: Omitting `password` keeps the stored one.
+      tags: [Bounce Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BounceMailboxUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BounceMailbox' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteBounceMailbox
+      summary: Delete a bounce mailbox
+      tags: [Bounce Mailboxes]
       x-sendplane-action: sender.write
       responses:
         '204': { $ref: '#/components/responses/NoContent' }
@@ -2038,6 +2137,12 @@ components:
       required: true
       description: Probe mailbox ID.
       schema: { type: string, format: uuid }
+    BounceMailboxId:
+      name: mailboxId
+      in: path
+      required: true
+      description: Bounce mailbox ID.
+      schema: { type: string, format: uuid }
     RunId:
       name: runId
       in: path
@@ -2354,7 +2459,11 @@ components:
           type: string
           format: byte
           writeOnly: true
-          description: Base64 HMAC secret. Encrypted at rest; omit to keep the stored one.
+          description: |
+            Base64 HMAC secret. Stored as-is rather than through the host's
+            secret cipher: every replica that verifies a tracking token, a VERP
+            return path or a one-click unsubscribe reads this key directly, and
+            some of them have no cipher configured. Omit to keep the stored one.
         created_at: { type: string, format: date-time, readOnly: true }
 
     TrackingConfig:
@@ -2600,6 +2709,84 @@ components:
               type: array
               items: { $ref: '#/components/schemas/SendingDomain' }
 
+    MailboxProtocol:
+      type: string
+      enum: [imap, pop3]
+      default: imap
+      description: |
+        Receiving protocol. POP3 cannot move messages to another folder, so
+        `after_process` may not be `move:<folder>` on a POP3 mailbox.
+
+    BounceMailbox:
+      type: object
+      description: |
+        IMAP/POP3 account DSNs and feedback reports are polled from
+        (architecture 10). One poller runs per mailbox cluster-wide, held by a
+        store lock, so replicas never process the same message twice.
+      required: [id, name, host, port, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        address:
+          type: string
+          description: |
+            The mailbox's own address. Informational: correlation comes from
+            the message (VERP, `X-Sendplane-ID`, `Message-ID`), not from here.
+        protocol: { $ref: '#/components/schemas/MailboxProtocol' }
+        host: { type: string }
+        port: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+        tls: { $ref: '#/components/schemas/TLSMode' }
+        username: { type: string }
+        has_password: { type: boolean, readOnly: true }
+        folder:
+          type: string
+          description: IMAP mailbox to read. Empty means INBOX; POP3 ignores it.
+        after_process:
+          type: string
+          description: |
+            What happens to a handled message: `keep` (the default), `delete`
+            or `move:<folder>` (IMAP only).
+        enabled: { type: boolean }
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    BounceMailboxInput:
+      type: object
+      required: [name, host, port]
+      properties:
+        name: { type: string, minLength: 1 }
+        address: { type: string }
+        protocol: { $ref: '#/components/schemas/MailboxProtocol' }
+        host: { type: string, minLength: 1 }
+        port: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+        tls: { $ref: '#/components/schemas/TLSMode' }
+        username: { type: string }
+        password:
+          type: string
+          writeOnly: true
+          description: Encrypted at rest. Omit on update to keep the stored one.
+        folder: { type: string, default: INBOX }
+        after_process: { type: string, default: keep }
+        enabled: { type: boolean, default: true }
+
+    BounceMailboxUpdate:
+      description: Bounce mailbox replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/BounceMailboxInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    BounceMailboxList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/BounceMailbox' }
+
     ProbeMailbox:
       type: object
       description: |
@@ -2678,6 +2865,17 @@ components:
           type: string
           format: uuid
           description: The `lane=probe` delivery that carried the mail.
+        group_id:
+          type: string
+          format: uuid
+          description: |
+            Ties together the runs one trigger created, one per probe mailbox.
+        pending:
+          type: boolean
+          description: |
+            True while the run is still waiting for its mail. A finished run
+            carries one of green/yellow/red; a DNS-only run can finish as
+            `unknown`, which is why this is a field of its own.
         status: { $ref: '#/components/schemas/HealthStatus' }
         reason: { type: string, description: 'Explains a non-green status, e.g. `dkim=fail`.' }
         delivered: { type: boolean }
@@ -3050,10 +3248,19 @@ components:
       properties:
         id: { type: string, format: uuid, readOnly: true }
         name: { type: string }
+        template_id:
+          type: string
+          format: uuid
+          description: |
+            The template the campaign was created from, when no version was
+            pinned. Start resolves it to the template's published version and
+            fills in `version_id`.
         version_id:
           type: string
           format: uuid
-          description: The message version this campaign is pinned to.
+          description: |
+            The message version this campaign is pinned to. Empty until start
+            resolves `template_id`.
         sender_id: { type: string, format: uuid }
         default_locale: { type: string }
         vars:
@@ -3086,7 +3293,10 @@ components:
         template_id:
           type: string
           format: uuid
-          description: Resolve the version from this template's published one.
+          description: |
+            Resolve the version from this template's published one, at start
+            rather than here: a template that is not published yet is accepted
+            and start fails if it still is not.
         sender_id: { type: string, format: uuid }
         default_locale: { type: string }
         vars: { $ref: '#/components/schemas/Vars' }

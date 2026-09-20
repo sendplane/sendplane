@@ -22,9 +22,10 @@ cp config.example.yaml config.yaml   # 필요한 값 채우기
 | `--migrate` | - | `false` | 마이그레이션만 실행하고 종료 |
 | `--migrate-on-start` | - | `false` | 역할을 시작하기 전에 마이그레이션 실행 |
 
-HTTP 서버는 어떤 역할 조합이든 항상 기동되고 `/healthz`를 응답합니다(쿠버네티스 프로브용). `sp.Handler()`(REST
-API)는 `control`이 `--roles`에 포함됐을 때만 `/`에 마운트됩니다. `bounce`는 아직 라이브러리에 구현되어 있지
-않아(`ErrNotImplemented`) 경고 로그만 남기고 나머지 역할은 계속 동작합니다.
+HTTP 서버는 어떤 역할 조합이든 항상 기동되고 `/healthz`를 응답합니다(쿠버네티스 프로브용). `control`이
+`--roles`에 있으면 `sp.Handler()`(REST API)가 `/`에 마운트되고 `/healthz`는 **그 핸들러가** 스펙대로 JSON으로
+답합니다. control이 없는 sender/bounce 전용 파드에서만 평문 `/healthz`를 따로 등록합니다 — 둘 다 등록하면
+`net/http` mux가 더 구체적인 `/healthz`를 골라 API 라우트를 가려 버립니다.
 
 ## 설정 파일
 
@@ -39,7 +40,12 @@ API)는 `control`이 `--roles`에 포함됐을 때만 `/`에 마운트됩니다.
 - `authz.mode`: `allow_all` 또는 `roles`(역할별 glob 패턴을 `host.Action` 문자열에 매칭)
 - `events.webhook`: HMAC-SHA256 서명(`X-Sendplane-Signature`) webhook. SSRF 방지를 위해 기본적으로
   사설/루프백 대역으로의 연결을 거부합니다(`allow_private_networks`로 해제)
-- `sender`: 레인별 워커 수, claim 배치 크기, 리스 시간 등 (`docs/architecture.md` §8)
+- `sender`: 레인별 워커 수, claim 배치 크기, 리스 시간 등 (`docs/architecture.md` §8). `lanes.probe`는 최소 1이어야
+  루프백 프로브가 실제로 나갑니다
+- `bounce`: 메일박스별 lock owner(`worker_id`), 폴링/새로고침 주기, IMAP IDLE 사용 여부 (§10).
+  메일박스 자체는 테넌트 리소스입니다: `POST /api/v1/bounce-mailboxes`
+- `probe`: 루프백 헬스 체크 (§11). `hmac_key`(base64)가 있으면 켜지고 `enabled`로 명시적으로 덮을 수 있습니다.
+  `nameservers`는 DNS 진단 계층이 직접 질의할 리졸버입니다
 - `limits`: `host.Limits`에 매핑, 0인 필드는 기본값으로 채워집니다
 
 ## cmd/chaos-smtp

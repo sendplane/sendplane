@@ -24,11 +24,11 @@ type pop3Server struct {
 }
 
 func (s *pop3Server) serve(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	r := bufio.NewReader(conn)
 	w := bufio.NewWriter(conn)
 	write := func(format string, args ...any) {
-		fmt.Fprintf(w, format+"\r\n", args...)
+		_, _ = fmt.Fprintf(w, format+"\r\n", args...)
 		_ = w.Flush()
 	}
 	write("+OK sendplane test pop3 ready")
@@ -57,7 +57,7 @@ func (s *pop3Server) serve(conn net.Conn) {
 			s.mu.Lock()
 			for i := range s.msgs {
 				if !marked[i+1] {
-					fmt.Fprintf(w, "%d uid-%d\r\n", i+1, i+1)
+					_, _ = fmt.Fprintf(w, "%d uid-%d\r\n", i+1, i+1)
 				}
 			}
 			s.mu.Unlock()
@@ -79,7 +79,7 @@ func (s *pop3Server) serve(conn net.Conn) {
 				if strings.HasPrefix(l, ".") {
 					l = "." + l // byte-stuffing, RFC 1939 section 3
 				}
-				fmt.Fprintf(w, "%s\r\n", l)
+				_, _ = fmt.Fprintf(w, "%s\r\n", l)
 			}
 			write(".")
 		case "DELE":
@@ -187,7 +187,7 @@ func TestPOP3MoveUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if _, err := c.Fetch(ctx, 10); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -33,8 +35,16 @@ type RetryPolicy struct {
 }
 
 // SigningKey is an HMAC key for tracking tokens, identified by KID so that
-// keys can rotate while old links stay valid. Secret is stored encrypted by
-// the host's SecretCipher.
+// keys can rotate while old links stay valid.
+//
+// Secret is the raw HMAC key and is stored AS-IS: it is NOT passed through
+// the host's SecretCipher, unlike an SMTP/IMAP password or a DKIM private
+// key. Every path that verifies a tracking token, a VERP address or a
+// one-click unsubscribe reads the key straight off the settings row, on
+// replicas that may have no cipher configured at all, and a value that had
+// been encrypted would verify nothing. Nothing in this repository encrypts
+// it, and the API never returns it (architecture 16); keeping the settings
+// row out of reach is the host's job.
 type SigningKey struct {
 	KID       string
 	Secret    []byte
@@ -61,6 +71,10 @@ type TenantSettings struct {
 	Retry              RetryPolicy
 	RetentionDays      int
 	SuppressionEnabled bool
+	// BounceRetainRaw keeps the whole bounce message on the BounceEvent
+	// (architecture 10: "raw 보존은 테넌트 설정"). Off by default: a returned
+	// original can be megabytes and it is kept for diagnosis, not archival.
+	BounceRetainRaw bool
 
 	UnsubscribeMode        UnsubscribeMode
 	UnsubscribeURLTemplate string // Liquid, evaluated per recipient
@@ -81,7 +95,28 @@ type TenantSettings struct {
 	UpdatedAt time.Time
 }
 
+// NewSigningKey mints a tracking token key: 32 random bytes and a short random
+// KID. The KID is generated separately from the secret, not derived from it,
+// so that publishing it in every link reveals nothing about the key.
+func NewSigningKey(now time.Time) SigningKey {
+	var buf [36]byte
+	// crypto/rand.Read fills the buffer completely and never returns an error
+	// (it crashes the program if the system source fails), so there is nothing
+	// here to fall back to.
+	_, _ = rand.Read(buf[:])
+	return SigningKey{
+		KID:       hex.EncodeToString(buf[32:]),
+		Secret:    append([]byte(nil), buf[:32]...),
+		CreatedAt: TruncateTime(now),
+	}
+}
+
 // DefaultTenantSettings is the settings row created on first access.
+//
+// It carries a freshly generated signing key. Opens, clicks, one-click
+// unsubscribe and VERP bounce correlation all sign with one, so a tenant that
+// nobody has configured yet should track rather than silently not; rotating or
+// replacing the key is a settings PUT away.
 func DefaultTenantSettings(tenantID string, now time.Time) *TenantSettings {
 	return &TenantSettings{
 		TenantID: tenantID,
@@ -96,9 +131,12 @@ func DefaultTenantSettings(tenantID string, now time.Time) *TenantSettings {
 		SuppressionEnabled: true,
 		UnsubscribeMode:    UnsubscribeSendplane,
 		DefaultLocale:      "en",
-		Tracking:           TrackingConfig{Opens: true, Clicks: true},
-		CreatedAt:          now.UTC(),
-		UpdatedAt:          now.UTC(),
+		Tracking: TrackingConfig{
+			Opens: true, Clicks: true,
+			SigningKeys: []SigningKey{NewSigningKey(now)},
+		},
+		CreatedAt: now.UTC(),
+		UpdatedAt: now.UTC(),
 	}
 }
 

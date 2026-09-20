@@ -67,10 +67,6 @@ var (
 	// ErrNoMailbox is returned by Trigger when the tenant has no enabled probe
 	// mailbox and no DNS checker is configured: there is nothing to run.
 	ErrNoMailbox = errors.New("probe: no enabled probe mailbox")
-	// ErrRunsImmutable is returned when the store's ProbeRunRepo cannot update
-	// a run. See the README: store.ProbeRunRepo is declared create-only, and
-	// Collect needs the pending → finished transition.
-	ErrRunsImmutable = errors.New("probe: ProbeRunRepo has no Update")
 )
 
 // RawMessage is one fetched probe mail. Raw only has to carry the header
@@ -181,8 +177,8 @@ func (r *Runner) VerifyToken(runID, token string) bool {
 // /senders/{id}/probe calls.
 //
 // The returned run ID is the first mailbox's ProbeRun. Every run of one
-// trigger shares StartedAt, which is how the console groups them; see the
-// README for the GroupID field that would make that explicit.
+// trigger shares a GroupID, so a console can ask for "the result of this
+// trigger" without guessing from StartedAt.
 //
 // With no probe mailbox configured, and a DNS checker available, it falls back
 // to a DNS-only run (ADR-0012: "없으면 DNS 검사만 수행하고 상태에 loopback
@@ -210,6 +206,7 @@ func (r *Runner) Trigger(ctx context.Context, st store.Store, senderID string) (
 		return "", err
 	}
 
+	groupID := store.NewID()
 	first := ""
 	for _, box := range boxes {
 		runID := store.NewID()
@@ -250,6 +247,8 @@ func (r *Runner) Trigger(ctx context.Context, st store.Store, senderID string) (
 			SenderID:   senderID,
 			MailboxID:  box.ID,
 			DeliveryID: deliveryID,
+			GroupID:    groupID,
+			Pending:    true,
 			Status:     store.HealthUnknown,
 			StartedAt:  now,
 			CreatedAt:  now,
@@ -284,6 +283,18 @@ func (r *Runner) Tick(ctx context.Context, st store.Store, now time.Time) error 
 	if err != nil {
 		return err
 	}
+	// One read of the pending set for the whole tick, rather than one walk of
+	// each sender's history per sender.
+	waiting, err := pendingRuns(ctx, st)
+	if err != nil {
+		return err
+	}
+	inFlight := map[string]bool{}
+	for i := range waiting {
+		if now.Sub(waiting[i].StartedAt) < r.opts.Timeout {
+			inFlight[waiting[i].SenderID] = true
+		}
+	}
 
 	var firstErr error
 	for i := range senders {
@@ -292,12 +303,7 @@ func (r *Runner) Tick(ctx context.Context, st store.Store, now time.Time) error 
 		if !due {
 			continue
 		}
-		pending, err := r.hasPendingRun(ctx, st, s.ID, now)
-		if err != nil {
-			firstErr = cmpErr(firstErr, err)
-			continue
-		}
-		if pending {
+		if inFlight[s.ID] {
 			// A run is still within its timeout window. Queuing another would
 			// double the mail and make "consecutive failures" meaningless.
 			continue
@@ -356,20 +362,6 @@ func (r *Runner) changedAfter(ctx context.Context, st store.Store) (map[string]t
 	return out, nil
 }
 
-func (r *Runner) hasPendingRun(ctx context.Context, st store.Store, senderID string, now time.Time) (bool, error) {
-	runs, err := r.runsOf(ctx, st, senderID)
-	if err != nil {
-		return false, err
-	}
-	for i := range runs {
-		run := &runs[i]
-		if isPending(run) && now.Sub(run.StartedAt) < r.opts.Timeout {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // Collect is the second half of the loop: it reads the probe mailboxes, turns
 // what it finds into verdicts, and updates the senders' health. fetcher is
 // used for every pending mailbox; use CollectWith when each mailbox needs its
@@ -380,9 +372,15 @@ func (r *Runner) Collect(ctx context.Context, st store.Store, fetcher MailboxFet
 
 // CollectWith is Collect with one connection per probe mailbox.
 func (r *Runner) CollectWith(ctx context.Context, st store.Store, opener MailboxOpener, now time.Time) error {
-	senders, err := listAll(ctx, st.Senders().List)
+	// Only the runs still waiting are read: paging every sender's whole
+	// history to find them cost the length of the history, which retention
+	// only bounds eventually (store.ProbeRunRepo.ListPending).
+	waiting, err := pendingRuns(ctx, st)
 	if err != nil {
 		return err
+	}
+	if len(waiting) == 0 {
+		return nil
 	}
 	boxes, err := listAll(ctx, st.ProbeMailboxes().List)
 	if err != nil {
@@ -393,32 +391,20 @@ func (r *Runner) CollectWith(ctx context.Context, st store.Store, opener Mailbox
 		byID[boxes[i].ID] = &boxes[i]
 	}
 
-	if _, ok := st.ProbeRuns().(runUpdater); !ok {
-		return ErrRunsImmutable
-	}
-
-	var firstErr error
 	// Runs are collected per mailbox so that one connection serves every
 	// sender's pending run in that mailbox.
 	all := map[string][]*store.ProbeRun{}
-	senderRuns := map[string][]store.ProbeRun{}
-	for i := range senders {
-		list, err := r.runsOf(ctx, st, senders[i].ID)
-		if err != nil {
-			firstErr = cmpErr(firstErr, err)
-			continue
+	for i := range waiting {
+		if waiting[i].MailboxID == "" {
+			continue // a DNS-only run waits for nothing
 		}
-		senderRuns[senders[i].ID] = list
-		for j := range list {
-			if isPending(&list[j]) && list[j].MailboxID != "" {
-				all[list[j].MailboxID] = append(all[list[j].MailboxID], &list[j])
-			}
-		}
+		all[waiting[i].MailboxID] = append(all[waiting[i].MailboxID], &waiting[i])
 	}
 	if len(all) == 0 {
-		return firstErr
+		return nil
 	}
 
+	var firstErr error
 	touched := map[string]bool{}
 	for mailboxID, pending := range all {
 		box := byID[mailboxID]
@@ -432,8 +418,15 @@ func (r *Runner) CollectWith(ctx context.Context, st store.Store, opener Mailbox
 		}
 	}
 
+	// The summary is the worst of the newest finished run per mailbox, so it
+	// needs the history of the senders that just changed - and only those.
 	for senderID := range touched {
-		if err := r.updateSenderHealth(ctx, st, senderID, senderRuns[senderID], now); err != nil {
+		runs, err := r.runsOf(ctx, st, senderID)
+		if err != nil {
+			firstErr = cmpErr(firstErr, err)
+			continue
+		}
+		if err := r.updateSenderHealth(ctx, st, senderID, runs, now); err != nil {
 			firstErr = cmpErr(firstErr, err)
 		}
 	}
@@ -452,7 +445,7 @@ func (r *Runner) collectMailbox(
 		fetcher, openErr = opener.Open(ctx, box)
 		if fetcher != nil {
 			if c, ok := fetcher.(io.Closer); ok {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 			}
 		}
 	}
@@ -566,6 +559,7 @@ func (r *Runner) finish(
 	run.PTR, run.PTRMatch = obs.PTR, obs.PTRMatch
 	run.RawHeaders = rawHeaders(msg.Raw)
 	run.ReceivedAt = store.TruncateTime(receivedAt(msg, h, now))
+	run.Pending = false
 	if report != nil {
 		if b, err := json.Marshal(report); err == nil {
 			run.DNS = b
@@ -609,6 +603,7 @@ func (r *Runner) finishUndelivered(
 	run.Reason = reason
 	run.Delivered = false
 	run.ReceivedAt = time.Time{}
+	run.Pending = false
 	return updateRun(ctx, st, run)
 }
 
@@ -648,9 +643,11 @@ func (r *Runner) dnsOnlyRun(ctx context.Context, st store.Store, snd *store.Send
 		reason = "loopback 미구성 · " + firstRedSummary(report)
 	}
 
+	// A DNS-only run has nothing to wait for, so it is written finished.
 	run := &store.ProbeRun{
 		ID:        store.NewID(),
 		SenderID:  snd.ID,
+		GroupID:   store.NewID(),
 		Status:    status,
 		Reason:    reason,
 		StartedAt: now,
@@ -946,27 +943,30 @@ func rawHeaders(raw []byte) string {
 	return string(raw)
 }
 
-// isPending reports whether a run is still waiting for its mail. A finished
-// run always carries one of green/yellow/red, so unknown is the pending
-// marker; see the README for the explicit status field that would be better.
-func isPending(r *store.ProbeRun) bool {
-	return r.Status == store.HealthUnknown && r.ReceivedAt.IsZero()
-}
-
-// runUpdater is store.ProbeRunRepo plus the Update that the pending →
-// finished transition needs. ProbeRunRepo is declared create-only ("immutable
-// run history"), but every implementation in this repository inherits Update
-// from its generic row table, so the assertion holds today. See the README.
-type runUpdater interface {
-	Update(ctx context.Context, r *store.ProbeRun) error
-}
+// isPending reports whether a run is still waiting for its mail
+// (store.ProbeRun.Pending).
+func isPending(r *store.ProbeRun) bool { return r.Pending }
 
 func updateRun(ctx context.Context, st store.Store, run *store.ProbeRun) error {
-	u, ok := st.ProbeRuns().(runUpdater)
-	if !ok {
-		return ErrRunsImmutable
+	return st.ProbeRuns().Update(ctx, run)
+}
+
+// pendingRuns lists every run still waiting for its mail, across senders. It
+// is what Collect walks instead of paging each sender's whole history.
+func pendingRuns(ctx context.Context, st store.Store) ([]store.ProbeRun, error) {
+	var out []store.ProbeRun
+	page := store.Page{Limit: store.MaxPageLimit}
+	for {
+		res, err := st.ProbeRuns().ListPending(ctx, page)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res.Items...)
+		if res.NextCursor == "" {
+			return out, nil
+		}
+		page.Cursor = res.NextCursor
 	}
-	return u.Update(ctx, run)
 }
 
 // runsOf lists every run of one sender, oldest first.

@@ -24,6 +24,13 @@ type Campaign struct {
 	TenantID string
 	Name     string
 
+	// TemplateID is the template a campaign that did not pin a version was
+	// created from. Start resolves it to the template's published version and
+	// writes the result into VersionID, so an edit published between creating
+	// and starting a campaign is the one that goes out (architecture 7.1).
+	// It is empty when the caller pinned VersionID itself, and it is only
+	// read while VersionID is empty.
+	TemplateID    string
 	VersionID     string
 	SenderID      string
 	DefaultLocale string

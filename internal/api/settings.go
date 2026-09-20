@@ -133,6 +133,9 @@ func (s *server) applyTracking(ctx context.Context, cur *store.TenantSettings, i
 	if in.Clicks != nil {
 		cur.Tracking.Clicks = *in.Clicks
 	}
+	// Omitting signing_keys keeps the stored keys, like every other writeOnly
+	// field: a client that PUTs back the body it read must not silently
+	// invalidate every link already in a mailbox.
 	if in.SigningKeys == nil {
 		return nil
 	}
@@ -152,14 +155,14 @@ func (s *server) applyTracking(ctx context.Context, cur *store.TenantSettings, i
 		}
 		seen[k.Kid] = true
 		old := stored[k.Kid]
-		var plain *string
+		// Unlike an SMTP/IMAP password or a DKIM key, a signing secret is
+		// stored as-is and never goes through Deps.Secrets: it is an HMAC key
+		// read directly by every path that verifies a token, on replicas that
+		// may have no cipher at all (store.SigningKey). Omitting it keeps the
+		// stored one, like every other writeOnly field.
+		sec := old.Secret
 		if k.Secret != nil {
-			str := string(*k.Secret)
-			plain = &str
-		}
-		sec, err := s.secret(ctx, plain, old.Secret)
-		if err != nil {
-			return err
+			sec = append([]byte(nil), *k.Secret...)
 		}
 		if len(sec) == 0 {
 			return errInvalid("tracking.signing_keys[%q] has no secret and none is stored", k.Kid)

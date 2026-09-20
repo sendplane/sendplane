@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -142,6 +143,43 @@ func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
 	return out, mapErr(rows.Err())
 }
 
+// knownTenantTables are the configuration tables Tenants unions over. They are
+// the small, tenant-keyed ones, each with a (tenant_id, ...) index leading
+// with the column being distinct-ed, so the scan stays cheap; the
+// per-recipient tables are deliberately left out (store.Provider.Tenants).
+var knownTenantTables = []string{
+	"tenant_settings", "transport", "sender", "sending_domain",
+	"bounce_mailbox", "probe_mailbox", "layout", "template", "campaign",
+}
+
+// Tenants lists every tenant with a settings row or a configuration row
+// (store.Provider).
+func (p *Provider) Tenants(ctx context.Context) ([]string, error) {
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	parts := make([]string, 0, len(knownTenantTables))
+	for _, t := range knownTenantTables {
+		parts = append(parts, "SELECT DISTINCT tenant_id FROM "+t)
+	}
+	q := "SELECT tenant_id FROM (" + strings.Join(parts, " UNION ") +
+		") t WHERE tenant_id <> $1 ORDER BY tenant_id"
+	rows, err := p.pool.Query(ctx, q, store.SystemTenantID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, id)
+	}
+	return out, mapErr(rows.Err())
+}
+
 // Close marks the provider closed and, when it created the pool itself,
 // closes the pool.
 func (p *Provider) Close() error {
@@ -166,6 +204,7 @@ type tenantStore struct {
 	transports   *crud[store.Transport]
 	senders      *crud[store.Sender]
 	domains      *crud[store.SendingDomain]
+	bounceBoxes  *bounceMailboxRepo
 	mailboxes    *crud[store.ProbeMailbox]
 	probeRuns    *probeRunRepo
 	layouts      *crud[store.Layout]
@@ -189,6 +228,7 @@ func newTenantStore(p *Provider, tenant string) *tenantStore {
 	s.transports = newCrud(p, tenant, transportSpec)
 	s.senders = newCrud(p, tenant, senderSpec)
 	s.domains = newCrud(p, tenant, domainSpec)
+	s.bounceBoxes = &bounceMailboxRepo{newCrud(p, tenant, bounceMailboxSpec)}
 	s.mailboxes = newCrud(p, tenant, mailboxSpec)
 	s.probeRuns = &probeRunRepo{newCrud(p, tenant, probeRunSpec)}
 	s.layouts = newCrud(p, tenant, layoutSpec)
@@ -211,6 +251,7 @@ func (s *tenantStore) TenantSettings() store.TenantSettingsRepo  { return s.sett
 func (s *tenantStore) Transports() store.TransportRepo           { return s.transports }
 func (s *tenantStore) Senders() store.SenderRepo                 { return s.senders }
 func (s *tenantStore) Domains() store.DomainRepo                 { return s.domains }
+func (s *tenantStore) BounceMailboxes() store.BounceMailboxRepo  { return s.bounceBoxes }
 func (s *tenantStore) ProbeMailboxes() store.ProbeMailboxRepo    { return s.mailboxes }
 func (s *tenantStore) ProbeRuns() store.ProbeRunRepo             { return s.probeRuns }
 func (s *tenantStore) Layouts() store.LayoutRepo                 { return s.layouts }

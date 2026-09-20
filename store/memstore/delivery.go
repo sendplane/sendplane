@@ -137,7 +137,7 @@ func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store
 		if d.Lane != req.Lane {
 			continue
 		}
-		if d.Status != store.DeliveryQueued && d.Status != store.DeliveryDeferred {
+		if !claimableStatus(d, campaigns) {
 			continue
 		}
 		if d.NextAttemptAt.After(now) {
@@ -171,6 +171,19 @@ func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store
 		out = append(out, *d)
 	}
 	return out, nil
+}
+
+// claimableStatus is the status half of the Claim predicate: queued and
+// deferred always, pending only for a campaign the caller named
+// (store.DeliveryRepo.Claim).
+func claimableStatus(d *store.Delivery, campaigns map[string]bool) bool {
+	switch d.Status {
+	case store.DeliveryQueued, store.DeliveryDeferred:
+		return true
+	case store.DeliveryPending:
+		return d.CampaignID != "" && campaigns[d.CampaignID]
+	}
+	return false
 }
 
 func (r *deliveryRepo) Complete(_ context.Context, results []store.DeliveryResult) error {

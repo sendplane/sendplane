@@ -64,18 +64,19 @@ func (p *Provider) check() error {
 type tenantData struct {
 	settings *store.TenantSettings
 
-	transports     map[string]*store.Transport
-	senders        map[string]*store.Sender
-	domains        map[string]*store.SendingDomain
-	probeMailboxes map[string]*store.ProbeMailbox
-	probeRuns      map[string]*store.ProbeRun
-	layouts        map[string]*store.Layout
-	templates      map[string]*store.Template
-	versions       map[string]*store.MessageVersion
-	campaigns      map[string]*store.Campaign
-	deliveries     map[string]*store.Delivery
-	bounces        map[string]*store.BounceEvent
-	outbox         map[string]*store.OutboxEvent
+	transports      map[string]*store.Transport
+	senders         map[string]*store.Sender
+	domains         map[string]*store.SendingDomain
+	bounceMailboxes map[string]*store.BounceMailbox
+	probeMailboxes  map[string]*store.ProbeMailbox
+	probeRuns       map[string]*store.ProbeRun
+	layouts         map[string]*store.Layout
+	templates       map[string]*store.Template
+	versions        map[string]*store.MessageVersion
+	campaigns       map[string]*store.Campaign
+	deliveries      map[string]*store.Delivery
+	bounces         map[string]*store.BounceEvent
+	outbox          map[string]*store.OutboxEvent
 
 	// campaignEmails enforces the (campaign_id, email_norm) unique key.
 	campaignEmails map[string]string
@@ -89,25 +90,26 @@ type tenantData struct {
 
 func newTenantData() *tenantData {
 	return &tenantData{
-		transports:     map[string]*store.Transport{},
-		senders:        map[string]*store.Sender{},
-		domains:        map[string]*store.SendingDomain{},
-		probeMailboxes: map[string]*store.ProbeMailbox{},
-		probeRuns:      map[string]*store.ProbeRun{},
-		layouts:        map[string]*store.Layout{},
-		templates:      map[string]*store.Template{},
-		versions:       map[string]*store.MessageVersion{},
-		campaigns:      map[string]*store.Campaign{},
-		deliveries:     map[string]*store.Delivery{},
-		bounces:        map[string]*store.BounceEvent{},
-		outbox:         map[string]*store.OutboxEvent{},
-		campaignEmails: map[string]string{},
-		chunks:         map[string]*store.RecipientChunk{},
-		attempts:       map[string]*store.DeliveryAttempt{},
-		suppressions:   map[string]*store.Suppression{},
-		tracking:       map[string]*store.TrackingEvent{},
-		locks:          map[string]*store.Lock{},
-		workers:        map[string]*store.Worker{},
+		transports:      map[string]*store.Transport{},
+		senders:         map[string]*store.Sender{},
+		domains:         map[string]*store.SendingDomain{},
+		bounceMailboxes: map[string]*store.BounceMailbox{},
+		probeMailboxes:  map[string]*store.ProbeMailbox{},
+		probeRuns:       map[string]*store.ProbeRun{},
+		layouts:         map[string]*store.Layout{},
+		templates:       map[string]*store.Template{},
+		versions:        map[string]*store.MessageVersion{},
+		campaigns:       map[string]*store.Campaign{},
+		deliveries:      map[string]*store.Delivery{},
+		bounces:         map[string]*store.BounceEvent{},
+		outbox:          map[string]*store.OutboxEvent{},
+		campaignEmails:  map[string]string{},
+		chunks:          map[string]*store.RecipientChunk{},
+		attempts:        map[string]*store.DeliveryAttempt{},
+		suppressions:    map[string]*store.Suppression{},
+		tracking:        map[string]*store.TrackingEvent{},
+		locks:           map[string]*store.Lock{},
+		workers:         map[string]*store.Worker{},
 	}
 }
 
@@ -146,6 +148,37 @@ func (p *Provider) ActiveTenants(_ context.Context) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// Tenants lists every tenant with a settings row or a configuration row
+// (store.Provider).
+func (p *Provider) Tenants(_ context.Context) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for id, d := range p.tenants {
+		if id == store.SystemTenantID {
+			continue
+		}
+		if isKnownTenant(d) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// isKnownTenant is the Tenants predicate: a settings row, or a row in one of
+// the configuration aggregates. ForTenant creates the (empty) map set on first
+// use, so "the map exists" would report every tenant anything ever asked for.
+func isKnownTenant(d *tenantData) bool {
+	return d.settings != nil ||
+		len(d.transports) > 0 || len(d.senders) > 0 || len(d.domains) > 0 ||
+		len(d.bounceMailboxes) > 0 || len(d.probeMailboxes) > 0 ||
+		len(d.layouts) > 0 || len(d.templates) > 0 || len(d.campaigns) > 0
 }
 
 // hasOpenWork is the ActiveTenants predicate: a delivery a sender could still
@@ -193,6 +226,8 @@ type tenantStore struct {
 	layouts        *table[store.Layout]
 	templates      *table[store.Template]
 
+	bounceMailboxes *bounceMailboxRepo
+
 	probeRuns *probeRunRepo
 	versions  *versionRepo
 	campaigns *campaignRepo
@@ -235,6 +270,13 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 		updated: func(v *store.SendingDomain) *time.Time { return &v.UpdatedAt },
 		times:   func(v *store.SendingDomain) []*time.Time { return []*time.Time{&v.HealthCheckedAt} },
 	}}
+	s.bounceMailboxes = &bounceMailboxRepo{table[store.BounceMailbox]{p: p, tenant: tenant, rows: d.bounceMailboxes, m: meta[store.BounceMailbox]{
+		id:      func(v *store.BounceMailbox) *string { return &v.ID },
+		tenant:  func(v *store.BounceMailbox) *string { return &v.TenantID },
+		version: func(v *store.BounceMailbox) *int64 { return &v.Version },
+		created: func(v *store.BounceMailbox) *time.Time { return &v.CreatedAt },
+		updated: func(v *store.BounceMailbox) *time.Time { return &v.UpdatedAt },
+	}}}
 	s.probeMailboxes = &table[store.ProbeMailbox]{p: p, tenant: tenant, rows: d.probeMailboxes, m: meta[store.ProbeMailbox]{
 		id:      func(v *store.ProbeMailbox) *string { return &v.ID },
 		tenant:  func(v *store.ProbeMailbox) *string { return &v.TenantID },
@@ -299,6 +341,7 @@ func (s *tenantStore) TenantSettings() store.TenantSettingsRepo  { return s.sett
 func (s *tenantStore) Transports() store.TransportRepo           { return s.transports }
 func (s *tenantStore) Senders() store.SenderRepo                 { return s.senders }
 func (s *tenantStore) Domains() store.DomainRepo                 { return s.domains }
+func (s *tenantStore) BounceMailboxes() store.BounceMailboxRepo  { return s.bounceMailboxes }
 func (s *tenantStore) ProbeMailboxes() store.ProbeMailboxRepo    { return s.probeMailboxes }
 func (s *tenantStore) ProbeRuns() store.ProbeRunRepo             { return s.probeRuns }
 func (s *tenantStore) Layouts() store.LayoutRepo                 { return s.layouts }

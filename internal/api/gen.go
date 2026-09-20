@@ -343,6 +343,24 @@ func (e Lane) Valid() bool {
 	}
 }
 
+// Defines values for MailboxProtocol.
+const (
+	Imap MailboxProtocol = "imap"
+	Pop3 MailboxProtocol = "pop3"
+)
+
+// Valid indicates whether the value is a known member of the MailboxProtocol enum.
+func (e MailboxProtocol) Valid() bool {
+	switch e {
+	case Imap:
+		return true
+	case Pop3:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for OutboxStatus.
 const (
 	OutboxStatusDelivered OutboxStatus = "delivered"
@@ -571,6 +589,88 @@ type BounceEventList struct {
 	NextCursor *string `json:"next_cursor,omitempty"`
 }
 
+// BounceMailbox IMAP/POP3 account DSNs and feedback reports are polled from
+// (architecture 10). One poller runs per mailbox cluster-wide, held by a
+// store lock, so replicas never process the same message twice.
+type BounceMailbox struct {
+	// Address The mailbox's own address. Informational: correlation comes from
+	// the message (VERP, `X-Sendplane-ID`, `Message-ID`), not from here.
+	Address *string `json:"address,omitempty"`
+
+	// AfterProcess What happens to a handled message: `keep` (the default), `delete`
+	// or `move:<folder>` (IMAP only).
+	AfterProcess *string    `json:"after_process,omitempty"`
+	CreatedAt    *time.Time `json:"created_at,omitempty"`
+	Enabled      *bool      `json:"enabled,omitempty"`
+
+	// Folder IMAP mailbox to read. Empty means INBOX; POP3 ignores it.
+	Folder      *string             `json:"folder,omitempty"`
+	HasPassword *bool               `json:"has_password,omitempty"`
+	Host        string              `json:"host"`
+	Id          *openapi_types.UUID `json:"id,omitempty"`
+	Name        string              `json:"name"`
+	Port        int32               `json:"port"`
+
+	// Protocol Receiving protocol. POP3 cannot move messages to another folder, so
+	// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+	Protocol  *MailboxProtocol `json:"protocol,omitempty"`
+	Tls       *TLSMode         `json:"tls,omitempty"`
+	UpdatedAt *time.Time       `json:"updated_at,omitempty"`
+	Username  *string          `json:"username,omitempty"`
+	Version   *int64           `json:"version,omitempty"`
+}
+
+// BounceMailboxInput defines model for BounceMailboxInput.
+type BounceMailboxInput struct {
+	Address      *string `json:"address,omitempty"`
+	AfterProcess *string `json:"after_process,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
+	Folder       *string `json:"folder,omitempty"`
+	Host         string  `json:"host"`
+	Name         string  `json:"name"`
+
+	// Password Encrypted at rest. Omit on update to keep the stored one.
+	Password *string `json:"password,omitempty"`
+	Port     int32   `json:"port"`
+
+	// Protocol Receiving protocol. POP3 cannot move messages to another folder, so
+	// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+	Protocol *MailboxProtocol `json:"protocol,omitempty"`
+	Tls      *TLSMode         `json:"tls,omitempty"`
+	Username *string          `json:"username,omitempty"`
+}
+
+// BounceMailboxList defines model for BounceMailboxList.
+type BounceMailboxList struct {
+	Items []BounceMailbox `json:"items"`
+
+	// NextCursor Pass as `cursor` for the next page. Empty or absent on the last page.
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// BounceMailboxUpdate Bounce mailbox replacement carrying the read version.
+type BounceMailboxUpdate struct {
+	Address      *string `json:"address,omitempty"`
+	AfterProcess *string `json:"after_process,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
+	Folder       *string `json:"folder,omitempty"`
+	Host         string  `json:"host"`
+	Name         string  `json:"name"`
+
+	// Password Encrypted at rest. Omit on update to keep the stored one.
+	Password *string `json:"password,omitempty"`
+	Port     int32   `json:"port"`
+
+	// Protocol Receiving protocol. POP3 cannot move messages to another folder, so
+	// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+	Protocol *MailboxProtocol `json:"protocol,omitempty"`
+	Tls      *TLSMode         `json:"tls,omitempty"`
+	Username *string          `json:"username,omitempty"`
+
+	// Version The `version` last read. A mismatch answers 409 `version_conflict`.
+	Version int64 `json:"version"`
+}
+
 // BounceSource Which correlation path matched the DSN back to a delivery.
 type BounceSource string
 
@@ -591,13 +691,19 @@ type Campaign struct {
 	StartedAt  *time.Time         `json:"started_at,omitempty"`
 	Stats      *CampaignStats     `json:"stats,omitempty"`
 	Status     CampaignStatus     `json:"status"`
-	UpdatedAt  *time.Time         `json:"updated_at,omitempty"`
+
+	// TemplateId The template the campaign was created from, when no version was
+	// pinned. Start resolves it to the template's published version and
+	// fills in `version_id`.
+	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
+	UpdatedAt  *time.Time          `json:"updated_at,omitempty"`
 
 	// Vars Campaign-wide variables, merged under each recipient's own.
 	Vars    *Vars  `json:"vars,omitempty"`
 	Version *int64 `json:"version,omitempty"`
 
-	// VersionId The message version this campaign is pinned to.
+	// VersionId The message version this campaign is pinned to. Empty until start
+	// resolves `template_id`.
 	VersionId *openapi_types.UUID `json:"version_id,omitempty"`
 }
 
@@ -608,7 +714,9 @@ type CampaignInput struct {
 	ScheduleAt    *time.Time         `json:"schedule_at,omitempty"`
 	SenderId      openapi_types.UUID `json:"sender_id"`
 
-	// TemplateId Resolve the version from this template's published one.
+	// TemplateId Resolve the version from this template's published one, at start
+	// rather than here: a template that is not published yet is accepted
+	// and start fails if it still is not.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
 
 	// Vars Free-form Liquid variables. Capped per recipient by `Limits`
@@ -658,7 +766,9 @@ type CampaignUpdate struct {
 	ScheduleAt    *time.Time         `json:"schedule_at,omitempty"`
 	SenderId      openapi_types.UUID `json:"sender_id"`
 
-	// TemplateId Resolve the version from this template's published one.
+	// TemplateId Resolve the version from this template's published one, at start
+	// rather than here: a template that is not published yet is accepted
+	// and start fails if it still is not.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
 
 	// Vars Free-form Liquid variables. Capped per recipient by `Limits`
@@ -978,6 +1088,10 @@ type LinkClickList struct {
 	Items []LinkClick `json:"items"`
 }
 
+// MailboxProtocol Receiving protocol. POP3 cannot move messages to another folder, so
+// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+type MailboxProtocol string
+
 // MessageRecipient defines model for MessageRecipient.
 type MessageRecipient struct {
 	Email  openapi_types.Email `json:"email"`
@@ -1245,8 +1359,11 @@ type ProbeRun struct {
 	Dns *map[string]interface{} `json:"dns,omitempty"`
 
 	// Folder Where the mail landed: `inbox` or `spam`.
-	Folder *string            `json:"folder,omitempty"`
-	Id     openapi_types.UUID `json:"id"`
+	Folder *string `json:"folder,omitempty"`
+
+	// GroupId Ties together the runs one trigger created, one per probe mailbox.
+	GroupId *openapi_types.UUID `json:"group_id,omitempty"`
+	Id      openapi_types.UUID  `json:"id"`
 
 	// Latency Go duration string, e.g. `30s`, `5m`, `12h`.
 	//
@@ -1254,7 +1371,12 @@ type ProbeRun struct {
 	Latency    *Duration          `json:"latency,omitempty"`
 	MailboxId  openapi_types.UUID `json:"mailbox_id"`
 	ObservedIp *string            `json:"observed_ip,omitempty"`
-	Ptr        *string            `json:"ptr,omitempty"`
+
+	// Pending True while the run is still waiting for its mail. A finished run
+	// carries one of green/yellow/red; a DNS-only run can finish as
+	// `unknown`, which is why this is a field of its own.
+	Pending *bool   `json:"pending,omitempty"`
+	Ptr     *string `json:"ptr,omitempty"`
 
 	// PtrMatch Forward-confirmed reverse DNS.
 	PtrMatch *bool `json:"ptr_match,omitempty"`
@@ -1554,7 +1676,10 @@ type SigningKeyInfo struct {
 	// Kid Key ID embedded in every token so keys can rotate while old links stay valid.
 	Kid string `json:"kid"`
 
-	// Secret Base64 HMAC secret. Encrypted at rest; omit to keep the stored one.
+	// Secret Base64 HMAC secret. Stored as-is rather than through the host's
+	// secret cipher: every replica that verifies a tracking token, a VERP
+	// return path or a one-click unsubscribe reads this key directly, and
+	// some of them have no cipher configured. Omit to keep the stored one.
 	Secret *[]byte `json:"secret,omitempty"`
 }
 
@@ -1935,6 +2060,9 @@ type VersionRequired struct {
 // BounceId defines model for BounceId.
 type BounceId = openapi_types.UUID
 
+// BounceMailboxId defines model for BounceMailboxId.
+type BounceMailboxId = openapi_types.UUID
+
 // CampaignId defines model for CampaignId.
 type CampaignId = openapi_types.UUID
 
@@ -2027,6 +2155,15 @@ type Unauthorized = Error
 //
 // Examples: {"code":"version_conflict","message":"template 018f...: version 4 is stale, current is 5"}
 type UnprocessableEntity = Error
+
+// ListBounceMailboxesParams defines parameters for ListBounceMailboxes.
+type ListBounceMailboxesParams struct {
+	// Limit Page size. Clamped into 1-1000.
+	Limit *Limit `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Opaque `next_cursor` from the previous page; omit for the first page.
+	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
 
 // ListBouncesParams defines parameters for ListBounces.
 type ListBouncesParams struct {
@@ -2233,6 +2370,12 @@ type OneClickUnsubscribeFormdataBody struct {
 
 // OneClickUnsubscribeFormdataBodyListUnsubscribe defines parameters for OneClickUnsubscribe.
 type OneClickUnsubscribeFormdataBodyListUnsubscribe string
+
+// CreateBounceMailboxJSONRequestBody defines body for CreateBounceMailbox for application/json ContentType.
+type CreateBounceMailboxJSONRequestBody = BounceMailboxInput
+
+// UpdateBounceMailboxJSONRequestBody defines body for UpdateBounceMailbox for application/json ContentType.
+type UpdateBounceMailboxJSONRequestBody = BounceMailboxUpdate
 
 // CreateCampaignJSONRequestBody defines body for CreateCampaign for application/json ContentType.
 type CreateCampaignJSONRequestBody = CampaignInput
@@ -2452,6 +2595,21 @@ func (t *UnsubscribeNotice) UnmarshalJSON(b []byte) error {
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// ListBounceMailboxes List bounce mailboxes
+	// (GET /api/v1/bounce-mailboxes)
+	ListBounceMailboxes(w http.ResponseWriter, r *http.Request, params ListBounceMailboxesParams)
+	// CreateBounceMailbox Create a bounce mailbox
+	// (POST /api/v1/bounce-mailboxes)
+	CreateBounceMailbox(w http.ResponseWriter, r *http.Request)
+	// DeleteBounceMailbox Delete a bounce mailbox
+	// (DELETE /api/v1/bounce-mailboxes/{mailboxId})
+	DeleteBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId)
+	// GetBounceMailbox Read a bounce mailbox
+	// (GET /api/v1/bounce-mailboxes/{mailboxId})
+	GetBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId)
+	// UpdateBounceMailbox Replace a bounce mailbox
+	// (PUT /api/v1/bounce-mailboxes/{mailboxId})
+	UpdateBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId)
 	// ListBounces List bounce events
 	// (GET /api/v1/bounces)
 	ListBounces(w http.ResponseWriter, r *http.Request, params ListBouncesParams)
@@ -2694,6 +2852,36 @@ type ServerInterface interface {
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// ListBounceMailboxes List bounce mailboxes
+// (GET /api/v1/bounce-mailboxes)
+func (_ Unimplemented) ListBounceMailboxes(w http.ResponseWriter, r *http.Request, params ListBounceMailboxesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// CreateBounceMailbox Create a bounce mailbox
+// (POST /api/v1/bounce-mailboxes)
+func (_ Unimplemented) CreateBounceMailbox(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// DeleteBounceMailbox Delete a bounce mailbox
+// (DELETE /api/v1/bounce-mailboxes/{mailboxId})
+func (_ Unimplemented) DeleteBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetBounceMailbox Read a bounce mailbox
+// (GET /api/v1/bounce-mailboxes/{mailboxId})
+func (_ Unimplemented) GetBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// UpdateBounceMailbox Replace a bounce mailbox
+// (PUT /api/v1/bounce-mailboxes/{mailboxId})
+func (_ Unimplemented) UpdateBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // ListBounces List bounce events
 // (GET /api/v1/bounces)
@@ -3177,6 +3365,144 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ListBounceMailboxes operation middleware
+func (siw *ServerInterfaceWrapper) ListBounceMailboxes(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListBounceMailboxesParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: "int32"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListBounceMailboxes(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateBounceMailbox operation middleware
+func (siw *ServerInterfaceWrapper) CreateBounceMailbox(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateBounceMailbox(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteBounceMailbox operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBounceMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "mailboxId" -------------
+	var mailboxId BounceMailboxId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBounceMailbox(w, r, mailboxId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBounceMailbox operation middleware
+func (siw *ServerInterfaceWrapper) GetBounceMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "mailboxId" -------------
+	var mailboxId BounceMailboxId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBounceMailbox(w, r, mailboxId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateBounceMailbox operation middleware
+func (siw *ServerInterfaceWrapper) UpdateBounceMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "mailboxId" -------------
+	var mailboxId BounceMailboxId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateBounceMailbox(w, r, mailboxId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // ListBounces operation middleware
 func (siw *ServerInterfaceWrapper) ListBounces(w http.ResponseWriter, r *http.Request) {
@@ -5820,6 +6146,21 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Put(options.BaseURL+"/api/v1/sending-domains/{domainId}", wrapper.UpdateSendingDomain)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/bounce-mailboxes", wrapper.ListBounceMailboxes)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/bounce-mailboxes", wrapper.CreateBounceMailbox)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/v1/bounce-mailboxes/{mailboxId}", wrapper.DeleteBounceMailbox)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/bounce-mailboxes/{mailboxId}", wrapper.GetBounceMailbox)
+	})
+	r.Group(func(r chi.Router) {
+		r.Put(options.BaseURL+"/api/v1/bounce-mailboxes/{mailboxId}", wrapper.UpdateBounceMailbox)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/probe-mailboxes", wrapper.ListProbeMailboxes)
 	})
 	r.Group(func(r chi.Router) {
@@ -6024,6 +6365,478 @@ type TooManyRequestsJSONResponse struct {
 type UnauthorizedJSONResponse Error
 
 type UnprocessableEntityJSONResponse Error
+
+type ListBounceMailboxesRequestObject struct {
+	Params ListBounceMailboxesParams
+}
+
+type ListBounceMailboxesResponseObject interface {
+	VisitListBounceMailboxesResponse(w http.ResponseWriter) error
+}
+
+type ListBounceMailboxes200JSONResponse BounceMailboxList
+
+func (response ListBounceMailboxes200JSONResponse) VisitListBounceMailboxesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListBounceMailboxes400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response ListBounceMailboxes400JSONResponse) VisitListBounceMailboxesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListBounceMailboxes401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ListBounceMailboxes401JSONResponse) VisitListBounceMailboxesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListBounceMailboxes403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response ListBounceMailboxes403JSONResponse) VisitListBounceMailboxesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListBounceMailboxes500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ListBounceMailboxes500JSONResponse) VisitListBounceMailboxesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBounceMailboxRequestObject struct {
+	Body *CreateBounceMailboxJSONRequestBody
+}
+
+type CreateBounceMailboxResponseObject interface {
+	VisitCreateBounceMailboxResponse(w http.ResponseWriter) error
+}
+
+type CreateBounceMailbox201JSONResponse BounceMailbox
+
+func (response CreateBounceMailbox201JSONResponse) VisitCreateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBounceMailbox400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response CreateBounceMailbox400JSONResponse) VisitCreateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBounceMailbox401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response CreateBounceMailbox401JSONResponse) VisitCreateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBounceMailbox403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response CreateBounceMailbox403JSONResponse) VisitCreateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBounceMailbox409JSONResponse struct{ ConflictJSONResponse }
+
+func (response CreateBounceMailbox409JSONResponse) VisitCreateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBounceMailbox422JSONResponse struct {
+	UnprocessableEntityJSONResponse
+}
+
+func (response CreateBounceMailbox422JSONResponse) VisitCreateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateBounceMailbox500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response CreateBounceMailbox500JSONResponse) VisitCreateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBounceMailboxRequestObject struct {
+	MailboxId BounceMailboxId `json:"mailboxId"`
+}
+
+type DeleteBounceMailboxResponseObject interface {
+	VisitDeleteBounceMailboxResponse(w http.ResponseWriter) error
+}
+
+type DeleteBounceMailbox204Response = NoContentResponse
+
+func (response DeleteBounceMailbox204Response) VisitDeleteBounceMailboxResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBounceMailbox401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response DeleteBounceMailbox401JSONResponse) VisitDeleteBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBounceMailbox403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response DeleteBounceMailbox403JSONResponse) VisitDeleteBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBounceMailbox404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response DeleteBounceMailbox404JSONResponse) VisitDeleteBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBounceMailbox409JSONResponse struct{ ConflictJSONResponse }
+
+func (response DeleteBounceMailbox409JSONResponse) VisitDeleteBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBounceMailbox500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response DeleteBounceMailbox500JSONResponse) VisitDeleteBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBounceMailboxRequestObject struct {
+	MailboxId BounceMailboxId `json:"mailboxId"`
+}
+
+type GetBounceMailboxResponseObject interface {
+	VisitGetBounceMailboxResponse(w http.ResponseWriter) error
+}
+
+type GetBounceMailbox200JSONResponse BounceMailbox
+
+func (response GetBounceMailbox200JSONResponse) VisitGetBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBounceMailbox401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response GetBounceMailbox401JSONResponse) VisitGetBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBounceMailbox403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response GetBounceMailbox403JSONResponse) VisitGetBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBounceMailbox404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response GetBounceMailbox404JSONResponse) VisitGetBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBounceMailbox500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response GetBounceMailbox500JSONResponse) VisitGetBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailboxRequestObject struct {
+	MailboxId BounceMailboxId `json:"mailboxId"`
+	Body      *UpdateBounceMailboxJSONRequestBody
+}
+
+type UpdateBounceMailboxResponseObject interface {
+	VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error
+}
+
+type UpdateBounceMailbox200JSONResponse BounceMailbox
+
+func (response UpdateBounceMailbox200JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailbox400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response UpdateBounceMailbox400JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailbox401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response UpdateBounceMailbox401JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailbox403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response UpdateBounceMailbox403JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailbox404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response UpdateBounceMailbox404JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailbox409JSONResponse struct{ ConflictJSONResponse }
+
+func (response UpdateBounceMailbox409JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailbox422JSONResponse struct {
+	UnprocessableEntityJSONResponse
+}
+
+func (response UpdateBounceMailbox422JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBounceMailbox500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response UpdateBounceMailbox500JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
 
 type ListBouncesRequestObject struct {
 	Params ListBouncesParams
@@ -13340,6 +14153,21 @@ func (response OneClickUnsubscribe429JSONResponse) VisitOneClickUnsubscribeRespo
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// ListBounceMailboxes List bounce mailboxes
+	// (GET /api/v1/bounce-mailboxes)
+	ListBounceMailboxes(ctx context.Context, request ListBounceMailboxesRequestObject) (ListBounceMailboxesResponseObject, error)
+	// CreateBounceMailbox Create a bounce mailbox
+	// (POST /api/v1/bounce-mailboxes)
+	CreateBounceMailbox(ctx context.Context, request CreateBounceMailboxRequestObject) (CreateBounceMailboxResponseObject, error)
+	// DeleteBounceMailbox Delete a bounce mailbox
+	// (DELETE /api/v1/bounce-mailboxes/{mailboxId})
+	DeleteBounceMailbox(ctx context.Context, request DeleteBounceMailboxRequestObject) (DeleteBounceMailboxResponseObject, error)
+	// GetBounceMailbox Read a bounce mailbox
+	// (GET /api/v1/bounce-mailboxes/{mailboxId})
+	GetBounceMailbox(ctx context.Context, request GetBounceMailboxRequestObject) (GetBounceMailboxResponseObject, error)
+	// UpdateBounceMailbox Replace a bounce mailbox
+	// (PUT /api/v1/bounce-mailboxes/{mailboxId})
+	UpdateBounceMailbox(ctx context.Context, request UpdateBounceMailboxRequestObject) (UpdateBounceMailboxResponseObject, error)
 	// ListBounces List bounce events
 	// (GET /api/v1/bounces)
 	ListBounces(ctx context.Context, request ListBouncesRequestObject) (ListBouncesResponseObject, error)
@@ -13616,6 +14444,148 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// ListBounceMailboxes operation middleware
+func (sh *strictHandler) ListBounceMailboxes(w http.ResponseWriter, r *http.Request, params ListBounceMailboxesParams) {
+	var request ListBounceMailboxesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListBounceMailboxes(ctx, request.(ListBounceMailboxesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListBounceMailboxes")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListBounceMailboxesResponseObject); ok {
+		if err := validResponse.VisitListBounceMailboxesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateBounceMailbox operation middleware
+func (sh *strictHandler) CreateBounceMailbox(w http.ResponseWriter, r *http.Request) {
+	var request CreateBounceMailboxRequestObject
+
+	var body CreateBounceMailboxJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateBounceMailbox(ctx, request.(CreateBounceMailboxRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateBounceMailbox")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateBounceMailboxResponseObject); ok {
+		if err := validResponse.VisitCreateBounceMailboxResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteBounceMailbox operation middleware
+func (sh *strictHandler) DeleteBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	var request DeleteBounceMailboxRequestObject
+
+	request.MailboxId = mailboxId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteBounceMailbox(ctx, request.(DeleteBounceMailboxRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBounceMailbox")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBounceMailboxResponseObject); ok {
+		if err := validResponse.VisitDeleteBounceMailboxResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBounceMailbox operation middleware
+func (sh *strictHandler) GetBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	var request GetBounceMailboxRequestObject
+
+	request.MailboxId = mailboxId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBounceMailbox(ctx, request.(GetBounceMailboxRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBounceMailbox")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBounceMailboxResponseObject); ok {
+		if err := validResponse.VisitGetBounceMailboxResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateBounceMailbox operation middleware
+func (sh *strictHandler) UpdateBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	var request UpdateBounceMailboxRequestObject
+
+	request.MailboxId = mailboxId
+
+	var body UpdateBounceMailboxJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.UpdateBounceMailbox(ctx, request.(UpdateBounceMailboxRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateBounceMailbox")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateBounceMailboxResponseObject); ok {
+		if err := validResponse.VisitUpdateBounceMailboxResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // ListBounces operation middleware

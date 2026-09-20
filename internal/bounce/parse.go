@@ -203,7 +203,7 @@ func (c *collected) walk(h textproto.MIMEHeader, body io.Reader, depth int) {
 				return
 			}
 			c.walk(part.Header, part, depth+1)
-			part.Close()
+			_ = part.Close()
 		}
 
 	case mediaType == "message/delivery-status":

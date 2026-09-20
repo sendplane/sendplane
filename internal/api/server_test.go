@@ -116,11 +116,14 @@ func TestErrorMapping(t *testing.T) {
 		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
 	})
 
-	t.Run("unpublished template is 422", func(t *testing.T) {
-		w := e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
+	// A campaign may be created from a template that has never been
+	// published: the version is resolved at start, so the failure moves there.
+	t.Run("unpublished template fails at start, not at create", func(t *testing.T) {
+		c := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
 			Name: "c", SenderId: *snd.Id, TemplateId: tpl.Id,
-		})
-		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeTemplateNotPublished)
+		}), http.StatusCreated)
+		w := e.do(http.MethodPost, "/api/v1/campaigns/"+c.Id.String()+"/start", nil)
+		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodePreconditionFailed)
 	})
 
 	t.Run("invalid campaign transition is 409", func(t *testing.T) {
@@ -248,6 +251,13 @@ func TestSigningSecretSurvivesARoundTrip(t *testing.T) {
 	}
 	if len(settings.Tracking.SigningKeys) != 1 || len(settings.Tracking.SigningKeys[0].Secret) == 0 {
 		t.Fatal("the stored signing secret was lost by the round trip")
+	}
+	// The HMAC key is stored as-is, not through the SecretCipher: every path
+	// that verifies a token reads it straight off the settings row, on
+	// replicas that may have no cipher (store.SigningKey).
+	if string(settings.Tracking.SigningKeys[0].Secret) != string(secret) {
+		t.Fatalf("stored signing secret = %q, want the plain HMAC key %q",
+			settings.Tracking.SigningKeys[0].Secret, secret)
 	}
 }
 

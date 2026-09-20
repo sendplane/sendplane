@@ -109,7 +109,7 @@ func TestIMAPFetchAndAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	msgs, err := c.Fetch(ctx, 2)
 	if err != nil {
@@ -159,7 +159,7 @@ func TestIMAPFetchAndAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial Handled: %v", err)
 	}
-	defer h.Close()
+	defer func() { _ = h.Close() }()
 	// Ack marked the message \Seen before moving it, so it is searched for by
 	// header rather than fetched as unhandled work.
 	moved, err := h.(HeaderSearcher).FetchByHeader(ctx, "X-Sendplane-Probe", "third")
@@ -181,7 +181,7 @@ func TestIMAPFetchByHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	s, ok := c.(HeaderSearcher)
 	if !ok {

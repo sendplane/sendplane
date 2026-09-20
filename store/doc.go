@@ -24,7 +24,10 @@
 //     (transactional and probe) are never deduplicated.
 //
 //   - CAS transitions. Every state transition is conditional on the state the
-//     caller observed. Claim moves queued/deferred to leased; Complete and
+//     caller observed. Claim moves queued/deferred to leased, plus the pending
+//     rows of the campaigns the caller named (see ClaimRequest.CampaignIDs:
+//     that is how a million ingested rows become sendable without a bulk
+//     update at start); Complete and
 //     MarkSent only apply while the row is still leased by that exact owner
 //     and are silently ignored otherwise (Complete) or report ErrLeaseLost
 //     (MarkSent). Delivery processing is therefore at-least-once (ADR-0002).

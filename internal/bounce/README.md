@@ -104,79 +104,31 @@ func LockName(mailboxID string) string                              // "bounce:"
 
 ## 루트 패키지 연결 (`RunBounce`)
 
-이 패키지는 루트를 import하지 않습니다. 루트가 다음을 구현하면 됩니다.
+이 패키지는 루트를 import하지 않습니다. 루트의 [`bounce.go`](../../bounce.go)가 배선합니다.
 
-```go
-// 1) 메일박스 목록. store에 BounceMailbox 모델이 없으므로(아래 참조) 루트가 공급합니다.
-type bounceMailboxes struct {
-    provider store.Provider
-    cfg      []sendplane.BounceMailboxConfig // Options에서 주입받은 설정
-}
-
-func (s bounceMailboxes) ListMailboxes(ctx context.Context) ([]bounce.TenantMailbox, error) {
-    out := make([]bounce.TenantMailbox, 0, len(s.cfg))
-    for _, m := range s.cfg {
-        action, err := mailbox.ParseAction(m.AfterProcess)
-        if err != nil {
-            return nil, err
-        }
-        out = append(out, bounce.TenantMailbox{
-            TenantID:  m.TenantID,
-            MailboxID: m.ID, // 테넌트 간에도 유일해야 함 (lock 이름이 됨)
-            Config: mailbox.Config{
-                Protocol: mailbox.Protocol(m.Protocol), // "imap" | "pop3"
-                Host:     m.Host, Port: m.Port, TLS: m.TLS, // store.TLSMode
-                Username: m.Username, Password: m.Password, // SecretCipher 암호문 그대로
-                Folder:   m.Folder, AfterProcess: action,
-            },
-        })
-    }
-    return out, nil
-}
-
-// 2) 역할 진입점.
-func (s *Sendplane) RunBounce(ctx context.Context) error {
-    r, err := bounce.NewRunner(bounce.RunnerConfig{
-        Owner:    s.opts.WorkerID,          // 복제본마다 유일, 프로세스 수명 동안 고정
-        Provider: s.provider,
-        Source:   bounceMailboxes{provider: s.provider, cfg: s.opts.BounceMailboxes},
-        Secrets:  s.opts.Secrets,           // host.SecretCipher, nil이면 비밀번호를 평문 취급
-        Processor: bounce.NewProcessor(bounce.Options{
-            RetainRaw: s.opts.BounceRetainRaw, // 기본 false
-            Clock:     s.clock,
-            Logger:    s.log,
-            Metrics:   s.opts.Metrics,
-        }),
-        PollInterval: s.opts.BouncePollInterval, // 0이면 1분
-        UseIdle:      true,
-        Logger:       s.log,
-        Metrics:      s.opts.Metrics,
-        Clock:        s.clock,
-    })
-    if err != nil {
-        return err
-    }
-    return r.Run(ctx)
-}
-```
+- **메일박스 목록**: `bounceMailboxes`가 `store.Provider.Tenants`(= 설정 행이나 설정성 행이 있는 **모든** 테넌트)를 돌며
+  각 테넌트의 `BounceMailboxes().ListEnabled`를 읽어 `bounce.TenantMailbox`로 변환합니다.
+  `ActiveTenants`를 쓰지 않는 이유가 그대로 여기 있습니다 — 바운스는 캠페인이 끝나고 한참 뒤에 도착합니다.
+  `AfterProcess`가 파싱되지 않는 행은 로그만 남기고 건너뜁니다(한 행 때문에 전체 새로고침이 멈추면 안 됩니다).
+- **역할 진입점**: `(*Sendplane).RunBounce(ctx, BounceConfig)`. `BounceConfig`는 lock owner(`WorkerID`,
+  비우면 호스트명+PID로 생성), `PollInterval`, `RefreshInterval`, `UseIdle`입니다.
+  `cmd/sendplane`의 `bounce:` 섹션이 그대로 매핑됩니다.
 
 `Processor`/`Runner` 둘 다 `host.SecretCipher`·`host.Metrics`를 leaf 패키지 `host`에서 받으므로
 루트가 별칭으로 재노출한 타입을 그대로 넘길 수 있습니다(§2.1, internal/sender와 같은 구조).
 
-## store 계약에 없어서 못 한 것
+## store 계약
 
-1. **`BounceMailbox` 모델·리포지터리가 없습니다.** `store.ProbeMailbox`는 있는데 바운스 메일박스는 없어서,
-   설정 구조체를 이 패키지(`TenantMailbox`)와 `internal/mailbox`(`Config`)에 두고 목록은 `MailboxSource`로 주입받습니다.
-   콘솔에서 바운스 메일박스를 CRUD하려면 `ProbeMailbox`와 같은 모양의 모델·리포지터리가 필요합니다
-   (`SendingDomain.ReturnPathDomain`은 있지만 그건 VERP 도메인이지 메일박스 접속 정보가 아닙니다).
-2. **raw 보존 여부가 테넌트 설정에 없습니다.** §10은 "raw 보존은 테넌트 설정"이라고 하는데
-   `store.TenantSettings`에 필드가 없어 `Options.RetainRaw`(프로세서 전역, 기본 off)로 뒀습니다.
-   `TenantSettings.BounceRetainRaw bool`이 생기면 그쪽으로 옮겨야 합니다.
-3. **suppression에 보존기간 경로가 없습니다.** `SuppressionRepo`에 `DeleteBefore`가 없어서
-   `ExpiresAt`을 채워도 지울 주체가 없습니다. 지금은 0(만료 없음)으로 넣습니다. ADR-0008의 "보존기간으로 관리"를
-   실제로 하려면 리포지터리에 정리 메서드가 필요합니다.
-4. **`store.BounceType`에 auto-reply 값이 없습니다.** 자동응답은 저장하지 않으므로 `Parsed.AutoReply` 플래그로만 둡니다.
-5. **`store.BounceSource`에 "매칭 실패" 값이 없습니다.** 상관관계가 아예 안 된 이벤트는 `heuristic`으로 기록합니다.
+메일박스는 이제 테넌트 리소스입니다: `store.BounceMailbox` + `BounceMailboxRepo`
+(CRUD + `ListEnabled`), API는 `/api/v1/bounce-mailboxes`. `Protocol`·`Folder`·`AfterProcess`·`Enabled`를
+행이 들고 있고 비밀번호는 `SecretCipher` 암호문입니다.
+raw 보존은 `TenantSettings.BounceRetainRaw`(기본 off)이고 프로세서는 테넌트 설정을 읽습니다 — §10 그대로입니다.
+suppression 보존기간은 `SuppressionRepo.DeleteBefore`(만료가 **있는** 항목만)로 control의 retention 루프가 정리합니다.
+
+아직 계약에 없는 것:
+
+1. **`store.BounceType`에 auto-reply 값이 없습니다.** 자동응답은 저장하지 않으므로 `Parsed.AutoReply` 플래그로만 둡니다.
+2. **`store.BounceSource`에 "매칭 실패" 값이 없습니다.** 상관관계가 아예 안 된 이벤트는 `heuristic`으로 기록합니다.
 
 ### store에 추가한 것
 

@@ -102,10 +102,29 @@ type Options struct {
 	// default: a 5,000 message test does not need the bytes, only the headers.
 	KeepBodies bool
 
+	// KeepMessages bounds how many accepted messages Messages remembers:
+	//
+	//	 <0  keep every message (the default, and what a test asserts on)
+	//	  0  keep none, only the Stats counters
+	//	 >0  keep the most recent n, as a ring
+	//
+	// A million-message load run is what this exists for: the default slice
+	// grows without bound and a Message with its headers is not small, so a
+	// long run that nobody reads Messages() on would be an out-of-memory bug
+	// dressed up as a test double. Zero means "keep every message" only
+	// because a zero Options must stay the behaviour every existing test
+	// relies on; use KeepNone for "count only".
+	KeepMessages int
+
 	// BounceHook is called (synchronously, on the connection goroutine) for
 	// every accepted message, so a test can synthesize a DSN for it.
 	BounceHook func(Message)
 }
+
+// KeepNone is the Options.KeepMessages value that records no message at all,
+// leaving only the Stats counters. It is not 0, because a zero-valued Options
+// has to keep meaning "remember everything".
+const KeepNone = -0x7fffffff
 
 // Message is one accepted message.
 type Message struct {
@@ -223,7 +242,8 @@ func (s *Server) accept() {
 	}
 }
 
-// Messages returns a copy of every accepted message, in acceptance order.
+// Messages returns a copy of the accepted messages it was asked to remember,
+// in acceptance order (Options.KeepMessages).
 func (s *Server) Messages() []Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -275,6 +295,12 @@ func (s *Server) Decide(rcpt string, attemptNo int) Outcome {
 // slice is really 0.5%; at a few microseconds per message it is far below the
 // per-message cost of the SMTP conversation itself.
 func uniform(seed uint64, rcpt string, attemptNo int) float64 {
+	// The attempt number only has to make the draw differ between attempts of
+	// the same recipient; a negative one would wrap into an enormous uint64
+	// and still be deterministic, but 0 is the honest value for "no attempt".
+	if attemptNo < 0 {
+		attemptNo = 0
+	}
 	var buf [16]byte
 	binary.BigEndian.PutUint64(buf[0:8], seed)
 	binary.BigEndian.PutUint64(buf[8:16], uint64(attemptNo))
@@ -301,7 +327,19 @@ func (s *Server) nextAttempt(rcpt string) int {
 
 func (s *Server) record(m Message) {
 	s.mu.Lock()
-	s.messages = append(s.messages, m)
+	switch n := s.opts.KeepMessages; {
+	case n == KeepNone:
+		// Counters only; s.messages stays empty.
+	case n > 0:
+		s.messages = append(s.messages, m)
+		if len(s.messages) > n {
+			// Drop from the front so Messages() stays "the most recent n in
+			// acceptance order". The copy keeps the backing array bounded.
+			s.messages = append(s.messages[:0], s.messages[len(s.messages)-n:]...)
+		}
+	default:
+		s.messages = append(s.messages, m)
+	}
 	s.mu.Unlock()
 	if s.opts.BounceHook != nil {
 		s.opts.BounceHook(m)
@@ -359,7 +397,7 @@ func (ss *session) readLine() (string, error) {
 }
 
 func (ss *session) reply(format string, args ...any) {
-	fmt.Fprintf(ss.w, format+"\r\n", args...)
+	_, _ = fmt.Fprintf(ss.w, format+"\r\n", args...)
 	_ = ss.w.Flush()
 }
 

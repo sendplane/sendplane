@@ -15,7 +15,8 @@ type settingsRepo struct {
 	tenant string
 }
 
-const settingsCols = `retry, retention_days, suppression_enabled, unsubscribe_mode,
+const settingsCols = `retry, retention_days, suppression_enabled,
+	bounce_retain_raw, unsubscribe_mode,
 	unsubscribe_url_template, unsubscribe_one_click, default_locale, tracking,
 	version, created_at, updated_at`
 
@@ -28,7 +29,7 @@ func (r *settingsRepo) Get(ctx context.Context) (*store.TenantSettings, error) {
 	var retry, tracking []byte
 	var mode string
 	err := r.p.pool.QueryRow(ctx, q, r.tenant).Scan(&retry, &v.RetentionDays,
-		&v.SuppressionEnabled, &mode, &v.UnsubscribeURLTemplate,
+		&v.SuppressionEnabled, &v.BounceRetainRaw, &mode, &v.UnsubscribeURLTemplate,
 		&v.UnsubscribeOneClick, &v.DefaultLocale,
 		&tracking, &v.Version, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
@@ -66,12 +67,13 @@ func (r *settingsRepo) Create(ctx context.Context, v *store.TenantSettings) erro
 	v.UpdatedAt = now
 	v.Version = 1
 	const q = `INSERT INTO tenant_settings (tenant_id, retry, retention_days,
-	    suppression_enabled, unsubscribe_mode, unsubscribe_url_template,
-	    unsubscribe_one_click, default_locale, tracking, version, created_at,
-	    updated_at)
-	  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+	    suppression_enabled, bounce_retain_raw, unsubscribe_mode,
+	    unsubscribe_url_template, unsubscribe_one_click, default_locale,
+	    tracking, version, created_at, updated_at)
+	  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
 	_, err = r.p.pool.Exec(ctx, q, r.tenant, retry, v.RetentionDays,
-		v.SuppressionEnabled, string(v.UnsubscribeMode), v.UnsubscribeURLTemplate,
+		v.SuppressionEnabled, v.BounceRetainRaw, string(v.UnsubscribeMode),
+		v.UnsubscribeURLTemplate,
 		v.UnsubscribeOneClick, v.DefaultLocale, tracking, v.Version,
 		tsInNN(v.CreatedAt), tsInNN(v.UpdatedAt))
 	return mapErr(err)
@@ -94,16 +96,17 @@ func (r *settingsRepo) Update(ctx context.Context, v *store.TenantSettings) erro
 	}
 	v.TenantID = r.tenant
 	const q = `UPDATE tenant_settings SET retry = $2, retention_days = $3,
-	    suppression_enabled = $4, unsubscribe_mode = $5,
-	    unsubscribe_url_template = $6, unsubscribe_one_click = $7,
-	    default_locale = $8, tracking = $9,
-	    version = version + 1, updated_at = $10
-	  WHERE tenant_id = $1 AND version = $11
+	    suppression_enabled = $4, bounce_retain_raw = $5, unsubscribe_mode = $6,
+	    unsubscribe_url_template = $7, unsubscribe_one_click = $8,
+	    default_locale = $9, tracking = $10,
+	    version = version + 1, updated_at = $11
+	  WHERE tenant_id = $1 AND version = $12
 	  RETURNING created_at, updated_at, version`
 	var created, updated time.Time
 	var version int64
 	err = r.p.pool.QueryRow(ctx, q, r.tenant, retry, v.RetentionDays,
-		v.SuppressionEnabled, string(v.UnsubscribeMode), v.UnsubscribeURLTemplate,
+		v.SuppressionEnabled, v.BounceRetainRaw, string(v.UnsubscribeMode),
+		v.UnsubscribeURLTemplate,
 		v.UnsubscribeOneClick, v.DefaultLocale, tracking, r.p.now(), v.Version).
 		Scan(&created, &updated, &version)
 	if err != nil {
@@ -302,6 +305,28 @@ func (r *suppressionRepo) Delete(ctx context.Context, emailNorm string) error {
 		return fmt.Errorf("%w: suppression %s", store.ErrNotFound, emailNorm)
 	}
 	return nil
+}
+
+// DeleteBefore removes expired entries only. suppression has no id column, so
+// the chunk is keyed by email_norm rather than going through the shared
+// deleteBefore helper (store.SuppressionRepo).
+func (r *suppressionRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	if err := r.p.check(); err != nil {
+		return 0, err
+	}
+	a := &args{}
+	q := `WITH c AS (SELECT email_norm FROM suppression
+	         WHERE tenant_id = ` + a.add(r.tenant) + `
+	           AND expires_at IS NOT NULL AND expires_at <= ` + a.add(tsInNN(before)) + `
+	         ORDER BY expires_at, email_norm LIMIT ` + a.add(limitOrAll(limit)) + `)
+	      DELETE FROM suppression
+	       WHERE tenant_id = ` + a.add(r.tenant) + `
+	         AND email_norm IN (SELECT email_norm FROM c)`
+	tag, err := r.p.pool.Exec(ctx, q, a.v...)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // --- tracking ----------------------------------------------------------
@@ -507,6 +532,38 @@ func (r *outboxRepo) ClaimPending(ctx context.Context, limit int, lease time.Dur
 	}
 	sortByID(out, func(e *store.OutboxEvent) string { return e.ID })
 	return out, nil
+}
+
+func (r *outboxRepo) Get(ctx context.Context, id string) (*store.OutboxEvent, error) {
+	if err := r.p.check(); err != nil {
+		return nil, err
+	}
+	const q = "SELECT " + outboxCols + " FROM outbox_event WHERE id = $1 AND tenant_id = $2"
+	e, err := scanOutbox(r.p.pool.QueryRow(ctx, q, id, r.tenant))
+	if err != nil {
+		return nil, fmt.Errorf("outbox %s: %w", id, mapErr(err))
+	}
+	return e, nil
+}
+
+// Reset is the replay verb: pending again, due now, with a full attempt
+// budget.
+func (r *outboxRepo) Reset(ctx context.Context, id string, now time.Time) error {
+	if err := r.p.check(); err != nil {
+		return err
+	}
+	const q = `UPDATE outbox_event SET status = 'pending', attempts = 0,
+	      last_error = '', next_attempt_at = $3, delivered_at = NULL,
+	      lease_owner = '', lease_until = NULL
+	    WHERE id = $1 AND tenant_id = $2`
+	tag, err := r.p.pool.Exec(ctx, q, id, r.tenant, tsInNN(now))
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: outbox %s", store.ErrNotFound, id)
+	}
+	return nil
 }
 
 func (r *outboxRepo) MarkDelivered(ctx context.Context, id string, at time.Time) error {

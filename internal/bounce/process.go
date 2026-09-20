@@ -59,12 +59,10 @@ type Outcome struct {
 
 // Options configures a Processor.
 type Options struct {
-	// RetainRaw keeps the whole message on the BounceEvent. Architecture 10
-	// says raw retention is a tenant setting, but store.TenantSettings has no
-	// field for it, so it is a processor-wide option and defaults to off. See
-	// README, "store 계약에 없어서 못 한 것".
-	RetainRaw bool
 	// MaxRawBytes caps a retained raw message. Zero uses DefaultMaxRawBytes.
+	// Whether the raw message is kept at all is the tenant's
+	// TenantSettings.BounceRetainRaw (architecture 10), not an option here:
+	// one Processor serves every tenant the poller reads for.
 	MaxRawBytes int
 	// Clock is the time source. Nil uses time.Now.
 	Clock func() time.Time
@@ -154,7 +152,7 @@ func (p *Processor) Handle(ctx context.Context, st store.Store, tenantID string,
 		// keeping: it is the evidence that a mailbox is receiving bounces
 		// sendplane cannot attribute.
 		out.Skipped = SkipNoCorrelation
-		if err := p.record(ctx, st, &out, msg, nil, now); err != nil {
+		if err := p.record(ctx, st, settings, &out, msg, nil, now); err != nil {
 			return out, err
 		}
 		return p.skip(out), nil
@@ -172,7 +170,7 @@ func (p *Processor) Handle(ctx context.Context, st store.Store, tenantID string,
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		out.Skipped = SkipUnknownDelivery
-		if err := p.record(ctx, st, &out, msg, nil, now); err != nil {
+		if err := p.record(ctx, st, settings, &out, msg, nil, now); err != nil {
 			return out, err
 		}
 		return p.skip(out), nil
@@ -185,7 +183,7 @@ func (p *Processor) Handle(ctx context.Context, st store.Store, tenantID string,
 		// (ADR-0008).
 		out.Unverified = true
 		out.Skipped = SkipUnverified
-		if err := p.record(ctx, st, &out, msg, d, now); err != nil {
+		if err := p.record(ctx, st, settings, &out, msg, d, now); err != nil {
 			return out, err
 		}
 		return p.skip(out), nil
@@ -199,7 +197,7 @@ func (p *Processor) Handle(ctx context.Context, st store.Store, tenantID string,
 		// A late delay notice for a delivery that has already bounced is
 		// history worth keeping, but it changes nothing.
 		out.Skipped = SkipSoftBounce
-		if err := p.record(ctx, st, &out, msg, d, now); err != nil {
+		if err := p.record(ctx, st, settings, &out, msg, d, now); err != nil {
 			return out, err
 		}
 		return p.skip(out), nil
@@ -214,7 +212,7 @@ func (p *Processor) Handle(ctx context.Context, st store.Store, tenantID string,
 		return p.skip(out), nil
 	}
 
-	if err := p.record(ctx, st, &out, msg, d, now); err != nil {
+	if err := p.record(ctx, st, settings, &out, msg, d, now); err != nil {
 		return out, err
 	}
 
@@ -277,7 +275,7 @@ func (p *Processor) skip(out Outcome) Outcome {
 }
 
 // record writes the BounceEvent. d may be nil when nothing was correlated.
-func (p *Processor) record(ctx context.Context, st store.Store, out *Outcome, msg mailbox.Message, d *store.Delivery, now time.Time) error {
+func (p *Processor) record(ctx context.Context, st store.Store, settings *store.TenantSettings, out *Outcome, msg mailbox.Message, d *store.Delivery, now time.Time) error {
 	parsed := out.Parsed
 	ev := &store.BounceEvent{
 		ID:             store.NewID(),
@@ -309,7 +307,7 @@ func (p *Processor) record(ctx context.Context, st store.Store, out *Outcome, ms
 			ev.EmailNorm = norm
 		}
 	}
-	if p.opts.RetainRaw {
+	if settings.BounceRetainRaw {
 		ev.Raw = rawJSON(msg.Raw, p.opts.MaxRawBytes)
 	}
 	if err := st.Bounces().Create(ctx, ev); err != nil {

@@ -40,6 +40,10 @@ func (r *leaseReaper) Tick(ctx context.Context, now time.Time) error {
 // whole tenant (architecture 16). ADR-0003 accepted one row per recipient, so
 // deleting them again is a required operational feature, not housekeeping.
 //
+// Expired suppressions are removed on the same tick but on their own clock:
+// an entry carries its own ExpiresAt (ADR-0008) and is deleted once that has
+// passed, whatever RetentionDays says. An entry with no expiry never goes.
+//
 // Only campaign deliveries are covered. Transactional deliveries (the ones
 // with no campaign) have no "finished" campaign to key off and are left alone;
 // see the package README.
@@ -63,7 +67,27 @@ func (r *retention) Tick(ctx context.Context, now time.Time) error {
 	if err := r.deleteCampaignDeliveries(ctx, cutoff); err != nil {
 		return err
 	}
+	if err := r.deleteExpiredSuppressions(ctx, now); err != nil {
+		return err
+	}
 	return r.deleteTenantWide(ctx, cutoff)
+}
+
+// deleteExpiredSuppressions drops the entries whose own ExpiresAt has passed.
+// It uses now rather than the retention cutoff: the expiry is the entry's own
+// deadline, and a hard bounce suppressed "for 30 days" must come off the list
+// on day 30 whatever the tenant's row retention is (ADR-0008).
+func (r *retention) deleteExpiredSuppressions(ctx context.Context, now time.Time) error {
+	deleted, err := chunkedDelete(ctx, r.st.Suppressions().DeleteBefore, now,
+		r.cfg.batches.RetentionChunk, r.cfg.batches.RetentionMaxChunks)
+	if err != nil {
+		return fmt.Errorf("retention: suppressions: %w", err)
+	}
+	if deleted > 0 {
+		r.log.Info("control: retention deleted expired suppressions",
+			"count", deleted, "before", now)
+	}
+	return nil
 }
 
 // deleteTenantWide drops the rows whose retention does not depend on a

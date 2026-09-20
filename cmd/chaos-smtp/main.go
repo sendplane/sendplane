@@ -34,6 +34,18 @@ func main() {
 	}
 }
 
+// keepMessagesOption maps the --keep-messages flag onto
+// chaossmtp.Options.KeepMessages, whose zero value means "keep everything".
+func keepMessagesOption(n int) int {
+	if n == 0 {
+		return chaossmtp.KeepNone
+	}
+	if n < 0 {
+		return 0 // the library's "keep every message"
+	}
+	return n
+}
+
 func run(args []string) error {
 	fs := flag.NewFlagSet("chaos-smtp", flag.ContinueOnError)
 
@@ -45,6 +57,8 @@ func run(args []string) error {
 	latency := fs.Duration("latency", 0, "latency added before every end-of-DATA reply")
 	seed := fs.Uint64("seed", 0, "seed selecting the deterministic failure sequence")
 	rateLimitAfter := fs.Int("ratelimit-after", 0, "hang up with 421 after this many accepted messages on one connection (0 disables)")
+	keepMessages := fs.Int("keep-messages", 0,
+		"how many accepted messages to remember for GET /stats: 0 keeps none (counters only), n>0 keeps the most recent n, -1 keeps every message")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -60,6 +74,11 @@ func run(args []string) error {
 		RateLimitAfter: *rateLimitAfter,
 		Latency:        *latency,
 		Seed:           *seed,
+		// The library keeps every message, which is right for a test that
+		// asserts on them and wrong for a process that runs for an hour
+		// against a million-recipient campaign: nothing reads Messages()
+		// here, so the default is to keep none.
+		KeepMessages: keepMessagesOption(*keepMessages),
 	}
 
 	host, err := newChaosHost(opts)
@@ -71,7 +90,13 @@ func run(args []string) error {
 	log.Printf("chaos-smtp: listening on %s (tempfail=%.4f permfail=%.4f drop=%.4f seed=%d)",
 		host.addr(), *tempFail, *permFail, *drop, *seed)
 
-	statsServer := &http.Server{Addr: *statsListen, Handler: host.statsMux()}
+	statsServer := &http.Server{
+		Addr:    *statsListen,
+		Handler: host.statsMux(),
+		// A stats endpoint has no reason to let a client hold a connection
+		// open sending headers one byte at a time (gosec G112).
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	statsErrCh := make(chan error, 1)
 	go func() {
 		log.Printf("chaos-smtp: stats listening on %s", *statsListen)

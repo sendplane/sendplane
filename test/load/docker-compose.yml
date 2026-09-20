@@ -125,5 +125,8 @@ services:
       - --drop=0.005
       - --seed=42
       - --latency=2ms
+      # A million-message run must not accumulate a million Message values:
+      # nothing reads GET /stats' message list, only its counters.
+      - --keep-messages=0
     ports:
       - "${LOAD_CHAOS_PORT:-19090}:9090"

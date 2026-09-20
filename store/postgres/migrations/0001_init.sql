@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
   retry                    jsonb,
   retention_days           integer     NOT NULL DEFAULT 0,
   suppression_enabled      boolean     NOT NULL DEFAULT false,
+  bounce_retain_raw        boolean     NOT NULL DEFAULT false,
   unsubscribe_mode         text        NOT NULL DEFAULT '',
   unsubscribe_url_template text        NOT NULL DEFAULT '',
   unsubscribe_one_click    boolean     NOT NULL DEFAULT false,
@@ -91,6 +92,29 @@ CREATE TABLE IF NOT EXISTS sending_domain (
 );
 CREATE INDEX IF NOT EXISTS sending_domain_list ON sending_domain (tenant_id, created_at, id);
 
+CREATE TABLE IF NOT EXISTS bounce_mailbox (
+  id            text PRIMARY KEY,
+  tenant_id     text        NOT NULL,
+  name          text        NOT NULL DEFAULT '',
+  address       text        NOT NULL DEFAULT '',
+  protocol      text        NOT NULL DEFAULT '',
+  host          text        NOT NULL DEFAULT '',
+  port          integer     NOT NULL DEFAULT 0,
+  tls           text        NOT NULL DEFAULT '',
+  username      text        NOT NULL DEFAULT '',
+  password      bytea,
+  folder        text        NOT NULL DEFAULT '',
+  after_process text        NOT NULL DEFAULT '',
+  enabled       boolean     NOT NULL DEFAULT false,
+  version       bigint      NOT NULL DEFAULT 1,
+  created_at    timestamptz NOT NULL,
+  updated_at    timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bounce_mailbox_list ON bounce_mailbox (tenant_id, created_at, id);
+-- The poller reads the enabled set of one tenant on every refresh.
+CREATE INDEX IF NOT EXISTS bounce_mailbox_enabled
+  ON bounce_mailbox (tenant_id, created_at, id) WHERE enabled;
+
 CREATE TABLE IF NOT EXISTS probe_mailbox (
   id           text PRIMARY KEY,
   tenant_id    text        NOT NULL,
@@ -117,6 +141,8 @@ CREATE TABLE IF NOT EXISTS probe_run (
   sender_id     text        NOT NULL DEFAULT '',
   mailbox_id    text        NOT NULL DEFAULT '',
   delivery_id   text        NOT NULL DEFAULT '',
+  group_id      text        NOT NULL DEFAULT '',
+  pending       boolean     NOT NULL DEFAULT false,
   status        smallint    NOT NULL DEFAULT 0,
   reason        text        NOT NULL DEFAULT '',
   delivered     boolean     NOT NULL DEFAULT false,
@@ -139,6 +165,9 @@ CREATE TABLE IF NOT EXISTS probe_run (
   created_at    timestamptz NOT NULL
 );
 CREATE INDEX IF NOT EXISTS probe_run_by_sender ON probe_run (tenant_id, sender_id, created_at, id);
+-- The collector asks for the runs still waiting, not for history.
+CREATE INDEX IF NOT EXISTS probe_run_pending
+  ON probe_run (tenant_id, created_at, id) WHERE pending;
 
 CREATE TABLE IF NOT EXISTS layout (
   id         text PRIMARY KEY,
@@ -193,6 +222,7 @@ CREATE TABLE IF NOT EXISTS campaign (
   id             text PRIMARY KEY,
   tenant_id      text        NOT NULL,
   name           text        NOT NULL DEFAULT '',
+  template_id    text        NOT NULL DEFAULT '',
   version_id     text        NOT NULL DEFAULT '',
   sender_id      text        NOT NULL DEFAULT '',
   default_locale text        NOT NULL DEFAULT '',
@@ -237,6 +267,7 @@ CREATE TABLE IF NOT EXISTS delivery (
   locale           text        NOT NULL DEFAULT '',
   vars             jsonb,
   unsubscribe_url  text        NOT NULL DEFAULT '',
+  headers          jsonb,
   attempt_count    integer     NOT NULL DEFAULT 0,
   retry_gen        integer     NOT NULL DEFAULT 0,
   next_attempt_at  timestamptz NOT NULL,
@@ -259,9 +290,12 @@ CREATE TABLE IF NOT EXISTS delivery (
 -- Deliveries without a campaign are outside the index and never deduplicated.
 CREATE UNIQUE INDEX IF NOT EXISTS delivery_campaign_email
   ON delivery (tenant_id, campaign_id, email_norm) WHERE campaign_id IS NOT NULL;
--- The claim query's index: only the claimable statuses are in it.
+-- The claim query's index: only the claimable statuses are in it. Pending (0)
+-- is in the set because a campaign's rows are ingested pending and become
+-- claimable when the campaign joins the claimer's running set, without a bulk
+-- update at start (store.DeliveryRepo.Claim, ADR-0002).
 CREATE INDEX IF NOT EXISTS delivery_claim
-  ON delivery (tenant_id, lane, priority DESC, next_attempt_at) WHERE status IN (1, 3);
+  ON delivery (tenant_id, lane, priority DESC, next_attempt_at) WHERE status IN (0, 1, 3);
 -- Lease recovery walks only leased rows.
 CREATE INDEX IF NOT EXISTS delivery_lease
   ON delivery (lease_until) WHERE status = 2;
@@ -319,6 +353,10 @@ CREATE TABLE IF NOT EXISTS suppression (
   PRIMARY KEY (tenant_id, email_norm)
 );
 CREATE INDEX IF NOT EXISTS suppression_list ON suppression (tenant_id, created_at, email_norm);
+-- Retention walks the entries that actually expire; "never expires" is NULL
+-- and outside this index.
+CREATE INDEX IF NOT EXISTS suppression_expiry
+  ON suppression (tenant_id, expires_at) WHERE expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS tracking_event (
   id            text PRIMARY KEY,

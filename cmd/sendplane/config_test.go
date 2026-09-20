@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sendplane/sendplane/store"
 )
 
 func writeConfig(t *testing.T, contents string) string {
@@ -178,5 +180,42 @@ func TestValidateRejectsWebhookURLWithoutSecret(t *testing.T) {
 	cfg.applyDefaults()
 	if err := cfg.Validate(false); err == nil {
 		t.Fatal("expected an error for a webhook URL with no secret")
+	}
+}
+
+// The config file's sender and bounce sections have to reach the library
+// unchanged: a lease_for the operator shortened for faster recovery is worth
+// nothing if senderConfigFrom drops it on the floor.
+func TestRoleConfigsReachTheLibrary(t *testing.T) {
+	cfg := SenderConfig{
+		WorkerID:             "w-7",
+		Lanes:                LanesConfig{Transactional: 2, Bulk: 3, Probe: 1},
+		ClaimBatch:           17,
+		LeaseFor:             Duration(60 * time.Second),
+		EHLOName:             "mail.example.com",
+		DefaultRatePerSecond: 12.5,
+	}
+	got := senderConfigFrom(cfg)
+	if got.LeaseFor != 60*time.Second {
+		t.Errorf("LeaseFor = %v, want 60s", got.LeaseFor)
+	}
+	if got.WorkerID != "w-7" || got.ClaimBatch != 17 || got.EHLOName != "mail.example.com" {
+		t.Errorf("sender config = %+v", got)
+	}
+	if got.DefaultRatePerSecond != 12.5 {
+		t.Errorf("DefaultRatePerSecond = %v", got.DefaultRatePerSecond)
+	}
+	if got.Lanes[store.LaneTransactional] != 2 || got.Lanes[store.LaneBulk] != 3 || got.Lanes[store.LaneProbe] != 1 {
+		t.Errorf("lanes = %v", got.Lanes)
+	}
+
+	idle := false
+	b := bounceConfigFrom(BounceConfig{
+		WorkerID: "b-7", PollInterval: Duration(30 * time.Second),
+		RefreshInterval: Duration(2 * time.Minute), UseIdle: &idle,
+	})
+	if b.WorkerID != "b-7" || b.PollInterval != 30*time.Second ||
+		b.RefreshInterval != 2*time.Minute || b.UseIdle {
+		t.Errorf("bounce config = %+v", b)
 	}
 }

@@ -9,12 +9,20 @@ import (
 	"github.com/sendplane/sendplane/store"
 )
 
-// tickLoop is one loop's unit of work for one tenant. Implementations are
+// TickLoop is one loop's unit of work for one tenant. Implementations are
 // built per tenant and keep whatever per-tenant state they need between ticks
 // (the finalizer's adaptive counter, for instance).
-type tickLoop interface {
+//
+// It is exported so that a loop living outside this package - the loopback
+// probe, which cannot be imported here without a cycle - can be registered
+// with WithLoop and get the same leader-only, per-tenant treatment as the
+// built-in ones.
+type TickLoop interface {
 	Tick(ctx context.Context, now time.Time) error
 }
+
+// tickLoop is the internal spelling of the same thing.
+type tickLoop = TickLoop
 
 // loopSpec registers a loop with the Leader: a name for logs, the interval it
 // ticks on, and how to build its per-tenant instance.

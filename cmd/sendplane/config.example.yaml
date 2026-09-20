@@ -62,11 +62,37 @@ sender:
   lanes:
     transactional: 8
     bulk: 32
+    # The loopback probe sends through the normal sender path, so this lane
+    # needs at least one worker or every probe delivery sits queued and every
+    # run times out (docs/architecture.md 11.2).
     probe: 1
   claim_batch: 200
   lease_for: 5m
   ehlo_name: mail.example.com
   default_rate_per_second: 0 # 0 = unlimited, unless the transport configures its own rate
+
+bounce:
+  # Lease owner of the per-mailbox lock, so one replica polls one mailbox.
+  # Defaults to "bounce-" + the sender worker_id (the pod hostname).
+  worker_id: ""
+  poll_interval: 1m
+  refresh_interval: 5m   # how often the bounce-mailbox list is re-read
+  use_idle: true         # wait in IMAP IDLE instead of sleeping, when supported
+
+probe:
+  # Loopback sending health check (docs/architecture.md 11, ADR-0012). The
+  # mailboxes themselves are tenant rows: POST /api/v1/probe-mailboxes.
+  # Setting hmac_key turns the probe on; `enabled` overrides that either way.
+  enabled: false
+  # 32 raw bytes, base64. Signs the X-Sendplane-Probe token so a mail somebody
+  # else drops in the probe mailbox cannot produce a green verdict.
+  #   openssl rand -base64 32
+  hmac_key: ${SENDPLANE_PROBE_HMAC_KEY}
+  # Queried directly for the DNS diagnostic layer: "what the world sees" must
+  # not be answered by a local cache. Empty uses /etc/resolv.conf.
+  nameservers: ["1.1.1.1", "8.8.8.8"]
+  interval: 6h   # how stale a sender's health may get before it is re-probed
+  timeout: 15m   # how long a probe mail may take to arrive
 
 limits:
   max_recipients_per_campaign: 10000000

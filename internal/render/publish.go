@@ -338,5 +338,5 @@ func writeBundle(h io.Writer, b store.I18nBundle) {
 // writeField writes a length-prefixed field so that concatenation cannot be
 // ambiguous.
 func writeField(h io.Writer, name, value string) {
-	fmt.Fprintf(h, "%d:%s=%d:%s\n", len(name), name, len(value), value)
+	_, _ = fmt.Fprintf(h, "%d:%s=%d:%s\n", len(name), name, len(value), value)
 }

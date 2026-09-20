@@ -64,6 +64,9 @@ type config struct {
 	trackFlushEvery time.Duration
 	trackFlushSize  int
 	trackMaxBuffer  int
+
+	// extraLoops are the leader loops registered from outside this package.
+	extraLoops []loopSpec
 }
 
 func defaultConfig() config {
@@ -161,6 +164,30 @@ func WithBatches(b Batches) Option {
 		setInt(&c.batches.RetentionChunk, b.RetentionChunk)
 		setInt(&c.batches.RetentionMaxChunks, b.RetentionMaxChunks)
 		setInt(&c.batches.OutboxClaim, b.OutboxClaim)
+	}
+}
+
+// WithLoop registers an extra leader loop. It gets exactly the treatment the
+// built-in loops get: it runs on the replica holding the leader lease and
+// nowhere else, it is built once per active tenant and handed that tenant's
+// Store, and a tick that fails is logged without stopping the other tenants
+// or the other loops.
+//
+// It exists because the loopback probe (internal/probe) must run on the leader
+// alone - two replicas would send twice the probe mail and both try to delete
+// the same message - but this package cannot import it without a cycle. The
+// root package registers it instead.
+//
+// A call with an empty name, a non-positive interval or a nil constructor is
+// ignored, so a caller can register a loop conditionally without branching.
+func WithLoop(name string, interval time.Duration, newTenant func(st store.Store, tenantID string) TickLoop) Option {
+	return func(c *config) {
+		if name == "" || interval <= 0 || newTenant == nil {
+			return
+		}
+		c.extraLoops = append(c.extraLoops, loopSpec{
+			name: name, interval: interval, newTenant: newTenant,
+		})
 	}
 }
 

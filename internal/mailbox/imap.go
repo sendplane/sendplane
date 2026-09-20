@@ -56,22 +56,22 @@ func dialIMAP(ctx context.Context, cfg Config, password string) (Client, error) 
 	if cfg.TLS == store.TLSSTARTTLS {
 		m.c, err = imapclient.NewStartTLS(conn, opts)
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("mailbox: imap starttls %s: %w", cfg.Addr(), err)
 		}
 	} else {
 		m.c = imapclient.New(conn, opts)
 		if err := m.c.WaitGreeting(); err != nil {
-			m.c.Close()
+			_ = m.c.Close()
 			return nil, fmt.Errorf("mailbox: imap greeting %s: %w", cfg.Addr(), err)
 		}
 	}
 	if err := m.c.Login(cfg.Username, password).Wait(); err != nil {
-		m.c.Close()
+		_ = m.c.Close()
 		return nil, fmt.Errorf("mailbox: imap login %s: %w", cfg.Username, err)
 	}
 	if _, err := m.c.Select(cfg.Folder, nil).Wait(); err != nil {
-		m.c.Close()
+		_ = m.c.Close()
 		return nil, fmt.Errorf("mailbox: imap select %q: %w", cfg.Folder, err)
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -171,10 +171,10 @@ func (m *imapMailbox) Ack(ctx context.Context, ids []string, action Action) erro
 	if err := m.store(set, imap.StoreFlagsAdd, imap.FlagSeen); err != nil {
 		return err
 	}
-	switch {
-	case action == ActionKeep:
+	switch action {
+	case ActionKeep:
 		return nil
-	case action == ActionDelete:
+	case ActionDelete:
 		return m.expunge(set)
 	default:
 		folder, ok := action.MoveFolder()
@@ -230,7 +230,7 @@ func (m *imapMailbox) Idle(ctx context.Context, timeout time.Duration) error {
 	}
 	// The connection must stay readable for the whole idle window.
 	_ = m.conn.SetDeadline(time.Now().Add(timeout + m.cfg.Timeout))
-	defer m.conn.SetDeadline(time.Time{})
+	defer func() { _ = m.conn.SetDeadline(time.Time{}) }()
 
 	cmd, err := m.c.Idle()
 	if err != nil {

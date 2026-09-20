@@ -30,6 +30,12 @@ type Delivery struct {
 	// UnsubscribeURL is the per-recipient host destination, when the caller
 	// supplied one.
 	UnsubscribeURL string
+	// Headers are extra message headers the caller asked for (POST /messages
+	// `headers`). The sender merges them into the outbound message through the
+	// same whitelist a Hooks.BeforeSend header has to pass, so a name the
+	// whitelist rejects never reaches the wire; the API rejects it at 422
+	// rather than storing something that would fail at send time.
+	Headers map[string]string
 
 	// AttemptCount is consumed by transient/rate_limited attempts only.
 	AttemptCount int
@@ -91,6 +97,14 @@ type ClaimRequest struct {
 	//                  without a campaign
 	// This mirrors "campaign_id IS NULL OR campaign_id = ANY($3)"
 	// (architecture 5.2).
+	//
+	// It also decides which pending rows are claimable, which is what makes
+	// starting a campaign a one-row write. Ingest inserts a campaign's
+	// deliveries as pending and nothing ever promotes them in bulk (ADR-0002
+	// rejected the million-row UPDATE at start); instead a pending row becomes
+	// claimable exactly while its campaign is in this list. A pending row of a
+	// campaign that is not named, and every pending row when this is nil or
+	// empty, stays unclaimable.
 	CampaignIDs []string
 	Limit       int
 	LeaseFor    time.Duration
@@ -167,6 +181,18 @@ type DeliveryRepo interface {
 
 	// Claim leases up to Limit eligible deliveries, ordered by priority
 	// descending then NextAttemptAt ascending, and returns them as leased.
+	//
+	// Eligible means NextAttemptAt is at or before req.Now, the lane matches,
+	// the campaign filter matches, and the status is either
+	//
+	//   - queued or deferred, always, or
+	//   - pending, only for a delivery whose CampaignID is in a non-empty
+	//     req.CampaignIDs.
+	//
+	// The second rule is the whole start mechanism for campaigns: the rows go
+	// in pending and become sendable when the campaign joins the caller's
+	// running set, so start stays a single row write however many recipients
+	// the campaign has (ADR-0002).
 	Claim(ctx context.Context, req ClaimRequest) ([]Delivery, error)
 
 	// Complete applies finished attempts and clears the lease. A result whose

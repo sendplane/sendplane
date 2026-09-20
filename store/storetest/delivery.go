@@ -3,6 +3,7 @@ package storetest
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -27,13 +28,8 @@ func claimIDs(batch []store.Delivery) []string {
 
 func eqIDs(t *testing.T, what string, got, want []string) {
 	t.Helper()
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("%s: got %v (%d), want %v (%d)", what, got, len(got), want, len(want))
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Fatalf("%s: got %v, want %v", what, got, want)
-		}
 	}
 }
 
@@ -104,6 +100,29 @@ func testInsertBatchIdempotent(t *testing.T, p store.Provider) {
 
 	_, err = r.InsertBatch(ctx, []store.Delivery{{ID: store.NewID(), Email: "x@example.com"}})
 	mustBe(t, "InsertBatch without email_norm", err, store.ErrInvalid)
+
+	// Vars and Headers round-trip: the sender merges Headers into the
+	// outbound message through the whitelist (store.Delivery.Headers).
+	withHeaders := mk("h@example.com")
+	withHeaders.Vars = map[string]any{"name": "Kim"}
+	withHeaders.Headers = map[string]string{
+		"X-Sendplane-Probe": "run/abc", "In-Reply-To": "<x@example.com>",
+	}
+	n, err = r.InsertBatch(ctx, []store.Delivery{withHeaders})
+	must(t, "InsertBatch with headers", err)
+	eq(t, "inserted", n, 1)
+
+	back, err := r.Get(ctx, withHeaders.ID)
+	must(t, "Get with headers", err)
+	eq(t, "header count", len(back.Headers), 2)
+	eq(t, "probe header", back.Headers["X-Sendplane-Probe"], "run/abc")
+	eq(t, "in-reply-to header", back.Headers["In-Reply-To"], "<x@example.com>")
+	eq(t, "vars kept", back.Vars["name"], any("Kim"))
+
+	// A delivery with no headers reads back without an empty map forced on it.
+	plain, err := r.Get(ctx, batch[0].ID)
+	must(t, "Get without headers", err)
+	eq(t, "no headers", len(plain.Headers), 0)
 }
 
 func testClaim(t *testing.T, p store.Provider) {
@@ -219,6 +238,62 @@ func testClaim(t *testing.T, p store.Provider) {
 		t.Run("List", func(t *testing.T) {
 			s, in, _, none := build(t)
 			has(t, claim(t, s, []string{campaignID}), in.ID, none.ID)
+		})
+	})
+
+	// Ingest writes a campaign's deliveries as pending and nothing ever
+	// promotes them in bulk: they become claimable exactly while their
+	// campaign is in the caller's running set (store.DeliveryRepo.Claim,
+	// ADR-0002). This is what makes starting a campaign a one-row write, so a
+	// backend that gets it wrong sends nothing at all.
+	t.Run("PendingOnlyForRunningCampaigns", func(t *testing.T) {
+		other := store.NewID()
+		build := func(t *testing.T) (store.Store, store.Delivery, store.Delivery, store.Delivery) {
+			s, _ := fresh(t, p)
+			running := mk(0, -time.Minute, store.DeliveryPending)
+			notRunning := mk(0, -time.Minute, store.DeliveryPending)
+			notRunning.CampaignID = other
+			// A transactional delivery has no campaign, so nothing can ever
+			// name it; it is inserted queued and stays outside this rule.
+			transactional := mk(0, -time.Minute, store.DeliveryPending)
+			transactional.CampaignID = ""
+			seed(t, s, []store.Delivery{running, notRunning, transactional})
+			return s, running, notRunning, transactional
+		}
+		claimIn := func(t *testing.T, s store.Store, ids []string) []string {
+			t.Helper()
+			batch, err := s.Deliveries().Claim(ctx, store.ClaimRequest{
+				Lane: store.LaneBulk, CampaignIDs: ids, Limit: 10,
+				LeaseFor: time.Minute, WorkerID: "w1", Now: now,
+			})
+			must(t, "Claim", err)
+			return claimIDs(batch)
+		}
+
+		t.Run("NamedCampaign", func(t *testing.T) {
+			s, running, _, _ := build(t)
+			eqIDs(t, "only the running campaign's pending row",
+				claimIn(t, s, []string{campaignID}), []string{running.ID})
+
+			got, err := s.Deliveries().Get(ctx, running.ID)
+			must(t, "Get after Claim", err)
+			eq(t, "leased", got.Status, store.DeliveryLeased)
+		})
+		t.Run("NoFilter", func(t *testing.T) {
+			// A nil filter means "no campaign filter", not "every campaign is
+			// running": a pending row must not go out because a transactional
+			// sender happened to claim with no filter.
+			s, _, _, _ := build(t)
+			eqIDs(t, "nothing pending is claimable", claimIn(t, s, nil), nil)
+		})
+		t.Run("EmptyFilter", func(t *testing.T) {
+			s, _, _, _ := build(t)
+			eqIDs(t, "nothing pending is claimable", claimIn(t, s, []string{}), nil)
+		})
+		t.Run("OtherCampaign", func(t *testing.T) {
+			s, _, _, _ := build(t)
+			eqIDs(t, "another campaign's rows stay put",
+				claimIn(t, s, []string{store.NewID()}), nil)
 		})
 	})
 

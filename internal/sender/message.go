@@ -42,6 +42,11 @@ const (
 	// relay's logs, and it is what chaossmtp keys its deterministic failures
 	// on.
 	HeaderAttempt = "X-Sendplane-Attempt"
+	// HeaderProbe carries "{run_id}/{hmac}" on a lane=probe message. It is
+	// what the loopback collector searches the probe mailbox by (IMAP SEARCH
+	// HEADER), and the HMAC is what keeps a mail somebody else dropped in that
+	// mailbox from producing a verdict (architecture 11.2, ADR-0012).
+	HeaderProbe = "X-Sendplane-Probe"
 )
 
 // allowedCustomHeaders is the whitelist of architecture 16. Anything starting
@@ -264,14 +269,21 @@ func validateOutbound(m *host.OutboundMessage) error {
 		}
 	}
 	for name, value := range m.Headers {
-		if err := validateCustomHeader(name, value); err != nil {
+		if err := ValidateCustomHeader(name, value); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateCustomHeader(name, value string) error {
+// ValidateCustomHeader is the whitelist check of architecture 16, applied to
+// every caller-supplied header: a Hooks.BeforeSend addition, and the `headers`
+// of POST /messages that store.Delivery.Headers carries.
+//
+// It is exported so that the HTTP layer can refuse a disallowed name at 422
+// instead of storing a header that would fail the delivery at send time. A
+// header that passes here is one the sender will actually put on the wire.
+func ValidateCustomHeader(name, value string) error {
 	if strings.ContainsAny(value, "\r\n") {
 		return fmt.Errorf("%w: header %q value contains CR or LF", ErrHeaderInjection, name)
 	}
