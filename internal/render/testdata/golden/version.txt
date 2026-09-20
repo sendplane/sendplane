@@ -1,0 +1,15 @@
+{% t "layout.greeting" name: recipient.name %}
+
+{% t "welcome.title" %}
+
+{{ recipient.vars.nickname }} <{{ recipient.email }}>
+
+Order details ( https://example.com/orders/{{ vars.order.id }} )
+{% if vars.vip %}
+{% t "vip.note" count: vars.orders %}
+{% endif %}
+{{ "cta.label" | t }} ( https://example.com/dashboard )
+
+help ( mailto:help@example.com ) | top | docs ( https://example.com/docs )
+
+{{ "layout.unsubscribe" | t }} ( {{ unsubscribe_url }} )

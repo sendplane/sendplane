@@ -1,0 +1,11 @@
+default_locale: en
+locales:
+  en:
+    cta.label: "Open dashboard"
+    vip.note: "You have {{ count }} orders."
+    welcome.title: "Welcome aboard"
+  ko:
+    cta.label: "대시보드 열기"
+    vip.note: "주문 {{ count }}건이 있습니다."
+    welcome.title: "가입을 환영합니다"
+  ko-KR: {}

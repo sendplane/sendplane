@@ -1,0 +1,15 @@
+Hi Ada,
+
+Welcome aboard
+
+에이다 <ada@example.com>
+
+Order details ( https://example.com/orders/A-1001 )
+
+You have 3 orders.
+
+Open dashboard ( https://example.com/dashboard )
+
+help ( mailto:help@example.com ) | top | docs ( https://example.com/docs )
+
+Unsubscribe ( https://t.example.com/t/u/abc123 )

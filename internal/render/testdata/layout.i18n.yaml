@@ -1,0 +1,10 @@
+default_locale: en
+locales:
+  en:
+    cta.label: "Click"
+    layout.greeting: "Hi {{ name }},"
+    layout.unsubscribe: "Unsubscribe"
+  ko:
+    cta.label: "클릭"
+    layout.greeting: "{{ name }}님, 안녕하세요"
+    layout.unsubscribe: "수신거부"

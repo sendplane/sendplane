@@ -1,0 +1,12 @@
+<mj-section>
+  <mj-column>
+    <mj-text>{% t "welcome.title" %}</mj-text>
+    <mj-text>{{ recipient.vars.nickname }} &lt;{{ recipient.email }}&gt;</mj-text>
+    <mj-text>Order <a href="https://example.com/orders/{{ vars.order.id }}">details</a></mj-text>
+    <mj-raw>{% if vars.vip %}</mj-raw>
+    <mj-text>{% t "vip.note" count: vars.orders %}</mj-text>
+    <mj-raw>{% endif %}</mj-raw>
+    <mj-button href="https://example.com/dashboard">{{ "cta.label" | t }}</mj-button>
+    <mj-text><a href="mailto:help@example.com">help</a> | <a href="#top">top</a> | <a href="https://example.com/docs" data-sp-track="off">docs</a></mj-text>
+  </mj-column>
+</mj-section>

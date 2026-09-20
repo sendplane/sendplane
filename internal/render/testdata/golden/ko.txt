@@ -1,0 +1,15 @@
+Ada님, 안녕하세요
+
+가입을 환영합니다
+
+에이다 <ada@example.com>
+
+Order details ( https://example.com/orders/A-1001 )
+
+주문 3건이 있습니다.
+
+대시보드 열기 ( https://example.com/dashboard )
+
+help ( mailto:help@example.com ) | top | docs ( https://example.com/docs )
+
+수신거부 ( https://t.example.com/t/u/abc123 )

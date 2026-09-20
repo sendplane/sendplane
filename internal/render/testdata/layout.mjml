@@ -1,0 +1,15 @@
+<mjml>
+  <mj-body background-color="#f4f4f4">
+    <mj-section>
+      <mj-column>
+        <mj-text>{% t "layout.greeting" name: recipient.name %}</mj-text>
+      </mj-column>
+    </mj-section>
+    {{ content }}
+    <mj-section>
+      <mj-column>
+        <mj-text><a href="{{ unsubscribe_url }}">{{ "layout.unsubscribe" | t }}</a></mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>
