@@ -14,6 +14,7 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/emersion/go-msgauth v0.7.0
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
@@ -21,6 +22,7 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/osteele/tuesday v1.1.1 // indirect
 	github.com/tetratelabs/wazero v1.9.0 // indirect
+	github.com/wneessen/go-mail v0.8.1
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
