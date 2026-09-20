@@ -1,0 +1,46 @@
+# Configuration shared by the control and sender containers of the 1M load
+# test (docs/architecture.md 15.1). Both roles read the same file; --roles
+# decides what actually runs. ${VAR} is expanded from the process environment
+# by cmd/sendplane before the YAML is parsed, which is how the DSN and the
+# AES-GCM key come in from docker-compose.yml.
+#
+# This file is for a throwaway test stack only: auth is disabled and the
+# limits are raised well past the production defaults.
+
+store:
+  driver: postgres
+  dsn: ${SENDPLANE_STORE_DSN}
+
+secrets:
+  # Fixed, public, test-only key. The stack is torn down after every run.
+  key: ${SENDPLANE_SECRETS_KEY}
+
+auth:
+  # The load generator talks to control without credentials; every request is
+  # tenant "default", roles [admin]. Never outside a test stack.
+  mode: none
+
+authz:
+  mode: allow_all
+
+sender:
+  lanes:
+    transactional: 4
+    # architecture 15.1: "sender 3 (각 concurrency 64)".
+    bulk: 64
+    probe: 1
+  # One claim per 64 workers should hand out more than one round of work, or
+  # the senders spend their time claiming instead of sending.
+  claim_batch: 500
+  # Deliberately far below the 5m default: the SIGKILL step of the run waits
+  # for the control lease reaper (30s tick) to hand the dead replica's rows
+  # back, and a 5m lease would put that recovery outside the time budget.
+  lease_for: 60s
+  ehlo_name: load.sendplane.test
+
+limits:
+  max_recipients_per_campaign: 2000000
+
+log:
+  level: info
+  format: text

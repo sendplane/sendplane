@@ -1,0 +1,71 @@
+# The 1M-recipient load test of docs/architecture.md 15.1. It is deliberately
+# not part of ci.yml: it needs the whole compose stack and most of an hour, so
+# it runs nightly and on demand.
+#
+# The pass/fail judgement is the time budget plus the consistency assertions.
+# The throughput number is recorded for the trend and never asserted, because
+# a shared runner is too noisy to regress against.
+name: load-1m
+
+on:
+  workflow_dispatch:
+    inputs:
+      recipients:
+        description: Number of recipients to send to
+        required: false
+        default: "1000000"
+      kill_sender:
+        description: SIGKILL one sender replica mid-run to exercise lease recovery
+        type: boolean
+        required: false
+        default: true
+  schedule:
+    # 03:40 UTC, off the hour so it does not queue behind everyone else's cron.
+    - cron: "40 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    # architecture 15.1 budgets 45 minutes; --budget below fails the run
+    # earlier and more informatively, this is the backstop.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the sendplane image
+        run: docker build -f deploy/dev/Dockerfile -t sendplane:dev .
+
+      - name: Start the load stack
+        run: docker compose -f test/load/docker-compose.yml up -d
+
+      - name: Run the load test
+        id: load
+        run: |
+          go run ./test/load \
+            --recipients=${{ github.event.inputs.recipients || '1000000' }} \
+            --kill-sender=${{ github.event.inputs.kill_sender || 'true' }} \
+            --summary="$GITHUB_STEP_SUMMARY"
+
+      - name: Container logs
+        if: always()
+        run: docker compose -f test/load/docker-compose.yml logs --tail 200
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-1m-report
+          path: report.json
+          if-no-files-found: warn
+
+      - name: Stop the load stack
+        if: always()
+        run: docker compose -f test/load/docker-compose.yml down -v

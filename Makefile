@@ -1,5 +1,5 @@
 COMPOSE ?= docker compose
-.PHONY: build gen gen-check test test-store lint vet fmt-check dev-up dev-down ci docker \
+.PHONY: build gen gen-check test test-store lint vet fmt-check dev-up dev-down ci docker load-test \
 	web-install web-gen web-lint web-test web-build web-ci
 
 build:
@@ -72,3 +72,18 @@ web-build:
 	cd web && $(PNPM) build
 
 web-ci: web-install web-gen web-lint web-test web-build
+
+# 1M-recipient load test (docs/architecture.md 15.1). N overrides the recipient
+# count, which defaults to 100k so that a local run finishes in minutes; the
+# nightly workflow (.github/workflows/load-1m.yml) runs the full million.
+#
+#   make load-test            # 100,000 recipients
+#   make load-test N=1000000  # the real thing
+load-test:
+	docker build -f deploy/dev/Dockerfile -t sendplane:dev .
+	$(COMPOSE) -f test/load/docker-compose.yml up -d
+	go run ./test/load --recipients=$${N:-100000} --kill-sender; \
+		status=$$?; \
+		$(COMPOSE) -f test/load/docker-compose.yml logs --tail 50; \
+		$(COMPOSE) -f test/load/docker-compose.yml down -v; \
+		exit $$status

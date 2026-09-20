@@ -1,0 +1,129 @@
+# The 1M-recipient load stack of docs/architecture.md 15.1: postgres, one
+# control, three senders and one chaos-smtp, all from the single sendplane:dev
+# image (deploy/dev/Dockerfile, `make docker`).
+#
+#   docker build -f deploy/dev/Dockerfile -t sendplane:dev .
+#   docker compose -f test/load/docker-compose.yml up -d
+#   go run ./test/load --recipients=100000 --kill-sender
+#   docker compose -f test/load/docker-compose.yml down -v
+#
+# The published ports are deliberately not the ones deploy/dev/docker-compose.yml
+# uses (55441/55442): both stacks have to be able to run at the same time. They
+# are still overridable, because "a free port" is a property of the machine:
+#
+#   LOAD_PG_PORT=15440 docker compose -f test/load/docker-compose.yml up -d
+name: sendplane-load
+
+services:
+  # Test-only tuning. fsync=off and synchronous_commit=off trade crash safety
+  # for throughput, which is exactly the right trade for a database that is
+  # dropped at the end of the run, and they keep the measurement about
+  # sendplane rather than about the runner's disk.
+  postgres:
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - max_connections=200
+      - -c
+      - synchronous_commit=off
+      - -c
+      - fsync=off
+      # 1M inserts plus their retries produce enough WAL that the default 1GB
+      # would checkpoint continuously and dominate the ingest measurement.
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - checkpoint_timeout=30min
+    environment:
+      POSTGRES_USER: sendplane
+      POSTGRES_PASSWORD: sendplane
+      POSTGRES_DB: sendplane
+      # The database is recreated for every run; skip the fsync-heavy initdb.
+      POSTGRES_INITDB_ARGS: --nosync
+    # Parallel query workers allocate from /dev/shm, whose Docker default of
+    # 64MB is too small once shared_buffers is 1GB.
+    shm_size: 1gb
+    ports:
+      - "${LOAD_PG_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sendplane -d sendplane"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # A one-shot migrate role, so the senders cannot lose a race against
+  # control's own --migrate-on-start and spend the first seconds of the run
+  # logging "relation does not exist".
+  migrate:
+    image: sendplane:dev
+    command: ["--config=/etc/sendplane/config.yaml", "--migrate"]
+    environment: &sendplane_env
+      SENDPLANE_STORE_DSN: postgres://sendplane:sendplane@postgres:5432/sendplane?sslmode=disable&pool_max_conns=40
+      # Test-only, public by design: base64("sendplane-load-test-key-01234567").
+      SENDPLANE_SECRETS_KEY: c2VuZHBsYW5lLWxvYWQtdGVzdC1rZXktMDEyMzQ1Njc=
+    volumes:
+      - ./config.yaml:/etc/sendplane/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  control:
+    image: sendplane:dev
+    command:
+      - --config=/etc/sendplane/config.yaml
+      - --roles=control
+      - --migrate-on-start
+      - --listen=:8080
+    environment: *sendplane_env
+    volumes:
+      - ./config.yaml:/etc/sendplane/config.yaml:ro
+    ports:
+      - "${LOAD_API_PORT:-18080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  sender:
+    image: sendplane:dev
+    command:
+      - --config=/etc/sendplane/config.yaml
+      - --roles=sender
+      - --listen=:8080
+    environment: *sendplane_env
+    volumes:
+      - ./config.yaml:/etc/sendplane/config.yaml:ro
+    deploy:
+      replicas: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      chaos-smtp:
+        condition: service_started
+    # The run SIGKILLs one replica on purpose; letting compose restart it by
+    # itself would hide whether the lease recovery path works, so the
+    # generator brings it back explicitly.
+    restart: "no"
+
+  # Port 2525 rather than 25: the image runs as nonroot and cannot bind a
+  # privileged port.
+  chaos-smtp:
+    image: sendplane:dev
+    entrypoint: ["/usr/local/bin/chaos-smtp"]
+    command:
+      - --listen=:2525
+      - --stats-listen=:9090
+      - --tempfail=0.05
+      - --permfail=0.01
+      - --drop=0.005
+      - --seed=42
+      - --latency=2ms
+    ports:
+      - "${LOAD_CHAOS_PORT:-19090}:9090"
