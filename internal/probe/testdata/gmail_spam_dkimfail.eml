@@ -1,0 +1,19 @@
+Delivered-To: probe@gmail.example
+Received: by 2002:a05:6a20:1234:b0:1cd:ef01:2345 with SMTP id q9csp999999;
+        Mon, 21 Sep 2026 03:20:11 -0700 (PDT)
+Authentication-Results: mx.google.com;
+       dkim=fail (test mode) header.i=@mail.example.com header.s=sp1;
+       spf=pass (google.com: domain of bounce-2@bounce.example.com designates 203.0.113.10 as permitted sender) smtp.mailfrom=bounce-2@bounce.example.com;
+       dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=mail.example.com
+Received: from smtp-out1.example.com (smtp-out1.example.com. [203.0.113.10])
+        by mx.google.com with ESMTPS id 5b1f17b1804b1-1f5zzz
+        for <probe@gmail.example>
+        (version=TLS1_2 cipher=ECDHE-RSA-AES128-GCM-SHA256 bits=128/128);
+        Mon, 21 Sep 2026 03:20:10 -0700 (PDT)
+From: sendplane probe <noreply@mail.example.com>
+To: probe@gmail.example
+Date: Mon, 21 Sep 2026 10:19:50 +0000
+Subject: [sendplane probe 0199aaaa-bbbb-7ccc-8ddd-000000000002]
+X-Sendplane-Probe: 0199aaaa-bbbb-7ccc-8ddd-000000000002/cafebabecafebabe
+
+sendplane loopback health probe.

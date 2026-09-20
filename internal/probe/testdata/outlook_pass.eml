@@ -1,0 +1,24 @@
+Received: from SEZPR03MB1234.apcprd03.prod.outlook.com (2603:1096:4:aa::11)
+ by SEYPR03MB5678.apcprd03.prod.outlook.com with HTTPS; Mon, 21 Sep 2026
+ 10:15:02 +0000
+Authentication-Results: dkim=pass (signature was verified)
+ header.d=mail.example.com;dmarc=pass action=none
+ header.from=mail.example.com;compauth=pass reason=100
+Authentication-Results: spf=pass (sender IP is 203.0.113.11)
+ smtp.mailfrom=bounce.example.com; dkim=pass (signature was verified)
+ header.d=mail.example.com;dmarc=pass action=none header.from=mail.example.com
+Received: from smtp-out2.example.com (203.0.113.11) by
+ SEZPR03MB1234.apcprd03.prod.outlook.com (2603:1096:4:aa::11) with Microsoft
+ SMTP Server (version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)
+ id 15.20.9876.20; Mon, 21 Sep 2026 10:15:01 +0000
+X-MS-Exchange-Organization-AuthAs: Anonymous
+X-MS-Exchange-Organization-AuthSource: SEZPR03MB1234.apcprd03.prod.outlook.com
+X-MS-Exchange-Organization-SCL: 1
+From: sendplane probe <noreply@mail.example.com>
+To: <probe@outlook.example>
+Subject: [sendplane probe 0199aaaa-bbbb-7ccc-8ddd-000000000003]
+Date: Mon, 21 Sep 2026 10:14:31 +0000
+X-Sendplane-Probe: 0199aaaa-bbbb-7ccc-8ddd-000000000003/0123456789abcdef
+Content-Type: text/plain; charset="utf-8"
+
+sendplane loopback health probe.

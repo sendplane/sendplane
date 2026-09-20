@@ -1,0 +1,31 @@
+Delivered-To: probe@gmail.example
+Received: by 2002:a05:6a20:1234:b0:1cd:ef01:2345 with SMTP id q9csp123456;
+        Mon, 21 Sep 2026 03:14:20 -0700 (PDT)
+X-Google-Smtp-Source: AGHT+IF3example
+X-Received: by 2002:a17:902:dcd:b0:1f5:1a2b:3c4d with SMTP id 5b1f17b1804b1-1f5;
+        Mon, 21 Sep 2026 03:14:19 -0700 (PDT)
+ARC-Seal: i=1; a=rsa-sha256; t=1789045459; cv=none;
+        d=google.com; s=arc-20240605;
+        b=abcdef
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@mail.example.com header.s=sp1 header.b=Q1w2E3r4;
+       spf=pass (google.com: domain of bounce-1@bounce.example.com designates 203.0.113.10 as permitted sender) smtp.mailfrom=bounce-1@bounce.example.com;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=mail.example.com
+Return-Path: <bounce-1@bounce.example.com>
+Received: from smtp-out1.example.com (smtp-out1.example.com. [203.0.113.10])
+        by mx.google.com with ESMTPS id 5b1f17b1804b1-1f5abcdefsor123456
+        for <probe@gmail.example>
+        (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);
+        Mon, 21 Sep 2026 03:14:19 -0700 (PDT)
+Received-SPF: pass (google.com: domain of bounce-1@bounce.example.com designates 203.0.113.10 as permitted sender) client-ip=203.0.113.10;
+MIME-Version: 1.0
+From: sendplane probe <noreply@mail.example.com>
+To: probe@gmail.example
+Date: Mon, 21 Sep 2026 10:14:05 +0000
+Message-ID: <0199aaaa-bbbb-7ccc-8ddd-000000000001@mail.example.com>
+Subject: [sendplane probe 0199aaaa-bbbb-7ccc-8ddd-000000000001]
+X-Sendplane-ID: tenant-1/0199aaaa-bbbb-7ccc-8ddd-0000000000d1
+X-Sendplane-Probe: 0199aaaa-bbbb-7ccc-8ddd-000000000001/deadbeefdeadbeef
+Content-Type: text/plain; charset="UTF-8"
+
+sendplane loopback health probe.

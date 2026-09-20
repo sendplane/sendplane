@@ -1,0 +1,26 @@
+Return-Path: <bounce-4@bounce.example.com>
+Delivered-To: probe@mta.example.net
+Received: from mail.example.net (localhost [127.0.0.1])
+	by mail.example.net (Postfix) with ESMTP id 5A1B2C3D4E
+	for <probe@mta.example.net>; Mon, 21 Sep 2026 10:16:03 +0000 (UTC)
+Authentication-Results: mail.example.net;
+	dmarc=none (p=none dis=none) header.from=mail.example.com
+Authentication-Results: mail.example.net;
+	dkim=pass (2048-bit key; unprotected) header.d=mail.example.com header.i=@mail.example.com header.a=rsa-sha256 header.s=sp1 header.b=ZaQ1xSw2;
+	dkim-atps=neutral
+Authentication-Results: mail.example.net; spf=pass (sender SPF authorized)
+	smtp.mailfrom=bounce-4@bounce.example.com
+Received: from smtp-out3.example.com (unknown [203.0.113.12])
+	by mail.example.net (Postfix) with ESMTP id 1F2E3D4C5B
+	for <probe@mta.example.net>; Mon, 21 Sep 2026 10:16:02 +0000 (UTC)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=mail.example.com;
+	s=sp1; t=1789042562; bh=abc=; b=def=
+From: sendplane probe <noreply@mail.example.com>
+To: probe@mta.example.net
+Subject: [sendplane probe 0199aaaa-bbbb-7ccc-8ddd-000000000004]
+Date: Mon, 21 Sep 2026 10:15:52 +0000
+Message-ID: <0199aaaa-bbbb-7ccc-8ddd-000000000004@mail.example.com>
+X-Sendplane-Probe: 0199aaaa-bbbb-7ccc-8ddd-000000000004/fedcba9876543210
+Content-Type: text/plain; charset=UTF-8
+
+sendplane loopback health probe.
