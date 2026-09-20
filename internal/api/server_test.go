@@ -261,6 +261,46 @@ func TestSigningSecretSurvivesARoundTrip(t *testing.T) {
 	}
 }
 
+// The one-click declaration and the raw-bounce retention flag are policy the
+// engine already reads (internal/sender, internal/bounce); this pins that the
+// API is how an operator sets them, and that omitting them keeps the stored
+// value like every other settings field.
+func TestSettingsUnsubscribeOneClickAndBounceRetainRaw(t *testing.T) {
+	e := newEnv(t)
+	cur := decodeInto[TenantSettings](t, e.do(http.MethodGet, "/api/v1/settings", nil), http.StatusOK)
+	if cur.UnsubscribeOneClick == nil || *cur.UnsubscribeOneClick {
+		t.Fatalf("unsubscribe_one_click = %v, want false by default", cur.UnsubscribeOneClick)
+	}
+	if cur.BounceRetainRaw == nil || *cur.BounceRetainRaw {
+		t.Fatalf("bounce_retain_raw = %v, want false by default", cur.BounceRetainRaw)
+	}
+
+	got := decodeInto[TenantSettings](t, e.do(http.MethodPut, "/api/v1/settings", TenantSettingsUpdate{
+		Version:             *cur.Version,
+		UnsubscribeMode:     ptr(UnsubscribeModeHost),
+		UnsubscribeOneClick: ptr(true),
+		BounceRetainRaw:     ptr(true),
+	}), http.StatusOK)
+	if !*got.UnsubscribeOneClick || !*got.BounceRetainRaw {
+		t.Fatalf("flags did not come back set: %+v", got)
+	}
+	stored, err := e.st.TenantSettings().Get(t.Context())
+	if err != nil {
+		t.Fatalf("store get: %v", err)
+	}
+	if !stored.UnsubscribeOneClick || !stored.BounceRetainRaw {
+		t.Fatalf("stored settings = %+v, want both flags set", stored)
+	}
+
+	// A PUT that does not mention them keeps them.
+	again := decodeInto[TenantSettings](t, e.do(http.MethodPut, "/api/v1/settings", TenantSettingsUpdate{
+		Version: *got.Version, DefaultLocale: ptr("ko"),
+	}), http.StatusOK)
+	if !*again.UnsubscribeOneClick || !*again.BounceRetainRaw {
+		t.Fatalf("omitting the flags cleared them: %+v", again)
+	}
+}
+
 func TestSettingsDurationsRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	cur := decodeInto[TenantSettings](t, e.do(http.MethodGet, "/api/v1/settings", nil), http.StatusOK)

@@ -1,6 +1,7 @@
 export {
   createClient,
   type AuthHeaders,
+  type DeliveryQuery,
   type IngestOptions,
   type SendplaneClient,
   type SendplaneClientOptions,

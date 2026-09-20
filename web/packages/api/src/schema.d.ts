@@ -179,7 +179,12 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List a campaign's deliveries */
+        /**
+         * List a campaign's deliveries
+         * @description `GET /deliveries?campaign_id=…` is the same listing without the
+         *     campaign existence check; this one answers `404` for a campaign that
+         *     does not exist.
+         */
         get: operations["listCampaignDeliveries"];
         put?: never;
         post?: never;
@@ -363,6 +368,33 @@ export interface paths {
          *     `unsubscribed_at`.
          */
         post: operations["notifyCampaignUnsubscribe"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the tenant's deliveries
+         * @description Every delivery of the tenant, whatever its campaign. It is the
+         *     address-first view: `email` finds one recipient across campaigns, and
+         *     `lane=transactional` (or `probe`) selects the deliveries that belong to
+         *     no campaign at all. `GET /campaigns/{campaignId}/deliveries` is the
+         *     same listing narrowed to one campaign, and answers `404` for a campaign
+         *     that does not exist; this one never does.
+         *
+         *     Ordering and paging are the same everywhere: `created_at`, then `id`.
+         */
+        get: operations["listDeliveries"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -904,9 +936,13 @@ export interface paths {
             header?: never;
             path: {
                 /**
-                 * @description URL-encoded address. It is normalized (trimmed, lowercased, IDN domain
-                 *     to punycode) before lookup, so any casing of the same address resolves
-                 *     to the same entry.
+                 * @description The address, percent-encoded as one path segment. Encode it with
+                 *     `encodeURIComponent` (or the equivalent) rather than pasting it in:
+                 *     `a+b@example.com` has to travel as `a%2Bb%40example.com`, since a bare
+                 *     `+` in a path segment is a literal `+` for some intermediaries and a
+                 *     space for others. sendplane decodes the segment once and normalizes the
+                 *     result (trimmed, lowercased, IDN domain to punycode), so any casing of
+                 *     the same address resolves to the same entry.
                  */
                 email: components["parameters"]["SuppressionEmail"];
             };
@@ -1354,12 +1390,15 @@ export interface components {
         };
         BounceMailboxInput: {
             address?: string;
-            /** @default keep */
-            after_process: string;
-            /** @default true */
-            enabled: boolean;
-            /** @default INBOX */
-            folder: string;
+            /**
+             * @description What happens to a handled message: `keep` (the default when
+             *     omitted), `delete`, `seen` or `move:<folder>`.
+             */
+            after_process?: string;
+            /** @description Omitted means `true`; the poller skips a disabled mailbox. */
+            enabled?: boolean;
+            /** @description IMAP mailbox to read; empty or omitted means `INBOX`. POP3 ignores it. */
+            folder?: string;
             host: string;
             name: string;
             /** @description Encrypted at rest. Omit on update to keep the stored one. */
@@ -1461,6 +1500,22 @@ export interface components {
             };
             /** Format: date-time */
             computed_at?: string;
+            /**
+             * Format: int64
+             * @description Deliveries the receiving MTA accepted, and therefore the stated
+             *     denominator of the open, click and unsubscribe rates. It is
+             *     `by_status.sent + by_status.bounced + by_status.complained`: a
+             *     bounce or a complaint arrives after the message was accepted, so
+             *     moving out of `sent` must not shrink the denominator under a rate
+             *     that was already computed.
+             */
+            sent?: number;
+            /**
+             * Format: int64
+             * @description Every delivery of the campaign, whatever its status: the sum of
+             *     `by_status`. It is the ingest count, not a send count.
+             */
+            total?: number;
             /** Format: int64 */
             unique_clicks?: number;
             /**
@@ -1601,13 +1656,16 @@ export interface components {
         DeliveryStatus: "pending" | "queued" | "leased" | "deferred" | "sent" | "failed" | "bounced" | "complained" | "suppressed" | "cancelled";
         /** @description Per-delivery form; the delivery is already in the path. */
         DeliveryUnsubscribeNotice: {
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Defaults to now.
+             */
             occurred_at?: string;
             /**
-             * @default host
+             * @description Who reported it, `host` when omitted.
              * @enum {string}
              */
-            source: "host" | "api";
+            source?: "host" | "api";
         };
         /**
          * @description Go duration string, e.g. `30s`, `5m`, `12h`.
@@ -1779,9 +1837,9 @@ export interface components {
             items: components["schemas"]["LinkClick"][];
         };
         /**
-         * @description Receiving protocol. POP3 cannot move messages to another folder, so
-         *     `after_process` may not be `move:<folder>` on a POP3 mailbox.
-         * @default imap
+         * @description Receiving protocol, `imap` when omitted. POP3 cannot move messages to
+         *     another folder, so `after_process` may not be `move:<folder>` on a POP3
+         *     mailbox.
          * @enum {string}
          */
         MailboxProtocol: "imap" | "pop3";
@@ -1825,10 +1883,9 @@ export interface components {
             };
             /**
              * Format: int32
-             * @description Higher is claimed first within the transactional lane.
-             * @default 0
+             * @description Higher is claimed first within the transactional lane; `0` when omitted.
              */
-            priority: number;
+            priority?: number;
             /** Format: uuid */
             sender_id: string;
             /**
@@ -2011,11 +2068,11 @@ export interface components {
             /** Format: email */
             address: string;
             authserv_id?: string;
-            /** @default true */
-            enabled: boolean;
+            /** @description Omitted means `true`; a disabled mailbox takes no part in probe runs. */
+            enabled?: boolean;
             host: string;
-            /** @default INBOX */
-            inbox_folder: string;
+            /** @description IMAP mailbox the probe mail is expected in; empty or omitted means `INBOX`. */
+            inbox_folder?: string;
             name: string;
             /** @description Encrypted at rest. Omit on update to keep the stored one. */
             password?: string;
@@ -2055,12 +2112,23 @@ export interface components {
             };
             /** @description Where the mail landed: `inbox` or `spam`. */
             folder?: string;
+            /**
+             * Format: uuid
+             * @description Ties together the runs one trigger created, one per probe mailbox.
+             */
+            group_id?: string;
             /** Format: uuid */
             id: string;
             latency?: components["schemas"]["Duration"];
             /** Format: uuid */
             mailbox_id: string;
             observed_ip?: string;
+            /**
+             * @description True while the run is still waiting for its mail. A finished run
+             *     carries one of green/yellow/red; a DNS-only run can finish as
+             *     `unknown`, which is why this is a field of its own.
+             */
+            pending?: boolean;
             ptr?: string;
             /** @description Forward-confirmed reverse DNS. */
             ptr_match?: boolean;
@@ -2100,12 +2168,11 @@ export interface components {
         };
         PublishRequest: {
             /**
-             * @description Publish anyway when keys are untranslated. Only honoured if the
-             *     tenant policy permits it; otherwise the publish still answers 422
-             *     `missing_i18n_keys`.
-             * @default false
+             * @description Publish anyway when keys are untranslated; `false` when omitted.
+             *     Only honoured if the tenant policy permits it; otherwise the
+             *     publish still answers 422 `missing_i18n_keys`.
              */
-            allow_missing_i18n_keys: boolean;
+            allow_missing_i18n_keys?: boolean;
         };
         /**
          * @description Counts for the chunk just ingested, or replayed from a stored chunk.
@@ -2330,7 +2397,10 @@ export interface components {
             kid: string;
             /**
              * Format: byte
-             * @description Base64 HMAC secret. Encrypted at rest; omit to keep the stored one.
+             * @description Base64 HMAC secret. Stored as-is rather than through the host's
+             *     secret cipher: every replica that verifies a tracking token, a VERP
+             *     return path or a one-click unsubscribe reads this key directly, and
+             *     some of them have no cipher configured. Omit to keep the stored one.
              */
             secret?: string;
         };
@@ -2436,6 +2506,12 @@ export interface components {
          *     (ADR-0006).
          */
         TenantSettings: {
+            /**
+             * @description Keep the whole returned message on every bounce event. Off unless
+             *     set, since an original can be megabytes and is kept for diagnosis
+             *     rather than archival (architecture 10).
+             */
+            bounce_retain_raw?: boolean;
             /** Format: date-time */
             readonly created_at?: string;
             /** @description Fallback locale, e.g. `en`. */
@@ -2452,6 +2528,16 @@ export interface components {
             tracking?: components["schemas"]["TrackingConfig"];
             unsubscribe_mode?: components["schemas"]["UnsubscribeMode"];
             /**
+             * @description Declares that the host's unsubscribe destination accepts an
+             *     RFC 8058 `POST`. It only matters under `unsubscribe_mode=host`:
+             *     sendplane adds `List-Unsubscribe-Post` only when the tenant has
+             *     said so, because announcing one-click on an endpoint that answers a
+             *     POST with a login page makes mailbox providers treat the
+             *     unsubscribe as failed. Under `unsubscribe_mode=sendplane` the
+             *     header is always set, since sendplane owns the endpoint (ADR-0011).
+             */
+            unsubscribe_one_click?: boolean;
+            /**
              * @description Liquid evaluated per recipient, e.g.
              *     `https://app.example.com/u?e={{ recipient.email | url_encode }}`.
              *     A recipient's own `unsubscribe_url` wins over it.
@@ -2463,6 +2549,7 @@ export interface components {
             readonly version: number;
         };
         TenantSettingsInput: {
+            bounce_retain_raw?: boolean;
             default_locale?: string;
             /** Format: int32 */
             retention_days?: number;
@@ -2470,6 +2557,8 @@ export interface components {
             suppression_enabled?: boolean;
             tracking?: components["schemas"]["TrackingConfig"];
             unsubscribe_mode?: components["schemas"]["UnsubscribeMode"];
+            /** @description Only meaningful under `unsubscribe_mode=host` (see `TenantSettings`). */
+            unsubscribe_one_click?: boolean;
             unsubscribe_url_template?: string;
         };
         /** @description Tenant settings replacement carrying the read version. */
@@ -2589,11 +2678,11 @@ export interface components {
              */
             occurred_at?: string;
             /**
-             * @description Who reported it. `host` is the usual value under `unsubscribe_mode=host`.
-             * @default host
+             * @description Who reported it, `host` when omitted. `host` is the usual value
+             *     under `unsubscribe_mode=host`.
              * @enum {string}
              */
-            source: "host" | "api";
+            source?: "host" | "api";
         } & (unknown | unknown);
         UnsubscribeResult: {
             /** Format: uuid */
@@ -2755,9 +2844,13 @@ export interface components {
         /** @description Sender ID. */
         SenderId: string;
         /**
-         * @description URL-encoded address. It is normalized (trimmed, lowercased, IDN domain
-         *     to punycode) before lookup, so any casing of the same address resolves
-         *     to the same entry.
+         * @description The address, percent-encoded as one path segment. Encode it with
+         *     `encodeURIComponent` (or the equivalent) rather than pasting it in:
+         *     `a+b@example.com` has to travel as `a%2Bb%40example.com`, since a bare
+         *     `+` in a path segment is a literal `+` for some intermediaries and a
+         *     space for others. sendplane decodes the segment once and normalizes the
+         *     result (trimmed, lowercased, IDN domain to punycode), so any casing of
+         *     the same address resolves to the same entry.
          */
         SuppressionEmail: string;
         /** @description Template ID. */
@@ -3543,6 +3636,55 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             422: components["responses"]["UnprocessableEntity"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listDeliveries: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Restrict to one campaign. Omit for every delivery of the tenant,
+                 *     including the ones without a campaign.
+                 */
+                campaign_id?: string;
+                /** @description Opaque `next_cursor` from the previous page; omit for the first page. */
+                cursor?: components["parameters"]["Cursor"];
+                /** @description Exact match on the normalized address. */
+                email?: string;
+                /** @description Repeat to match several error classes. */
+                error_class?: components["schemas"]["ErrorClass"][];
+                /**
+                 * @description Repeat to match several lanes. `transactional` and `probe`
+                 *     deliveries never have a campaign.
+                 */
+                lane?: components["schemas"]["Lane"][];
+                /** @description Page size. Clamped into 1-1000. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Only deliveries whose `created_at` is at or after this instant. */
+                since?: string;
+                /** @description Repeat to match several statuses. */
+                status?: components["schemas"]["DeliveryStatus"][];
+                /** @description Only deliveries whose `created_at` is strictly before this instant. */
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of deliveries. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeliveryList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -4651,9 +4793,13 @@ export interface operations {
             header?: never;
             path: {
                 /**
-                 * @description URL-encoded address. It is normalized (trimmed, lowercased, IDN domain
-                 *     to punycode) before lookup, so any casing of the same address resolves
-                 *     to the same entry.
+                 * @description The address, percent-encoded as one path segment. Encode it with
+                 *     `encodeURIComponent` (or the equivalent) rather than pasting it in:
+                 *     `a+b@example.com` has to travel as `a%2Bb%40example.com`, since a bare
+                 *     `+` in a path segment is a literal `+` for some intermediaries and a
+                 *     space for others. sendplane decodes the segment once and normalizes the
+                 *     result (trimmed, lowercased, IDN domain to punycode), so any casing of
+                 *     the same address resolves to the same entry.
                  */
                 email: components["parameters"]["SuppressionEmail"];
             };
@@ -4682,9 +4828,13 @@ export interface operations {
             header?: never;
             path: {
                 /**
-                 * @description URL-encoded address. It is normalized (trimmed, lowercased, IDN domain
-                 *     to punycode) before lookup, so any casing of the same address resolves
-                 *     to the same entry.
+                 * @description The address, percent-encoded as one path segment. Encode it with
+                 *     `encodeURIComponent` (or the equivalent) rather than pasting it in:
+                 *     `a+b@example.com` has to travel as `a%2Bb%40example.com`, since a bare
+                 *     `+` in a path segment is a literal `+` for some intermediaries and a
+                 *     space for others. sendplane decodes the segment once and normalizes the
+                 *     result (trimmed, lowercased, IDN domain to punycode), so any casing of
+                 *     the same address resolves to the same entry.
                  */
                 email: components["parameters"]["SuppressionEmail"];
             };
@@ -4718,9 +4868,13 @@ export interface operations {
             header?: never;
             path: {
                 /**
-                 * @description URL-encoded address. It is normalized (trimmed, lowercased, IDN domain
-                 *     to punycode) before lookup, so any casing of the same address resolves
-                 *     to the same entry.
+                 * @description The address, percent-encoded as one path segment. Encode it with
+                 *     `encodeURIComponent` (or the equivalent) rather than pasting it in:
+                 *     `a+b@example.com` has to travel as `a%2Bb%40example.com`, since a bare
+                 *     `+` in a path segment is a literal `+` for some intermediaries and a
+                 *     space for others. sendplane decodes the segment once and normalizes the
+                 *     result (trimmed, lowercased, IDN domain to punycode), so any casing of
+                 *     the same address resolves to the same entry.
                  */
                 email: components["parameters"]["SuppressionEmail"];
             };
@@ -4898,7 +5052,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["I18nBundle"];
-                    "application/x-yaml": components["schemas"]["I18nBundle"];
+                    "application/x-yaml": string;
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4920,7 +5074,7 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["I18nBundle"];
-                "application/x-yaml": components["schemas"]["I18nBundle"];
+                "application/x-yaml": string;
             };
         };
         responses: {

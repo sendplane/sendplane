@@ -239,6 +239,11 @@ func (r *deliveryRepo) Get(ctx context.Context, id string) (*store.Delivery, err
 }
 
 func (r *deliveryRepo) ListByCampaign(ctx context.Context, campaignID string, f store.DeliveryFilter, p store.Page) (store.Result[store.Delivery], error) {
+	f.CampaignID = &campaignID
+	return r.List(ctx, f, p)
+}
+
+func (r *deliveryRepo) List(ctx context.Context, f store.DeliveryFilter, p store.Page) (store.Result[store.Delivery], error) {
 	var zero store.Result[store.Delivery]
 	if err := r.p.check(); err != nil {
 		return zero, err
@@ -246,15 +251,26 @@ func (r *deliveryRepo) ListByCampaign(ctx context.Context, campaignID string, f 
 	p = p.Normalize()
 	a := &args{}
 	q := "SELECT " + deliveryCols + " FROM delivery WHERE tenant_id = " + a.add(r.tenant)
-	q += campaignPredicate(a, campaignID)
+	if f.CampaignID != nil {
+		q += campaignPredicate(a, *f.CampaignID)
+	}
 	if len(f.Statuses) > 0 {
 		q += " AND status = ANY(" + a.add(i16s(f.Statuses)) + "::smallint[])"
 	}
 	if len(f.ErrorClasses) > 0 {
 		q += " AND last_error_class = ANY(" + a.add(i16s(f.ErrorClasses)) + "::smallint[])"
 	}
+	if len(f.Lanes) > 0 {
+		q += " AND lane = ANY(" + a.add(i16s(f.Lanes)) + "::smallint[])"
+	}
 	if f.EmailNorm != "" {
 		q += " AND email_norm = " + a.add(f.EmailNorm)
+	}
+	if !f.Since.IsZero() {
+		q += " AND created_at >= " + a.add(tsInNN(f.Since))
+	}
+	if !f.Until.IsZero() {
+		q += " AND created_at < " + a.add(tsInNN(f.Until))
 	}
 	keyset, err := keysetWhere(a, p, "id")
 	if err != nil {

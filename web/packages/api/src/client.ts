@@ -21,7 +21,7 @@ import {
   type RecipientSource,
 } from './ndjson.js'
 import type { paths } from './schema.js'
-import type { I18nImportResult, RecipientIngestResult } from './types.js'
+import type { DeliveryList, I18nImportResult, RecipientIngestResult } from './types.js'
 
 export type AuthHeaders = Record<string, string>
 
@@ -87,6 +87,14 @@ export type UnwrappedMethod<M extends HttpMethod> = <
   ...init: InitParam<Init>
 ) => Promise<SuccessData<FetchResponse<OperationOf<Path, M>, Init, MediaType>>>
 
+/**
+ * Query of `GET /api/v1/deliveries`, taken straight from the generated
+ * operation so that a new filter in the spec shows up here without an edit.
+ */
+export type DeliveryQuery = NonNullable<
+  NonNullable<paths['/api/v1/deliveries']['get']['parameters']>['query']
+>
+
 export interface SendplaneClient extends Client<paths> {
   /** The base URL every request is resolved against. */
   readonly baseUrl: string
@@ -107,6 +115,15 @@ export interface SendplaneClient extends Client<paths> {
     lines: RecipientSource,
     options?: IngestOptions,
   ): Promise<RecipientIngestResult>
+
+  /**
+   * The tenant-wide delivery listing: every delivery of the tenant, whatever
+   * its campaign. It is `client.get('/api/v1/deliveries')` with the query
+   * named, which is what a screen searching by address wants; the
+   * campaign-scoped `/campaigns/{id}/deliveries` stays available through the
+   * generic methods.
+   */
+  listDeliveries(query?: DeliveryQuery, signal?: AbortSignal): Promise<DeliveryList>
 
   /** Exports a template's i18n bundle as YAML text (`format=yaml`). */
   getI18nYaml(templateId: string, signal?: AbortSignal): Promise<string>
@@ -182,9 +199,11 @@ export function createClient(options: SendplaneClientOptions = {}): SendplaneCli
     }
   }
 
+  const get = unwrap<'get'>(base.GET as never)
+
   const client: SendplaneClient = Object.assign(base, {
     baseUrl,
-    get: unwrap<'get'>(base.GET as never),
+    get,
     post: unwrap<'post'>(base.POST as never),
     put: unwrap<'put'>(base.PUT as never),
     del: unwrap<'delete'>(base.DELETE as never),
@@ -214,6 +233,14 @@ export function createClient(options: SendplaneClientOptions = {}): SendplaneCli
       )
       if (!response.ok) throw await SendplaneError.fromResponse(response)
       return (await response.json()) as RecipientIngestResult
+    },
+
+    async listDeliveries(query: DeliveryQuery = {}, signal?: AbortSignal): Promise<DeliveryList> {
+      const init: { params: { query: DeliveryQuery }; signal?: AbortSignal } = {
+        params: { query },
+      }
+      if (signal) init.signal = signal
+      return (await get('/api/v1/deliveries', init)) as DeliveryList
     },
 
     async getI18nYaml(templateId: string, signal?: AbortSignal): Promise<string> {

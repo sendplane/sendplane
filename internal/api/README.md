@@ -1,6 +1,6 @@
 # internal/api
 
-`api/openapi.yaml`의 79개 오퍼레이션을 구현하는 HTTP 레이어입니다.
+`api/openapi.yaml`의 85개 오퍼레이션을 구현하는 HTTP 레이어입니다.
 설계 근거는 [architecture.md §3, §7.1, §9.1, §9.3, §12, §16](../../docs/architecture.md).
 
 ## 파일 배치
@@ -16,7 +16,7 @@
 | `sending.go` | transport / sender / sending-domain / probe mailbox / probe run / health |
 | `content.go` | layout / template / i18n / preview / publish / message version |
 | `campaigns.go` | 캠페인 CRUD · 인제스트 · 수명주기 · 링크 리포트 · 수신거부 통지 |
-| `deliveries.go` | delivery · attempt · bounce · retry |
+| `deliveries.go` | 테넌트 전역 delivery 목록 · delivery · attempt · bounce · retry |
 | `messages.go` | 트랜잭셔널 발송과 멱등 재생 |
 | `lists.go` | suppression / bounce / event(outbox) |
 | `tracking.go` | 공개 `/t/*` 라우트, IP 토큰버킷, 봇 판정, 1×1 gif |
@@ -70,6 +70,8 @@ make gen-check    # CI: 스펙과 gen.go가 어긋나면 실패
 - **캠페인의 `template_id`**: 캠페인 행에 그대로 저장하고 **start 시점에** 템플릿의 published 버전으로 해석합니다(`control.StartCampaign`, 예약 캠페인은 scheduler가 승격할 때). 따라서 생성은 미발행 템플릿도 받아들이고, 그때까지 발행되지 않았으면 start가 422로 실패합니다. `version_id`를 직접 주면 그 버전에 고정되고 start는 건드리지 않습니다.
 - **트랜잭셔널 멱등성**: `RecipientChunkRepo`를 sentinel 캠페인 `_transactional` + `msg:{key}`로 재사용합니다. 청크에는 카운트만 있고 delivery ID가 없으므로, `Idempotency-Key`가 있으면 delivery ID를 `uuidv5(tenant, key, index, email)`로 **결정적으로** 만듭니다. 재생은 같은 ID를 다시 계산해 조회합니다.
 - **필터가 있는 목록**: `BounceRepo.List`/`OutboxRepo.List`에 타입 필터가 없어 한 페이지를 가져와 걸러냅니다. 커서는 스토어 페이지 단위로 전진하므로 **필터된 페이지가 `limit`보다 적을 수 있습니다** — 클라이언트는 `next_cursor`가 없어질 때까지 따라가면 됩니다.
+- **`GET /deliveries`**: 테넌트 전역 목록입니다(`DeliveryRepo.List`). 주소로 찾는 사람은 어느 캠페인인지 모르고, 트랜잭셔널·프로브 딜리버리에는 스코프로 삼을 캠페인 자체가 없습니다. 캠페인 스코프 라우트와 달리 존재 확인을 할 대상이 없으므로 **404를 내지 않습니다** — 없는 `campaign_id`는 빈 페이지입니다. "캠페인 없는 딜리버리"는 빈 `campaign_id`가 아니라 `lane`으로 고릅니다(빈 문자열이 "없음"을 뜻하는 쿼리는 URL에서 생략과 구분되지 않습니다). 필터는 `DeliveryFilter`에 그대로 실려 스토어가 키셋 인덱스 위에서 거릅니다.
+- **`CampaignStats.sent` / `total`**: `by_status`에서 파생합니다(`statsTotals`). `sent`는 `sent + bounced + complained`입니다 — 바운스·불만은 MTA가 **받은 뒤** 며칠 지나 도착하므로, 그때 분모가 줄어들면 이미 발표한 오픈율이 저절로 올라갑니다. 비율의 분모를 클라이언트마다 다르게 고르는 일도 막습니다.
 - **`GET /events/{id}`**: `OutboxRepo.Get(id)` 한 번입니다.
 - **`POST /events/{id}/replay`**: `OutboxRepo.Reset(id, now)` — pending + `attempts = 0` + 에러/리스 초기화. 원인을 고치고 다시 보내는 것이므로 시도 예산을 온전히 돌려줍니다.
 - **`POST /messages`의 `headers`**: `store.Delivery.Headers`에 저장하고 sender가 화이트리스트를 통과시켜 실제 메일에 붙입니다. 검증은 sender와 **같은** 화이트리스트(`sender.ValidateCustomHeader`)로 하므로 허용되지 않는 이름은 발송 시점이 아니라 여기서 422입니다.

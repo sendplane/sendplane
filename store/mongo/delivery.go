@@ -86,7 +86,31 @@ func (r *deliveryRepo) Get(ctx context.Context, id string) (*store.Delivery, err
 }
 
 func (r *deliveryRepo) ListByCampaign(ctx context.Context, campaignID string, f store.DeliveryFilter, p store.Page) (store.Result[store.Delivery], error) {
-	filter := r.s.scope(campaignEq(campaignID))
+	f.CampaignID = &campaignID
+	return r.List(ctx, f, p)
+}
+
+func (r *deliveryRepo) List(ctx context.Context, f store.DeliveryFilter, p store.Page) (store.Result[store.Delivery], error) {
+	filter := r.s.scope()
+	if f.CampaignID != nil {
+		filter = append(filter, campaignEq(*f.CampaignID))
+	}
+	if len(f.Lanes) > 0 {
+		filter = append(filter, bson.E{Key: "lane",
+			Value: bson.D{{Key: "$in", Value: laneInts(f.Lanes)}}})
+	}
+	// One created_at entry carrying both bounds: a bson.D with the key twice
+	// would silently keep only the last.
+	if !f.Since.IsZero() || !f.Until.IsZero() {
+		rng := bson.D{}
+		if !f.Since.IsZero() {
+			rng = append(rng, bson.E{Key: "$gte", Value: ts(f.Since)})
+		}
+		if !f.Until.IsZero() {
+			rng = append(rng, bson.E{Key: "$lt", Value: ts(f.Until)})
+		}
+		filter = append(filter, bson.E{Key: "created_at", Value: rng})
+	}
 	if len(f.Statuses) > 0 {
 		filter = append(filter, bson.E{Key: "status",
 			Value: bson.D{{Key: "$in", Value: statusInts(f.Statuses)}}})

@@ -611,8 +611,9 @@ type BounceMailbox struct {
 	Name        string              `json:"name"`
 	Port        int32               `json:"port"`
 
-	// Protocol Receiving protocol. POP3 cannot move messages to another folder, so
-	// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+	// Protocol Receiving protocol, `imap` when omitted. POP3 cannot move messages to
+	// another folder, so `after_process` may not be `move:<folder>` on a POP3
+	// mailbox.
 	Protocol  *MailboxProtocol `json:"protocol,omitempty"`
 	Tls       *TLSMode         `json:"tls,omitempty"`
 	UpdatedAt *time.Time       `json:"updated_at,omitempty"`
@@ -622,19 +623,27 @@ type BounceMailbox struct {
 
 // BounceMailboxInput defines model for BounceMailboxInput.
 type BounceMailboxInput struct {
-	Address      *string `json:"address,omitempty"`
+	Address *string `json:"address,omitempty"`
+
+	// AfterProcess What happens to a handled message: `keep` (the default when
+	// omitted), `delete`, `seen` or `move:<folder>`.
 	AfterProcess *string `json:"after_process,omitempty"`
-	Enabled      *bool   `json:"enabled,omitempty"`
-	Folder       *string `json:"folder,omitempty"`
-	Host         string  `json:"host"`
-	Name         string  `json:"name"`
+
+	// Enabled Omitted means `true`; the poller skips a disabled mailbox.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Folder IMAP mailbox to read; empty or omitted means `INBOX`. POP3 ignores it.
+	Folder *string `json:"folder,omitempty"`
+	Host   string  `json:"host"`
+	Name   string  `json:"name"`
 
 	// Password Encrypted at rest. Omit on update to keep the stored one.
 	Password *string `json:"password,omitempty"`
 	Port     int32   `json:"port"`
 
-	// Protocol Receiving protocol. POP3 cannot move messages to another folder, so
-	// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+	// Protocol Receiving protocol, `imap` when omitted. POP3 cannot move messages to
+	// another folder, so `after_process` may not be `move:<folder>` on a POP3
+	// mailbox.
 	Protocol *MailboxProtocol `json:"protocol,omitempty"`
 	Tls      *TLSMode         `json:"tls,omitempty"`
 	Username *string          `json:"username,omitempty"`
@@ -650,19 +659,27 @@ type BounceMailboxList struct {
 
 // BounceMailboxUpdate Bounce mailbox replacement carrying the read version.
 type BounceMailboxUpdate struct {
-	Address      *string `json:"address,omitempty"`
+	Address *string `json:"address,omitempty"`
+
+	// AfterProcess What happens to a handled message: `keep` (the default when
+	// omitted), `delete`, `seen` or `move:<folder>`.
 	AfterProcess *string `json:"after_process,omitempty"`
-	Enabled      *bool   `json:"enabled,omitempty"`
-	Folder       *string `json:"folder,omitempty"`
-	Host         string  `json:"host"`
-	Name         string  `json:"name"`
+
+	// Enabled Omitted means `true`; the poller skips a disabled mailbox.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Folder IMAP mailbox to read; empty or omitted means `INBOX`. POP3 ignores it.
+	Folder *string `json:"folder,omitempty"`
+	Host   string  `json:"host"`
+	Name   string  `json:"name"`
 
 	// Password Encrypted at rest. Omit on update to keep the stored one.
 	Password *string `json:"password,omitempty"`
 	Port     int32   `json:"port"`
 
-	// Protocol Receiving protocol. POP3 cannot move messages to another folder, so
-	// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+	// Protocol Receiving protocol, `imap` when omitted. POP3 cannot move messages to
+	// another folder, so `after_process` may not be `move:<folder>` on a POP3
+	// mailbox.
 	Protocol *MailboxProtocol `json:"protocol,omitempty"`
 	Tls      *TLSMode         `json:"tls,omitempty"`
 	Username *string          `json:"username,omitempty"`
@@ -742,9 +759,21 @@ type CampaignList struct {
 // excluded.
 type CampaignStats struct {
 	// ByStatus Delivery count per status.
-	ByStatus     *map[string]int64 `json:"by_status,omitempty"`
-	ComputedAt   *time.Time        `json:"computed_at,omitempty"`
-	UniqueClicks *int64            `json:"unique_clicks,omitempty"`
+	ByStatus   *map[string]int64 `json:"by_status,omitempty"`
+	ComputedAt *time.Time        `json:"computed_at,omitempty"`
+
+	// Sent Deliveries the receiving MTA accepted, and therefore the stated
+	// denominator of the open, click and unsubscribe rates. It is
+	// `by_status.sent + by_status.bounced + by_status.complained`: a
+	// bounce or a complaint arrives after the message was accepted, so
+	// moving out of `sent` must not shrink the denominator under a rate
+	// that was already computed.
+	Sent *int64 `json:"sent,omitempty"`
+
+	// Total Every delivery of the campaign, whatever its status: the sum of
+	// `by_status`. It is the ingest count, not a send count.
+	Total        *int64 `json:"total,omitempty"`
+	UniqueClicks *int64 `json:"unique_clicks,omitempty"`
 
 	// UniqueOpens Overestimated by privacy proxies; prefer click metrics.
 	UniqueOpens *int64 `json:"unique_opens,omitempty"`
@@ -890,11 +919,14 @@ type DeliveryStatus string
 
 // DeliveryUnsubscribeNotice Per-delivery form; the delivery is already in the path.
 type DeliveryUnsubscribeNotice struct {
-	OccurredAt *time.Time                       `json:"occurred_at,omitempty"`
-	Source     *DeliveryUnsubscribeNoticeSource `json:"source,omitempty"`
+	// OccurredAt Defaults to now.
+	OccurredAt *time.Time `json:"occurred_at,omitempty"`
+
+	// Source Who reported it, `host` when omitted.
+	Source *DeliveryUnsubscribeNoticeSource `json:"source,omitempty"`
 }
 
-// DeliveryUnsubscribeNoticeSource defines model for DeliveryUnsubscribeNotice.Source.
+// DeliveryUnsubscribeNoticeSource Who reported it, `host` when omitted.
 type DeliveryUnsubscribeNoticeSource string
 
 // Duration Go duration string, e.g. `30s`, `5m`, `12h`.
@@ -1088,8 +1120,9 @@ type LinkClickList struct {
 	Items []LinkClick `json:"items"`
 }
 
-// MailboxProtocol Receiving protocol. POP3 cannot move messages to another folder, so
-// `after_process` may not be `move:<folder>` on a POP3 mailbox.
+// MailboxProtocol Receiving protocol, `imap` when omitted. POP3 cannot move messages to
+// another folder, so `after_process` may not be `move:<folder>` on a POP3
+// mailbox.
 type MailboxProtocol string
 
 // MessageRecipient defines model for MessageRecipient.
@@ -1113,7 +1146,7 @@ type MessageRequest struct {
 	// answers 422 `validation_failed`.
 	Headers *map[string]string `json:"headers,omitempty"`
 
-	// Priority Higher is claimed first within the transactional lane.
+	// Priority Higher is claimed first within the transactional lane; `0` when omitted.
 	Priority *int32             `json:"priority,omitempty"`
 	SenderId openapi_types.UUID `json:"sender_id"`
 
@@ -1296,12 +1329,16 @@ type ProbeMailbox struct {
 
 // ProbeMailboxInput defines model for ProbeMailboxInput.
 type ProbeMailboxInput struct {
-	Address     openapi_types.Email `json:"address"`
-	AuthservId  *string             `json:"authserv_id,omitempty"`
-	Enabled     *bool               `json:"enabled,omitempty"`
-	Host        string              `json:"host"`
-	InboxFolder *string             `json:"inbox_folder,omitempty"`
-	Name        string              `json:"name"`
+	Address    openapi_types.Email `json:"address"`
+	AuthservId *string             `json:"authserv_id,omitempty"`
+
+	// Enabled Omitted means `true`; a disabled mailbox takes no part in probe runs.
+	Enabled *bool  `json:"enabled,omitempty"`
+	Host    string `json:"host"`
+
+	// InboxFolder IMAP mailbox the probe mail is expected in; empty or omitted means `INBOX`.
+	InboxFolder *string `json:"inbox_folder,omitempty"`
+	Name        string  `json:"name"`
 
 	// Password Encrypted at rest. Omit on update to keep the stored one.
 	Password   *string  `json:"password,omitempty"`
@@ -1321,12 +1358,16 @@ type ProbeMailboxList struct {
 
 // ProbeMailboxUpdate Probe mailbox replacement carrying the read version.
 type ProbeMailboxUpdate struct {
-	Address     openapi_types.Email `json:"address"`
-	AuthservId  *string             `json:"authserv_id,omitempty"`
-	Enabled     *bool               `json:"enabled,omitempty"`
-	Host        string              `json:"host"`
-	InboxFolder *string             `json:"inbox_folder,omitempty"`
-	Name        string              `json:"name"`
+	Address    openapi_types.Email `json:"address"`
+	AuthservId *string             `json:"authserv_id,omitempty"`
+
+	// Enabled Omitted means `true`; a disabled mailbox takes no part in probe runs.
+	Enabled *bool  `json:"enabled,omitempty"`
+	Host    string `json:"host"`
+
+	// InboxFolder IMAP mailbox the probe mail is expected in; empty or omitted means `INBOX`.
+	InboxFolder *string `json:"inbox_folder,omitempty"`
+	Name        string  `json:"name"`
 
 	// Password Encrypted at rest. Omit on update to keep the stored one.
 	Password   *string  `json:"password,omitempty"`
@@ -1428,9 +1469,9 @@ type ProbeTriggerResult struct {
 
 // PublishRequest defines model for PublishRequest.
 type PublishRequest struct {
-	// AllowMissingI18nKeys Publish anyway when keys are untranslated. Only honoured if the
-	// tenant policy permits it; otherwise the publish still answers 422
-	// `missing_i18n_keys`.
+	// AllowMissingI18nKeys Publish anyway when keys are untranslated; `false` when omitted.
+	// Only honoured if the tenant policy permits it; otherwise the
+	// publish still answers 422 `missing_i18n_keys`.
 	AllowMissingI18nKeys *bool `json:"allow_missing_i18n_keys,omitempty"`
 }
 
@@ -1827,7 +1868,11 @@ type TemplateUpdate struct {
 // tenant lifecycle: the row is created with defaults on first access
 // (ADR-0006).
 type TenantSettings struct {
-	CreatedAt *time.Time `json:"created_at,omitempty"`
+	// BounceRetainRaw Keep the whole returned message on every bounce event. Off unless
+	// set, since an original can be megabytes and is kept for diagnosis
+	// rather than archival (architecture 10).
+	BounceRetainRaw *bool      `json:"bounce_retain_raw,omitempty"`
+	CreatedAt       *time.Time `json:"created_at,omitempty"`
 
 	// DefaultLocale Fallback locale, e.g. `en`.
 	DefaultLocale *string `json:"default_locale,omitempty"`
@@ -1850,6 +1895,15 @@ type TenantSettings struct {
 	// notification back; `none` omits the link and headers (ADR-0011).
 	UnsubscribeMode *UnsubscribeMode `json:"unsubscribe_mode,omitempty"`
 
+	// UnsubscribeOneClick Declares that the host's unsubscribe destination accepts an
+	// RFC 8058 `POST`. It only matters under `unsubscribe_mode=host`:
+	// sendplane adds `List-Unsubscribe-Post` only when the tenant has
+	// said so, because announcing one-click on an endpoint that answers a
+	// POST with a login page makes mailbox providers treat the
+	// unsubscribe as failed. Under `unsubscribe_mode=sendplane` the
+	// header is always set, since sendplane owns the endpoint (ADR-0011).
+	UnsubscribeOneClick *bool `json:"unsubscribe_one_click,omitempty"`
+
 	// UnsubscribeUrlTemplate Liquid evaluated per recipient, e.g.
 	// `https://app.example.com/u?e={{ recipient.email | url_encode }}`.
 	// A recipient's own `unsubscribe_url` wins over it.
@@ -1860,8 +1914,9 @@ type TenantSettings struct {
 
 // TenantSettingsInput defines model for TenantSettingsInput.
 type TenantSettingsInput struct {
-	DefaultLocale *string `json:"default_locale,omitempty"`
-	RetentionDays *int32  `json:"retention_days,omitempty"`
+	BounceRetainRaw *bool   `json:"bounce_retain_raw,omitempty"`
+	DefaultLocale   *string `json:"default_locale,omitempty"`
+	RetentionDays   *int32  `json:"retention_days,omitempty"`
 
 	// Retry Backoff schedule for transient failures (architecture 4.2).
 	Retry              *RetryPolicy `json:"retry,omitempty"`
@@ -1873,14 +1928,18 @@ type TenantSettingsInput struct {
 	// UnsubscribeMode `sendplane` puts a signed tracking URL in the mail and redirects to the
 	// host destination; `host` puts the host URL in directly and expects a
 	// notification back; `none` omits the link and headers (ADR-0011).
-	UnsubscribeMode        *UnsubscribeMode `json:"unsubscribe_mode,omitempty"`
-	UnsubscribeUrlTemplate *string          `json:"unsubscribe_url_template,omitempty"`
+	UnsubscribeMode *UnsubscribeMode `json:"unsubscribe_mode,omitempty"`
+
+	// UnsubscribeOneClick Only meaningful under `unsubscribe_mode=host` (see `TenantSettings`).
+	UnsubscribeOneClick    *bool   `json:"unsubscribe_one_click,omitempty"`
+	UnsubscribeUrlTemplate *string `json:"unsubscribe_url_template,omitempty"`
 }
 
 // TenantSettingsUpdate Tenant settings replacement carrying the read version.
 type TenantSettingsUpdate struct {
-	DefaultLocale *string `json:"default_locale,omitempty"`
-	RetentionDays *int32  `json:"retention_days,omitempty"`
+	BounceRetainRaw *bool   `json:"bounce_retain_raw,omitempty"`
+	DefaultLocale   *string `json:"default_locale,omitempty"`
+	RetentionDays   *int32  `json:"retention_days,omitempty"`
 
 	// Retry Backoff schedule for transient failures (architecture 4.2).
 	Retry              *RetryPolicy `json:"retry,omitempty"`
@@ -1892,8 +1951,11 @@ type TenantSettingsUpdate struct {
 	// UnsubscribeMode `sendplane` puts a signed tracking URL in the mail and redirects to the
 	// host destination; `host` puts the host URL in directly and expects a
 	// notification back; `none` omits the link and headers (ADR-0011).
-	UnsubscribeMode        *UnsubscribeMode `json:"unsubscribe_mode,omitempty"`
-	UnsubscribeUrlTemplate *string          `json:"unsubscribe_url_template,omitempty"`
+	UnsubscribeMode *UnsubscribeMode `json:"unsubscribe_mode,omitempty"`
+
+	// UnsubscribeOneClick Only meaningful under `unsubscribe_mode=host` (see `TenantSettings`).
+	UnsubscribeOneClick    *bool   `json:"unsubscribe_one_click,omitempty"`
+	UnsubscribeUrlTemplate *string `json:"unsubscribe_url_template,omitempty"`
 
 	// Version The `version` last read. A mismatch answers 409 `version_conflict`.
 	Version int64 `json:"version"`
@@ -2021,12 +2083,14 @@ type UnsubscribeNotice struct {
 	// OccurredAt Defaults to now.
 	OccurredAt *time.Time `json:"occurred_at,omitempty"`
 
-	// Source Who reported it. `host` is the usual value under `unsubscribe_mode=host`.
+	// Source Who reported it, `host` when omitted. `host` is the usual value
+	// under `unsubscribe_mode=host`.
 	Source *UnsubscribeNoticeSource `json:"source,omitempty"`
 	union  json.RawMessage
 }
 
-// UnsubscribeNoticeSource Who reported it. `host` is the usual value under `unsubscribe_mode=host`.
+// UnsubscribeNoticeSource Who reported it, `host` when omitted. `host` is the usual value
+// under `unsubscribe_mode=host`.
 type UnsubscribeNoticeSource string
 
 // UnsubscribeNotice0 defines model for UnsubscribeNotice.0.
@@ -2212,6 +2276,38 @@ type IngestCampaignRecipientsParams struct {
 	// IdempotencyKey Replay key. Repeating a completed request with the same key returns the
 	// stored result instead of acting again. Defaults to a hash of the body.
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+}
+
+// ListDeliveriesParams defines parameters for ListDeliveries.
+type ListDeliveriesParams struct {
+	// CampaignId Restrict to one campaign. Omit for every delivery of the tenant,
+	// including the ones without a campaign.
+	CampaignId *openapi_types.UUID `form:"campaign_id,omitempty" json:"campaign_id,omitempty"`
+
+	// Lane Repeat to match several lanes. `transactional` and `probe`
+	// deliveries never have a campaign.
+	Lane *[]Lane `form:"lane,omitempty" json:"lane,omitempty"`
+
+	// Status Repeat to match several statuses.
+	Status *[]DeliveryStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// ErrorClass Repeat to match several error classes.
+	ErrorClass *[]ErrorClass `form:"error_class,omitempty" json:"error_class,omitempty"`
+
+	// Email Exact match on the normalized address.
+	Email *openapi_types.Email `form:"email,omitempty" json:"email,omitempty"`
+
+	// Since Only deliveries whose `created_at` is at or after this instant.
+	Since *time.Time `form:"since,omitempty" json:"since,omitempty"`
+
+	// Until Only deliveries whose `created_at` is strictly before this instant.
+	Until *time.Time `form:"until,omitempty" json:"until,omitempty"`
+
+	// Limit Page size. Clamped into 1-1000.
+	Limit *Limit `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor Opaque `next_cursor` from the previous page; omit for the first page.
+	Cursor *Cursor `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
 // ListDeliveryAttemptsParams defines parameters for ListDeliveryAttempts.
@@ -2658,6 +2754,9 @@ type ServerInterface interface {
 	// NotifyCampaignUnsubscribe Notify a confirmed unsubscribe
 	// (POST /api/v1/campaigns/{campaignId}/unsubscribes)
 	NotifyCampaignUnsubscribe(w http.ResponseWriter, r *http.Request, campaignId CampaignId)
+	// ListDeliveries List the tenant's deliveries
+	// (GET /api/v1/deliveries)
+	ListDeliveries(w http.ResponseWriter, r *http.Request, params ListDeliveriesParams)
 	// GetDelivery Read a delivery
 	// (GET /api/v1/deliveries/{deliveryId})
 	GetDelivery(w http.ResponseWriter, r *http.Request, deliveryId DeliveryId)
@@ -2976,6 +3075,12 @@ func (_ Unimplemented) StartCampaign(w http.ResponseWriter, r *http.Request, cam
 // NotifyCampaignUnsubscribe Notify a confirmed unsubscribe
 // (POST /api/v1/campaigns/{campaignId}/unsubscribes)
 func (_ Unimplemented) NotifyCampaignUnsubscribe(w http.ResponseWriter, r *http.Request, campaignId CampaignId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// ListDeliveries List the tenant's deliveries
+// (GET /api/v1/deliveries)
+func (_ Unimplemented) ListDeliveries(w http.ResponseWriter, r *http.Request, params ListDeliveriesParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -4057,6 +4162,143 @@ func (siw *ServerInterfaceWrapper) NotifyCampaignUnsubscribe(w http.ResponseWrit
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.NotifyCampaignUnsubscribe(w, r, campaignId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListDeliveries operation middleware
+func (siw *ServerInterfaceWrapper) ListDeliveries(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListDeliveriesParams
+
+	// ------------- Optional query parameter "campaign_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "campaign_id", r.URL.Query(), &params.CampaignId, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "campaign_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "campaign_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "lane" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "lane", r.URL.Query(), &params.Lane, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "lane"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "lane", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "error_class" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "error_class", r.URL.Query(), &params.ErrorClass, runtime.BindQueryParameterOptions{Type: "array", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "error_class"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "error_class", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "email" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "email", r.URL.Query(), &params.Email, runtime.BindQueryParameterOptions{Type: "string", Format: "email"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "email"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "email", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "since" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "since", r.URL.Query(), &params.Since, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "since"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "since", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "until" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "until", r.URL.Query(), &params.Until, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "until"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "until", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: "int32"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListDeliveries(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6275,6 +6517,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/v1/campaigns/{campaignId}/unsubscribes", wrapper.NotifyCampaignUnsubscribe)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/deliveries", wrapper.ListDeliveries)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/deliveries/{deliveryId}", wrapper.GetDelivery)
 	})
 	r.Group(func(r chi.Router) {
@@ -8409,6 +8654,84 @@ func (response NotifyCampaignUnsubscribe422JSONResponse) VisitNotifyCampaignUnsu
 type NotifyCampaignUnsubscribe500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response NotifyCampaignUnsubscribe500JSONResponse) VisitNotifyCampaignUnsubscribeResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListDeliveriesRequestObject struct {
+	Params ListDeliveriesParams
+}
+
+type ListDeliveriesResponseObject interface {
+	VisitListDeliveriesResponse(w http.ResponseWriter) error
+}
+
+type ListDeliveries200JSONResponse DeliveryList
+
+func (response ListDeliveries200JSONResponse) VisitListDeliveriesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListDeliveries400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response ListDeliveries400JSONResponse) VisitListDeliveriesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListDeliveries401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ListDeliveries401JSONResponse) VisitListDeliveriesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListDeliveries403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response ListDeliveries403JSONResponse) VisitListDeliveriesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListDeliveries500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ListDeliveries500JSONResponse) VisitListDeliveriesResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -14216,6 +14539,9 @@ type StrictServerInterface interface {
 	// NotifyCampaignUnsubscribe Notify a confirmed unsubscribe
 	// (POST /api/v1/campaigns/{campaignId}/unsubscribes)
 	NotifyCampaignUnsubscribe(ctx context.Context, request NotifyCampaignUnsubscribeRequestObject) (NotifyCampaignUnsubscribeResponseObject, error)
+	// ListDeliveries List the tenant's deliveries
+	// (GET /api/v1/deliveries)
+	ListDeliveries(ctx context.Context, request ListDeliveriesRequestObject) (ListDeliveriesResponseObject, error)
 	// GetDelivery Read a delivery
 	// (GET /api/v1/deliveries/{deliveryId})
 	GetDelivery(ctx context.Context, request GetDeliveryRequestObject) (GetDeliveryResponseObject, error)
@@ -15037,6 +15363,32 @@ func (sh *strictHandler) NotifyCampaignUnsubscribe(w http.ResponseWriter, r *htt
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(NotifyCampaignUnsubscribeResponseObject); ok {
 		if err := validResponse.VisitNotifyCampaignUnsubscribeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListDeliveries operation middleware
+func (sh *strictHandler) ListDeliveries(w http.ResponseWriter, r *http.Request, params ListDeliveriesParams) {
+	var request ListDeliveriesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListDeliveries(ctx, request.(ListDeliveriesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListDeliveries")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListDeliveriesResponseObject); ok {
+		if err := validResponse.VisitListDeliveriesResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

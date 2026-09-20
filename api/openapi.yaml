@@ -1094,7 +1094,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/I18nBundle' }
             application/x-yaml:
-              schema: { $ref: '#/components/schemas/I18nBundle' }
+              schema:
+                type: string
+                description: The same bundle serialized as a YAML document.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1114,7 +1116,9 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/I18nBundle' }
           application/x-yaml:
-            schema: { $ref: '#/components/schemas/I18nBundle' }
+            schema:
+              type: string
+              description: The same bundle serialized as a YAML document.
       responses:
         '200':
           description: Import summary.
@@ -1491,6 +1495,10 @@ paths:
     get:
       operationId: listCampaignDeliveries
       summary: List a campaign's deliveries
+      description: |
+        `GET /deliveries?campaign_id=…` is the same listing without the
+        campaign existence check; this one answers `404` for a campaign that
+        does not exist.
       tags: [Deliveries]
       x-sendplane-action: delivery.read
       parameters:
@@ -1582,6 +1590,83 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/deliveries:
+    get:
+      operationId: listDeliveries
+      summary: List the tenant's deliveries
+      description: |
+        Every delivery of the tenant, whatever its campaign. It is the
+        address-first view: `email` finds one recipient across campaigns, and
+        `lane=transactional` (or `probe`) selects the deliveries that belong to
+        no campaign at all. `GET /campaigns/{campaignId}/deliveries` is the
+        same listing narrowed to one campaign, and answers `404` for a campaign
+        that does not exist; this one never does.
+
+        Ordering and paging are the same everywhere: `created_at`, then `id`.
+      tags: [Deliveries]
+      x-sendplane-action: delivery.read
+      parameters:
+        - name: campaign_id
+          in: query
+          required: false
+          description: |
+            Restrict to one campaign. Omit for every delivery of the tenant,
+            including the ones without a campaign.
+          schema: { type: string, format: uuid }
+        - name: lane
+          in: query
+          required: false
+          description: |
+            Repeat to match several lanes. `transactional` and `probe`
+            deliveries never have a campaign.
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/Lane' }
+        - name: status
+          in: query
+          required: false
+          description: Repeat to match several statuses.
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/DeliveryStatus' }
+        - name: error_class
+          in: query
+          required: false
+          description: Repeat to match several error classes.
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/ErrorClass' }
+        - name: email
+          in: query
+          required: false
+          description: Exact match on the normalized address.
+          schema: { type: string, format: email }
+        - name: since
+          in: query
+          required: false
+          description: Only deliveries whose `created_at` is at or after this instant.
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          required: false
+          description: Only deliveries whose `created_at` is strictly before this instant.
+          schema: { type: string, format: date-time }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of deliveries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeliveryList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '500': { $ref: '#/components/responses/InternalError' }
 
   /api/v1/deliveries/{deliveryId}:
@@ -2196,9 +2281,13 @@ components:
       in: path
       required: true
       description: |
-        URL-encoded address. It is normalized (trimmed, lowercased, IDN domain
-        to punycode) before lookup, so any casing of the same address resolves
-        to the same entry.
+        The address, percent-encoded as one path segment. Encode it with
+        `encodeURIComponent` (or the equivalent) rather than pasting it in:
+        `a+b@example.com` has to travel as `a%2Bb%40example.com`, since a bare
+        `+` in a path segment is a literal `+` for some intermediaries and a
+        space for others. sendplane decodes the segment once and normalizes the
+        result (trimmed, lowercased, IDN domain to punycode), so any casing of
+        the same address resolves to the same entry.
       schema: { type: string, format: email }
     TrackingToken:
       name: token
@@ -2499,6 +2588,12 @@ components:
         suppression_enabled:
           type: boolean
           description: Turn off to manage the do-not-send list in the host instead (ADR-0008).
+        bounce_retain_raw:
+          type: boolean
+          description: |
+            Keep the whole returned message on every bounce event. Off unless
+            set, since an original can be megabytes and is kept for diagnosis
+            rather than archival (architecture 10).
         unsubscribe_mode: { $ref: '#/components/schemas/UnsubscribeMode' }
         unsubscribe_url_template:
           type: string
@@ -2506,6 +2601,16 @@ components:
             Liquid evaluated per recipient, e.g.
             `https://app.example.com/u?e={{ recipient.email | url_encode }}`.
             A recipient's own `unsubscribe_url` wins over it.
+        unsubscribe_one_click:
+          type: boolean
+          description: |
+            Declares that the host's unsubscribe destination accepts an
+            RFC 8058 `POST`. It only matters under `unsubscribe_mode=host`:
+            sendplane adds `List-Unsubscribe-Post` only when the tenant has
+            said so, because announcing one-click on an endpoint that answers a
+            POST with a login page makes mailbox providers treat the
+            unsubscribe as failed. Under `unsubscribe_mode=sendplane` the
+            header is always set, since sendplane owns the endpoint (ADR-0011).
         default_locale: { type: string, description: 'Fallback locale, e.g. `en`.' }
         tracking: { $ref: '#/components/schemas/TrackingConfig' }
         version: { type: integer, format: int64, readOnly: true }
@@ -2518,8 +2623,12 @@ components:
         retry: { $ref: '#/components/schemas/RetryPolicy' }
         retention_days: { type: integer, format: int32, minimum: 1 }
         suppression_enabled: { type: boolean }
+        bounce_retain_raw: { type: boolean }
         unsubscribe_mode: { $ref: '#/components/schemas/UnsubscribeMode' }
         unsubscribe_url_template: { type: string }
+        unsubscribe_one_click:
+          type: boolean
+          description: Only meaningful under `unsubscribe_mode=host` (see `TenantSettings`).
         default_locale: { type: string }
         tracking: { $ref: '#/components/schemas/TrackingConfig' }
 
@@ -2712,10 +2821,10 @@ components:
     MailboxProtocol:
       type: string
       enum: [imap, pop3]
-      default: imap
       description: |
-        Receiving protocol. POP3 cannot move messages to another folder, so
-        `after_process` may not be `move:<folder>` on a POP3 mailbox.
+        Receiving protocol, `imap` when omitted. POP3 cannot move messages to
+        another folder, so `after_process` may not be `move:<folder>` on a POP3
+        mailbox.
 
     BounceMailbox:
       type: object
@@ -2766,9 +2875,17 @@ components:
           type: string
           writeOnly: true
           description: Encrypted at rest. Omit on update to keep the stored one.
-        folder: { type: string, default: INBOX }
-        after_process: { type: string, default: keep }
-        enabled: { type: boolean, default: true }
+        folder:
+          type: string
+          description: IMAP mailbox to read; empty or omitted means `INBOX`. POP3 ignores it.
+        after_process:
+          type: string
+          description: |
+            What happens to a handled message: `keep` (the default when
+            omitted), `delete`, `seen` or `move:<folder>`.
+        enabled:
+          type: boolean
+          description: Omitted means `true`; the poller skips a disabled mailbox.
 
     BounceMailboxUpdate:
       description: Bounce mailbox replacement carrying the read version.
@@ -2829,10 +2946,14 @@ components:
           type: string
           writeOnly: true
           description: Encrypted at rest. Omit on update to keep the stored one.
-        inbox_folder: { type: string, default: INBOX }
+        inbox_folder:
+          type: string
+          description: IMAP mailbox the probe mail is expected in; empty or omitted means `INBOX`.
         spam_folder: { type: string }
         authserv_id: { type: string }
-        enabled: { type: boolean, default: true }
+        enabled:
+          type: boolean
+          description: Omitted means `true`; a disabled mailbox takes no part in probe runs.
 
     ProbeMailboxUpdate:
       description: Probe mailbox replacement carrying the read version.
@@ -3171,11 +3292,10 @@ components:
       properties:
         allow_missing_i18n_keys:
           type: boolean
-          default: false
           description: |
-            Publish anyway when keys are untranslated. Only honoured if the
-            tenant policy permits it; otherwise the publish still answers 422
-            `missing_i18n_keys`.
+            Publish anyway when keys are untranslated; `false` when omitted.
+            Only honoured if the tenant policy permits it; otherwise the
+            publish still answers 422 `missing_i18n_keys`.
 
     MessageVersion:
       type: object
@@ -3221,6 +3341,22 @@ components:
         use `sent` as the denominator, and bot-suspected interactions are
         excluded.
       properties:
+        total:
+          type: integer
+          format: int64
+          description: |
+            Every delivery of the campaign, whatever its status: the sum of
+            `by_status`. It is the ingest count, not a send count.
+        sent:
+          type: integer
+          format: int64
+          description: |
+            Deliveries the receiving MTA accepted, and therefore the stated
+            denominator of the open, click and unsubscribe rates. It is
+            `by_status.sent + by_status.bounced + by_status.complained`: a
+            bounce or a complaint arrives after the message was accepted, so
+            moving out of `sent` must not shrink the denominator under a rate
+            that was already computed.
         by_status:
           type: object
           description: Delivery count per status.
@@ -3449,9 +3585,10 @@ components:
         email: { type: string, format: email, description: Matched against the normalized address. }
         source:
           type: string
-          description: Who reported it. `host` is the usual value under `unsubscribe_mode=host`.
+          description: |
+            Who reported it, `host` when omitted. `host` is the usual value
+            under `unsubscribe_mode=host`.
           enum: [host, api]
-          default: host
         occurred_at:
           type: string
           format: date-time
@@ -3466,9 +3603,9 @@ components:
       properties:
         source:
           type: string
+          description: Who reported it, `host` when omitted.
           enum: [host, api]
-          default: host
-        occurred_at: { type: string, format: date-time }
+        occurred_at: { type: string, format: date-time, description: Defaults to now. }
 
     UnsubscribeResult:
       type: object
@@ -3624,8 +3761,7 @@ components:
         priority:
           type: integer
           format: int32
-          default: 0
-          description: Higher is claimed first within the transactional lane.
+          description: Higher is claimed first within the transactional lane; `0` when omitted.
       examples:
         - template_id: 018f5a2c-0000-7000-8000-000000000001
           sender_id: 018f5a2c-0000-7000-8000-000000000002

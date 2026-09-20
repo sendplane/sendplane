@@ -888,6 +888,116 @@ func testListByCampaign(t *testing.T, p store.Provider) {
 	eq(t, "paged total", len(seen), 6)
 }
 
+// testList covers DeliveryRepo.List, the tenant-wide listing behind
+// GET /api/v1/deliveries. ListByCampaign is the same query with the campaign
+// pinned, so what is new here is everything that crosses a campaign: the
+// address lookup, the lane filter, the created_at window and the fact that a
+// tenant still never sees another tenant's rows without a campaign to hide
+// behind.
+func testList(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, tenant := fresh(t, p)
+	r := s.Deliveries()
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	campaignA, campaignB := store.NewID(), store.NewID()
+
+	mk := func(campaign, email string, lane store.Lane, st store.DeliveryStatus,
+		cl store.ErrorClass, created time.Time) store.Delivery {
+		return store.Delivery{
+			ID: store.NewID(), CampaignID: campaign, Lane: lane, Status: st,
+			LastErrorClass: cl, Email: email, EmailNorm: email,
+			NextAttemptAt: now, CreatedAt: created,
+		}
+	}
+	seed(t, s, []store.Delivery{
+		mk(campaignA, "a@example.com", store.LaneBulk, store.DeliverySent, store.ErrorClassNone, old),
+		mk(campaignA, "shared@example.com", store.LaneBulk, store.DeliveryFailed, store.ErrorClassPermanent, old),
+		mk(campaignB, "shared@example.com", store.LaneBulk, store.DeliverySent, store.ErrorClassNone, now),
+		mk("", "shared@example.com", store.LaneTransactional, store.DeliverySent, store.ErrorClassNone, now),
+		mk("", "probe@example.com", store.LaneProbe, store.DeliverySent, store.ErrorClassNone, now),
+	})
+
+	// Another tenant holds rows that match every filter below, including two
+	// without a campaign: a leaked row would show up as an off-by-one here.
+	other, _ := fresh(t, p)
+	seed(t, other, []store.Delivery{
+		mk(campaignA, "shared@example.com", store.LaneBulk, store.DeliveryFailed, store.ErrorClassPermanent, old),
+		mk("", "shared@example.com", store.LaneTransactional, store.DeliverySent, store.ErrorClassNone, now),
+	})
+
+	count := func(what string, f store.DeliveryFilter) int {
+		t.Helper()
+		res, err := r.List(ctx, f, store.Page{Limit: 100})
+		must(t, "List "+what, err)
+		return len(res.Items)
+	}
+
+	noCampaign := ""
+	cases := []struct {
+		name string
+		f    store.DeliveryFilter
+		want int
+	}{
+		{"everything", store.DeliveryFilter{}, 5},
+		{"one campaign", store.DeliveryFilter{CampaignID: &campaignA}, 2},
+		{"no campaign", store.DeliveryFilter{CampaignID: &noCampaign}, 2},
+		{"lane", store.DeliveryFilter{Lanes: []store.Lane{store.LaneTransactional}}, 1},
+		{"two lanes", store.DeliveryFilter{
+			Lanes: []store.Lane{store.LaneTransactional, store.LaneProbe}}, 2},
+		{"address across campaigns", store.DeliveryFilter{EmailNorm: "shared@example.com"}, 3},
+		{"address in one campaign", store.DeliveryFilter{
+			EmailNorm: "shared@example.com", CampaignID: &campaignB}, 1},
+		{"status", store.DeliveryFilter{
+			Statuses: []store.DeliveryStatus{store.DeliveryFailed}}, 1},
+		{"error class", store.DeliveryFilter{
+			ErrorClasses: []store.ErrorClass{store.ErrorClassPermanent}}, 1},
+		{"since", store.DeliveryFilter{Since: now.Add(-time.Hour)}, 3},
+		{"until", store.DeliveryFilter{Until: now.Add(-time.Hour)}, 2},
+		{"window", store.DeliveryFilter{
+			Since: old.Add(-time.Hour), Until: now.Add(-time.Hour)}, 2},
+		// Since is inclusive and Until exclusive, so the same instant on both
+		// sides of a row includes it once and excludes it once.
+		{"since is inclusive", store.DeliveryFilter{Since: now}, 3},
+		{"until is exclusive", store.DeliveryFilter{Until: now}, 2},
+		{"no match", store.DeliveryFilter{EmailNorm: "nobody@example.com"}, 0},
+	}
+	for _, tc := range cases {
+		eq(t, tc.name, count(tc.name, tc.f), tc.want)
+	}
+
+	// The other tenant sees only its own two rows through the same filters.
+	res, err := other.Deliveries().List(ctx, store.DeliveryFilter{}, store.Page{Limit: 100})
+	must(t, "List other tenant", err)
+	eq(t, "other tenant total", len(res.Items), 2)
+	for i := range res.Items {
+		if res.Items[i].TenantID != "" && res.Items[i].TenantID == tenant {
+			t.Fatalf("tenant %s leaked delivery %s", tenant, res.Items[i].ID)
+		}
+	}
+
+	seen := map[string]bool{}
+	cursor := ""
+	for {
+		page, err := r.List(ctx, store.DeliveryFilter{}, store.Page{Limit: 2, Cursor: cursor})
+		must(t, "List page", err)
+		if len(page.Items) > 2 {
+			t.Fatalf("page of %d items exceeds the limit", len(page.Items))
+		}
+		for i := range page.Items {
+			if seen[page.Items[i].ID] {
+				t.Fatalf("delivery %s listed twice", page.Items[i].ID)
+			}
+			seen[page.Items[i].ID] = true
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	eq(t, "paged total", len(seen), 5)
+}
+
 func testDeleteBefore(t *testing.T, p store.Provider) {
 	ctx := context.Background()
 	s, _ := fresh(t, p)

@@ -61,7 +61,7 @@ pnpm install
 | `pnpm gen`       | `api/openapi.yaml` → `packages/api/src/schema.d.ts` 재생성 |
 | `pnpm lint`      | ESLint (vue + ts)                                          |
 | `pnpm typecheck` | `tsc` / `vue-tsc` 전체                                     |
-| `pnpm test`      | vitest (api 22 · ui 49 · console 6)                        |
+| `pnpm test`      | vitest (api 25 · ui 49 · console 6)                        |
 | `pnpm build`     | api(tsc) → ui(vite lib) → console(vite) 순서로 빌드        |
 | `pnpm format`    | Prettier                                                   |
 
@@ -147,6 +147,22 @@ const result = await client.ingestRecipients(campaignId, recipientsFromFile(file
   `vars.plan` 같은 컬럼은 `vars`에 중첩 저장됩니다.
 - 청크 단위로 나눠 호출하고 청크마다 다른 `Idempotency-Key`를 주면, 중간에 끊긴 업로드를
   다시 돌려도 완료된 청크는 저장된 결과만 돌려받습니다(중복 삽입 없음).
+
+### 딜리버리 목록
+
+```ts
+const page = await client.listDeliveries({
+  email: 'a+b@example.com', // 주소로 캠페인을 가로질러 검색
+  lane: ['transactional'], // 캠페인 없는 딜리버리만
+  status: ['failed', 'bounced'],
+  since: '2025-03-01T00:00:00Z',
+  limit: 50,
+})
+```
+
+`GET /api/v1/deliveries`를 감싼 얇은 편의 메서드입니다(쿼리 타입은
+`DeliveryQuery`). 캠페인 스코프가 필요하면 `campaign_id`를 주거나
+`client.get('/api/v1/campaigns/{campaignId}/deliveries', …)`를 그대로 쓰면 됩니다.
 
 ### i18n YAML
 
@@ -306,7 +322,8 @@ pnpm test
 ```
 
 - `packages/api` — fetch 목으로 인증 헤더 주입, `explode=true` 쿼리 직렬화,
-  `SendplaneError` 매핑, NDJSON 스트리밍/버퍼링 양쪽 경로, CSV/NDJSON 리더를 검증합니다.
+  `SendplaneError` 매핑, NDJSON 스트리밍/버퍼링 양쪽 경로, CSV/NDJSON 리더,
+  `listDeliveries`의 쿼리 직렬화를 검증합니다.
 - `packages/ui` — provider/composable, `StatusBadge`, `Table`의 커서 페이지네이션,
   목 클라이언트를 물린 `CampaignDetailPage`, `TemplateEditorPage`의 i18n 누락 키 판정과
   모드 전환 확인을 검증합니다. 블록 에디터는 순수 헬퍼(`lib/mjml-blocks.ts`)만
@@ -319,27 +336,44 @@ pnpm test
 
 ## 알려진 스펙상의 거친 부분
 
-프론트를 붙이면서 걸린 것들입니다(스펙 수정 후보).
+프론트를 붙이면서 걸렸던 것들입니다. 1~6번은 스펙 쪽에서 정리됐고, 아래는
+**무엇이 어떻게 바뀌었는지**와 **아직 남은 것**입니다.
 
-1. **딜리버리 목록이 캠페인 스코프뿐**입니다. `GET /api/v1/campaigns/{id}/deliveries`만
-   있고 테넌트 전역 `GET /api/v1/deliveries`가 없어서, `DeliveryListPage`는
-   `campaignId`를 **필수 prop**으로 받습니다. "주소로 전체 검색"이나 "transactional
-   딜리버리 조회"는 현재 API로 불가능합니다.
-2. **`ProbeMailboxInput.inbox_folder` / `enabled`의 `default:`** 때문에
-   openapi-typescript가 이 필드를 **필수**로 내보냅니다. 클라이언트가 생략할 수 있게
-   하려면 `default`를 빼거나 문서에만 남겨야 합니다.
-3. **`TenantSettings`에 원클릭 수신거부 토글이 없습니다.** 아키텍처 §9.2는
-   `unsubscribe_mode=host`일 때 "호스트가 원클릭 POST를 받는다고 선언한 경우에만"
-   `List-Unsubscribe-Post`를 붙인다고 하는데, 그 선언을 담을 필드가 스펙에 없습니다.
-   설정 화면은 지금 설명 문구만 보여 줍니다.
-4. **캠페인 통계에 `sent` 분모가 암묵적**입니다. `CampaignStats.by_status`에서 꺼내
-   써야 하는데, 비율의 분모라면 명시 필드가 낫습니다.
-5. **`GET /templates/{id}/i18n`의 `format`이 응답 미디어 타입을 바꾸는데** 두 표현 모두
-   `I18nBundle` 스키마로 선언되어 있어서, 생성된 타입만 보면 YAML 응답이 문자열이라는
-   사실이 드러나지 않습니다. 그래서 `getI18nYaml`/`putI18nYaml`을 손으로 감쌌습니다.
-6. **`PUT /suppressions/{email}`의 경로 파라미터가 이메일 주소**입니다. 정규화된
-   주소를 URL 인코딩해 넣어야 하고, `+`가 들어간 주소에서 프록시 설정에 따라
-   깨질 소지가 있습니다.
+### 정리된 것
+
+1. **테넌트 전역 딜리버리 목록이 생겼습니다.** `GET /api/v1/deliveries`가
+   `campaign_id` · `lane` · `status` · `error_class` · `email` · `since` ·
+   `until` · `limit` · `cursor`를 받습니다(액션은 `delivery.read`). 그래서
+   "주소로 전체 검색"과 "트랜잭셔널 딜리버리 조회"(`lane=transactional`)가
+   이제 가능합니다. `DeliveryListPage`는 `campaignId`를 **선택 prop**으로 낮추고
+   이 엔드포인트로 갈아타면 됩니다. 클라이언트에는
+   `client.listDeliveries(query)` 편의 메서드와 `LANES` 상수가 있습니다.
+   캠페인 스코프 `GET /campaigns/{id}/deliveries`는 그대로입니다 — 같은 목록에
+   캠페인 존재 확인(404)만 얹은 형태입니다.
+2. **요청 바디 속성의 `default:`를 전부 걷어냈습니다.** 기본값은 `description`에만
+   적고 서버가 적용합니다. `ProbeMailboxInput.inbox_folder` / `enabled`,
+   `BounceMailboxInput.folder` / `after_process` / `enabled`,
+   `PublishRequest.allow_missing_i18n_keys`, `MessageRequest.priority`,
+   `UnsubscribeNotice.source`가 모두 **optional**로 생성됩니다.
+3. **`TenantSettings`에 `unsubscribe_one_click`과 `bounce_retain_raw`가 생겼습니다.**
+   둘 다 이미 엔진(`internal/sender`, `internal/bounce`)이 읽던 값인데 API에만
+   없었습니다. 설정 화면에서 진짜 토글로 만들 수 있습니다.
+4. **`CampaignStats`에 `total`과 `sent`가 명시됐습니다.** `sent`는
+   `by_status.sent + bounced + complained`입니다 — 며칠 뒤 도착한 바운스가
+   이미 계산된 오픈율의 분모를 줄이면 안 되기 때문입니다. `by_status`는 그대로
+   남아 있습니다.
+5. **i18n YAML 표현의 스키마가 `type: string`이 됐습니다.** 생성 타입만 봐도
+   YAML 응답이 문자열이라는 게 드러납니다. `getI18nYaml` / `putI18nYaml` 래퍼는
+   그대로 둡니다 — 타입이 정직해졌을 뿐, `openapi-fetch`는 한 오퍼레이션에
+   미디어 타입 하나만 태우기 때문입니다.
+6. **`/suppressions/{email}`은 경로 형태 그대로 둡니다.** 대신 스펙이 인코딩을
+   못박았습니다: 세그먼트를 `encodeURIComponent`로 감싸서
+   `a%2Bb%40example.com`으로 보내세요. `+`가 들어간 주소가 `%2B`로도 그냥 `+`로도
+   같은 엔트리에 닿는다는 것은 Go 쪽 라우터 테스트
+   (`TestSuppressionPathTakesAnEncodedAddress`)가 고정합니다.
+
+### 아직 남은 것
+
 7. **낙관적 동시성의 `version`이 응답에서 `readOnly`**라 업데이트 바디에 다시 넣어야
    하는데, 생성 타입상 `TransportUpdate` 등은 `version`을 요구하므로 화면이 항상
    "읽은 객체"를 들고 있어야 합니다. 현재 편집 화면들이 그렇게 되어 있습니다.

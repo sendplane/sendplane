@@ -97,6 +97,9 @@ export interface Page<T> {
   next_cursor?: string
 }
 
+// The lane filter of GET /api/v1/deliveries, in the spec's order.
+export const LANES = ['bulk', 'transactional', 'probe'] as const satisfies readonly Lane[]
+
 export const DELIVERY_STATUSES = [
   'pending',
   'queued',

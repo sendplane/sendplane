@@ -175,11 +175,32 @@ func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign
 	return nil
 }
 
+// statsTotals derives the two denominators the spec states explicitly from the
+// per-status counts the control loop caches, so that a client reading a rate
+// does not have to know which statuses to add up (and cannot pick a different
+// set than the next client).
+//
+// sent counts everything the receiving MTA accepted, which includes the rows
+// that have since moved on to bounced or complained: those transitions happen
+// minutes to days after the send, and letting them shrink the denominator
+// would make an open rate climb on its own.
+func statsTotals(by map[store.DeliveryStatus]int64) (total, sent int64) {
+	for st, n := range by {
+		total += n
+		switch st {
+		case store.DeliverySent, store.DeliveryBounced, store.DeliveryComplained:
+			sent += n
+		}
+	}
+	return total, sent
+}
+
 func campaignOut(v *store.Campaign) Campaign {
 	byStatus := map[string]int64{}
 	for st, n := range v.Stats.ByStatus {
 		byStatus[st.String()] = n
 	}
+	total, sent := statsTotals(v.Stats.ByStatus)
 	return Campaign{
 		Id: uuidPtrOf(v.ID), Name: v.Name,
 		TemplateId: uuidPtrOf(v.TemplateID),
@@ -190,6 +211,8 @@ func campaignOut(v *store.Campaign) Campaign {
 		CompletedAt: timePtr(v.CompletedAt),
 		Stats: &CampaignStats{
 			ByStatus:           &byStatus,
+			Total:              ptr(total),
+			Sent:               ptr(sent),
 			UniqueOpens:        ptr(v.Stats.UniqueOpens),
 			UniqueClicks:       ptr(v.Stats.UniqueClicks),
 			Unsubscribed:       ptr(v.Stats.Unsubscribed),
@@ -374,30 +397,14 @@ func (s *server) ListCampaignDeliveries(ctx context.Context, req ListCampaignDel
 		return nil, err
 	}
 	var f store.DeliveryFilter
-	if req.Params.Status != nil {
-		for _, v := range *req.Params.Status {
-			st, err := deliveryStatusIn(v)
-			if err != nil {
-				return nil, err
-			}
-			f.Statuses = append(f.Statuses, st)
-		}
+	if f.Statuses, err = deliveryStatusesIn(req.Params.Status); err != nil {
+		return nil, err
 	}
-	if req.Params.ErrorClass != nil {
-		for _, v := range *req.Params.ErrorClass {
-			cl, err := errorClassIn(v)
-			if err != nil {
-				return nil, err
-			}
-			f.ErrorClasses = append(f.ErrorClasses, cl)
-		}
+	if f.ErrorClasses, err = errorClassesIn(req.Params.ErrorClass); err != nil {
+		return nil, err
 	}
-	if req.Params.Email != nil {
-		norm, err := store.NormalizeEmail(string(*req.Params.Email))
-		if err != nil {
-			return nil, errInvalid("email: %v", err)
-		}
-		f.EmailNorm = norm
+	if f.EmailNorm, err = emailNormIn(req.Params.Email); err != nil {
+		return nil, err
 	}
 	res, err := t.st.Deliveries().ListByCampaign(ctx, req.CampaignId.String(), f,
 		pageOf(req.Params.Limit, req.Params.Cursor))

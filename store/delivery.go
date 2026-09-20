@@ -154,12 +154,29 @@ type RetryFilter struct {
 	Now time.Time
 }
 
-// DeliveryFilter narrows a campaign delivery listing.
+// DeliveryFilter narrows a delivery listing. Every field is ANDed; a zero
+// field matches everything.
 type DeliveryFilter struct {
 	Statuses     []DeliveryStatus
 	ErrorClasses []ErrorClass
-	// EmailNorm matches one recipient exactly.
+	Lanes        []Lane
+	// EmailNorm matches one recipient exactly. It must already be normalized
+	// (see NormalizeEmail); nothing here normalizes it, so an unnormalized
+	// value simply matches no row.
 	EmailNorm string
+	// CampaignID selects one campaign. Nil matches every delivery, including
+	// the ones without a campaign; a non-nil empty string matches exactly the
+	// deliveries that have no campaign (transactional and probe). It is a
+	// pointer for that reason, since "" is a meaningful value.
+	//
+	// List reads it; ListByCampaign takes the campaign as an argument and
+	// ignores it.
+	CampaignID *string
+	// Since and Until bound CreatedAt: Since is inclusive, Until exclusive,
+	// and a zero time is no bound. The listing order is (created_at, id), so
+	// this narrows the same index the cursor walks.
+	Since time.Time
+	Until time.Time
 }
 
 // DeliveryRepo is the queue. Every transition is conditional; nothing here
@@ -177,6 +194,17 @@ type DeliveryRepo interface {
 	InsertBatch(ctx context.Context, ds []Delivery) (inserted int, err error)
 
 	Get(ctx context.Context, id string) (*Delivery, error)
+
+	// List pages the tenant's deliveries, keyset-ordered by (created_at, id)
+	// like every other listing. It is the address-first view behind
+	// GET /api/v1/deliveries: an operator looking up one recipient does not
+	// know which campaign to ask.
+	List(ctx context.Context, f DeliveryFilter, p Page) (Result[Delivery], error)
+
+	// ListByCampaign is List with f.CampaignID pinned to campaignID, kept as
+	// its own method because the campaign is a path segment rather than a
+	// filter for its caller. An empty campaignID lists the deliveries without
+	// a campaign.
 	ListByCampaign(ctx context.Context, campaignID string, f DeliveryFilter, p Page) (Result[Delivery], error)
 
 	// Claim leases up to Limit eligible deliveries, ordered by priority

@@ -62,6 +62,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 		t.Run("BulkTransition", func(t *testing.T) { testBulkTransition(t, p) })
 		t.Run("SetFirst", func(t *testing.T) { testSetFirst(t, p) })
 		t.Run("ListByCampaign", func(t *testing.T) { testListByCampaign(t, p) })
+		t.Run("List", func(t *testing.T) { testList(t, p) })
 		t.Run("DeleteBefore", func(t *testing.T) { testDeleteBefore(t, p) })
 	})
 	t.Run("Attempts", func(t *testing.T) { testAttempts(t, p) })

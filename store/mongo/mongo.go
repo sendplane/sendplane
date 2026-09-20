@@ -358,6 +358,13 @@ func indexes() []index {
 			{Key: "tenant_id", Value: 1}, {Key: "campaign_id", Value: 1},
 			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
 		}},
+		// "Find this address across campaigns" (GET /api/v1/deliveries?email=).
+		// The tenant-wide listing without an address walks listIndex(collDelivery),
+		// which is already (tenant_id, created_at, _id).
+		{coll: collDelivery, name: "tenant_email_created", keys: bson.D{
+			{Key: "tenant_id", Value: 1}, {Key: "email_norm", Value: 1},
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		}},
 	}
 	return out
 }

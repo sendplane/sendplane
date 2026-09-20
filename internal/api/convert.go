@@ -174,6 +174,14 @@ func campaignStatusIn(v CampaignStatus) (store.CampaignStatus, error) {
 
 func laneOut(v store.Lane) Lane { return Lane(v.String()) }
 
+func laneIn(v Lane) (store.Lane, error) {
+	var out store.Lane
+	if err := out.UnmarshalText([]byte(v)); err != nil {
+		return 0, errInvalid("unknown lane %q", v)
+	}
+	return out, nil
+}
+
 func healthOut(v store.HealthStatus) HealthStatus { return HealthStatus(v.String()) }
 
 func transportStatusOut(v store.TransportStatus) TransportStatus {

@@ -104,18 +104,50 @@ func matchClass(classes []store.ErrorClass, c store.ErrorClass) bool {
 	return false
 }
 
-func (r *deliveryRepo) ListByCampaign(_ context.Context, campaignID string, f store.DeliveryFilter, p store.Page) (store.Result[store.Delivery], error) {
+func matchLane(lanes []store.Lane, l store.Lane) bool {
+	if len(lanes) == 0 {
+		return true
+	}
+	for _, x := range lanes {
+		if x == l {
+			return true
+		}
+	}
+	return false
+}
+
+func matchDelivery(f store.DeliveryFilter, d *store.Delivery) bool {
+	if f.CampaignID != nil && d.CampaignID != *f.CampaignID {
+		return false
+	}
+	if f.EmailNorm != "" && d.EmailNorm != f.EmailNorm {
+		return false
+	}
+	if !f.Since.IsZero() && d.CreatedAt.Before(store.TruncateTime(f.Since)) {
+		return false
+	}
+	if !f.Until.IsZero() && !d.CreatedAt.Before(store.TruncateTime(f.Until)) {
+		return false
+	}
+	return matchStatus(f.Statuses, d.Status) &&
+		matchClass(f.ErrorClasses, d.LastErrorClass) &&
+		matchLane(f.Lanes, d.Lane)
+}
+
+func (r *deliveryRepo) List(_ context.Context, f store.DeliveryFilter, p store.Page) (store.Result[store.Delivery], error) {
 	r.s.p.mu.Lock()
 	defer r.s.p.mu.Unlock()
 	if err := r.s.p.check(); err != nil {
 		return store.Result[store.Delivery]{}, err
 	}
 	return paginate(r.s.d.deliveries, p, func(d *store.Delivery) bool {
-		return d.CampaignID == campaignID &&
-			matchStatus(f.Statuses, d.Status) &&
-			matchClass(f.ErrorClasses, d.LastErrorClass) &&
-			(f.EmailNorm == "" || d.EmailNorm == f.EmailNorm)
+		return matchDelivery(f, d)
 	}), nil
+}
+
+func (r *deliveryRepo) ListByCampaign(ctx context.Context, campaignID string, f store.DeliveryFilter, p store.Page) (store.Result[store.Delivery], error) {
+	f.CampaignID = &campaignID
+	return r.List(ctx, f, p)
 }
 
 func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store.Delivery, error) {

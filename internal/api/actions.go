@@ -69,6 +69,7 @@ var opActions = map[string]host.Action{
 	"ListCampaignLinks":         host.ActionCampaignRead,
 	"ListCampaigns":             host.ActionCampaignRead,
 	"ListDeadLetterEvents":      host.ActionEventRead,
+	"ListDeliveries":            host.ActionDeliveryRead,
 	"ListDeliveryAttempts":      host.ActionDeliveryRead,
 	"ListDeliveryBounces":       host.ActionDeliveryRead,
 	"ListEvents":                host.ActionEventRead,

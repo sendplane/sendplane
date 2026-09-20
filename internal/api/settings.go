@@ -98,6 +98,9 @@ func (s *server) applySettings(ctx context.Context, cur *store.TenantSettings, i
 	if in.SuppressionEnabled != nil {
 		cur.SuppressionEnabled = *in.SuppressionEnabled
 	}
+	if in.BounceRetainRaw != nil {
+		cur.BounceRetainRaw = *in.BounceRetainRaw
+	}
 	if mode, err := unsubscribeModeIn(in.UnsubscribeMode); err != nil {
 		return err
 	} else if mode != "" {
@@ -108,6 +111,9 @@ func (s *server) applySettings(ctx context.Context, cur *store.TenantSettings, i
 			return err
 		}
 		cur.UnsubscribeURLTemplate = *in.UnsubscribeUrlTemplate
+	}
+	if in.UnsubscribeOneClick != nil {
+		cur.UnsubscribeOneClick = *in.UnsubscribeOneClick
 	}
 	if in.DefaultLocale != nil {
 		cur.DefaultLocale = *in.DefaultLocale
@@ -182,7 +188,9 @@ func settingsOut(v *store.TenantSettings) TenantSettings {
 		TenantId:               strPtr(v.TenantID),
 		RetentionDays:          i32(v.RetentionDays),
 		SuppressionEnabled:     ptr(v.SuppressionEnabled),
+		BounceRetainRaw:        ptr(v.BounceRetainRaw),
 		UnsubscribeUrlTemplate: strPtr(v.UnsubscribeURLTemplate),
+		UnsubscribeOneClick:    ptr(v.UnsubscribeOneClick),
 		DefaultLocale:          strPtr(v.DefaultLocale),
 		Version:                ptr(v.Version),
 		CreatedAt:              timePtr(v.CreatedAt),

@@ -193,6 +193,54 @@ describe('ingestRecipients', () => {
   })
 })
 
+describe('listDeliveries', () => {
+  const delivery = {
+    id: '018f5a2c-0000-7000-8000-000000000003',
+    version_id: '018f5a2c-0000-7000-8000-000000000004',
+    sender_id: '018f5a2c-0000-7000-8000-000000000002',
+    lane: 'transactional' as const,
+    status: 'sent' as const,
+    email: 'a+b@example.com',
+  }
+
+  it('hits the tenant-wide route with the repeated filters exploded', async () => {
+    const { api, mock } = client(() => ({ json: { items: [delivery] } }))
+    const page = await api.listDeliveries({
+      email: 'a+b@example.com',
+      lane: ['transactional', 'probe'],
+      status: ['sent'],
+      since: '2025-03-01T00:00:00Z',
+      limit: 25,
+    })
+    const url = new URL(mock.calls[0]!.url)
+    expect(url.pathname).toBe('/api/v1/deliveries')
+    expect(url.searchParams.getAll('lane')).toEqual(['transactional', 'probe'])
+    expect(url.searchParams.getAll('status')).toEqual(['sent'])
+    // `+` has to survive as part of the address, not decode to a space.
+    expect(url.searchParams.get('email')).toBe('a+b@example.com')
+    expect(url.searchParams.get('since')).toBe('2025-03-01T00:00:00Z')
+    expect(url.searchParams.get('limit')).toBe('25')
+    expect(page.items[0]?.email).toBe('a+b@example.com')
+  })
+
+  it('takes no query at all', async () => {
+    const { api, mock } = client(() => ({ json: { items: [] } }))
+    await api.listDeliveries()
+    expect(new URL(mock.calls[0]!.url).search).toBe('')
+  })
+
+  it('throws SendplaneError like the generic methods', async () => {
+    const { api } = client(() => ({
+      status: 403,
+      json: { code: 'forbidden', message: 'role may not delivery.read' },
+    }))
+    await expect(api.listDeliveries({ email: 'a@example.com' })).rejects.toMatchObject({
+      code: 'forbidden',
+      status: 403,
+    })
+  })
+})
+
 describe('i18n YAML wrappers', () => {
   const yaml = 'default_locale: en\nlocales:\n  en:\n    welcome.title: Welcome\n'
 
