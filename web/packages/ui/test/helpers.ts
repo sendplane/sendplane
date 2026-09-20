@@ -31,6 +31,7 @@ export function fakeClient(overrides: Partial<Record<string, unknown>> = {}): Se
     put: vi.fn(notStubbed('put')),
     del: vi.fn(notStubbed('del')),
     ingestRecipients: vi.fn(notStubbed('ingestRecipients')),
+    listDeliveries: vi.fn(notStubbed('listDeliveries')),
     getI18nYaml: vi.fn(notStubbed('getI18nYaml')),
     putI18nYaml: vi.fn(notStubbed('putI18nYaml')),
     ...overrides,

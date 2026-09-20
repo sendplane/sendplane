@@ -29,6 +29,8 @@ const draft = ref({
   suppression_enabled: true,
   unsubscribe_mode: 'sendplane' as UnsubscribeMode,
   unsubscribe_url_template: '',
+  unsubscribe_one_click: false,
+  bounce_retain_raw: false,
   default_locale: 'en',
   tracking_domain: '',
   tracking_opens: true,
@@ -47,6 +49,8 @@ watch(settings.data, (value) => {
     suppression_enabled: value.suppression_enabled !== false,
     unsubscribe_mode: value.unsubscribe_mode ?? 'sendplane',
     unsubscribe_url_template: value.unsubscribe_url_template ?? '',
+    unsubscribe_one_click: value.unsubscribe_one_click === true,
+    bounce_retain_raw: value.bounce_retain_raw === true,
     default_locale: value.default_locale ?? 'en',
     tracking_domain: value.tracking?.domain ?? '',
     tracking_opens: value.tracking?.opens !== false,
@@ -74,6 +78,11 @@ const trackingDomainMissing = computed(
   () => trackingDomainRequired.value && !draft.value.tracking_domain,
 )
 
+// `unsubscribe_one_click` only matters under `host` mode (spec): under
+// `sendplane` the header is always set, and under `none` there is no
+// unsubscribe endpoint to declare it for.
+const oneClickRelevant = computed(() => draft.value.unsubscribe_mode === 'host')
+
 const signingKeys = computed(() => current.value?.tracking?.signing_keys ?? [])
 
 async function save() {
@@ -91,6 +100,8 @@ async function save() {
         suppression_enabled: draft.value.suppression_enabled,
         unsubscribe_mode: draft.value.unsubscribe_mode,
         unsubscribe_url_template: draft.value.unsubscribe_url_template,
+        unsubscribe_one_click: draft.value.unsubscribe_one_click,
+        bounce_retain_raw: draft.value.bounce_retain_raw,
         default_locale: draft.value.default_locale,
         tracking: {
           domain: draft.value.tracking_domain,
@@ -176,6 +187,11 @@ async function save() {
           :label="t('settings.suppressionEnabled')"
           :hint="t('settings.suppressionHint')"
         />
+        <SpCheckbox
+          v-model="draft.bounce_retain_raw"
+          :label="t('settings.bounceRetainRaw')"
+          :hint="t('settings.bounceRetainRawHint')"
+        />
       </div>
     </SpCard>
 
@@ -196,8 +212,13 @@ async function save() {
             placeholder="https://app.example.com/u?e={{ recipient.email | url_encode }}"
           />
         </SpField>
+        <SpCheckbox
+          v-model="draft.unsubscribe_one_click"
+          :disabled="!oneClickRelevant"
+          :label="t('settings.oneClick')"
+          :hint="t('settings.oneClickHint')"
+        />
       </div>
-      <p class="sp-note">{{ t('settings.oneClickHint') }}</p>
     </SpCard>
 
     <SpCard :title="t('settings.tracking')">

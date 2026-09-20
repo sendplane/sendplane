@@ -15,6 +15,8 @@ const campaign: Campaign = {
   started_at: '2026-09-01T10:00:00Z',
   stats: {
     by_status: { sent: 1000, failed: 25, bounced: 10, queued: 5 },
+    sent: 1000,
+    total: 1040,
     unique_opens: 500,
     unique_clicks: 120,
     unsubscribed: 4,
@@ -78,6 +80,18 @@ describe('CampaignDetailPage', () => {
     expect(labelled('Bounced').find('.sp-stat__value').text()).toBe('10')
   })
 
+  it('shows the total ingest count with its accepted rate, from stats.total/stats.sent', async () => {
+    const { wrapper } = build()
+    await flush()
+
+    const stats = wrapper.findAll('.sp-stat')
+    const labelled = (label: string) =>
+      stats.find((stat) => stat.find('.sp-stat__label').text().startsWith(label))!
+
+    expect(labelled('Total').find('.sp-stat__value').text()).toBe('1,040')
+    expect(labelled('Total').find('.sp-stat__sub').text()).toBe('96.15% accepted')
+  })
+
   it('shows unique engagement metrics with their rate against sent', async () => {
     const { wrapper } = build()
     await flush()
@@ -96,7 +110,10 @@ describe('CampaignDetailPage', () => {
     const { wrapper } = build()
     await flush()
     expect(wrapper.text()).toContain('Opens are over-estimated')
-    expect(wrapper.find('.sp-stat__hint').attributes('title')).toContain('over-estimated')
+
+    const stats = wrapper.findAll('.sp-stat')
+    const opens = stats.find((stat) => stat.find('.sp-stat__label').text().startsWith('Unique opens'))!
+    expect(opens.find('.sp-stat__hint').attributes('title')).toContain('over-estimated')
   })
 
   it('lists link clicks from the published version', async () => {

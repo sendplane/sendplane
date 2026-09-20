@@ -2,11 +2,13 @@
 import {
   DELIVERY_STATUSES,
   ERROR_CLASSES,
+  LANES,
   type Delivery,
   type DeliveryStatus,
   type ErrorClass,
+  type Lane,
 } from '@sendplane/api'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import SpButton from '../components/SpButton.vue'
 import SpErrorNotice from '../components/SpErrorNotice.vue'
@@ -22,36 +24,67 @@ import { useSendplane } from '../context.js'
 import { formatDateTime } from '../lib/format.js'
 
 /**
- * Deliveries are always read per campaign: the spec has no tenant-wide
- * `/deliveries` list, only `/campaigns/{id}/deliveries`, so the campaign id is
- * a required prop rather than a filter.
+ * Deliveries are read tenant-wide through `GET /api/v1/deliveries`
+ * (`client.listDeliveries`). `campaignId` is an optional prop rather than a
+ * required one: the campaign-scoped link from `CampaignDetailPage` passes it
+ * to pre-fill the campaign filter, but the top-level "Deliveries" nav entry
+ * mounts this page with none, listing every delivery of the tenant.
  */
-const props = defineProps<{ campaignId: string }>()
+const props = defineProps<{ campaignId?: string }>()
 
 const { client, t, locale } = useSendplane()
 
+const campaignIdFilter = ref(props.campaignId ?? '')
+const campaignIdApplied = ref(props.campaignId ?? '')
+const lanes = ref<string[]>([])
 const statuses = ref<string[]>([])
 const errorClasses = ref<string[]>([])
 const email = ref('')
 const emailApplied = ref('')
+const since = ref('')
+const sinceApplied = ref('')
+const until = ref('')
+const untilApplied = ref('')
+
+// A campaign navigating in later (or the host swapping the prop) re-seeds the
+// filter, same as a fresh mount would.
+watch(
+  () => props.campaignId,
+  (campaignId) => {
+    campaignIdFilter.value = campaignId ?? ''
+    campaignIdApplied.value = campaignId ?? ''
+  },
+)
 
 const list = useCursorList<Delivery>(
   (params, signal) =>
-    client.get('/api/v1/campaigns/{campaignId}/deliveries', {
-      params: {
-        path: { campaignId: props.campaignId },
-        query: {
-          ...params,
-          ...(statuses.value.length ? { status: statuses.value as DeliveryStatus[] } : {}),
-          ...(errorClasses.value.length ? { error_class: errorClasses.value as ErrorClass[] } : {}),
-          ...(emailApplied.value ? { email: emailApplied.value } : {}),
-        },
+    client.listDeliveries(
+      {
+        ...params,
+        ...(campaignIdApplied.value ? { campaign_id: campaignIdApplied.value } : {}),
+        ...(lanes.value.length ? { lane: lanes.value as Lane[] } : {}),
+        ...(statuses.value.length ? { status: statuses.value as DeliveryStatus[] } : {}),
+        ...(errorClasses.value.length ? { error_class: errorClasses.value as ErrorClass[] } : {}),
+        ...(emailApplied.value ? { email: emailApplied.value } : {}),
+        ...(sinceApplied.value ? { since: toInstant(sinceApplied.value) } : {}),
+        ...(untilApplied.value ? { until: toInstant(untilApplied.value) } : {}),
       },
       signal,
-    }),
-  { watch: [statuses, errorClasses, emailApplied, () => props.campaignId] },
+    ),
+  {
+    watch: [
+      campaignIdApplied,
+      lanes,
+      statuses,
+      errorClasses,
+      emailApplied,
+      sinceApplied,
+      untilApplied,
+    ],
+  },
 )
 
+const laneOptions = computed(() => LANES.map((lane) => ({ value: lane, label: lane })))
 const statusOptions = computed(() =>
   DELIVERY_STATUSES.map((status) => ({ value: status, label: t(`status.delivery.${status}`) })),
 )
@@ -61,6 +94,7 @@ const errorClassOptions = computed(() =>
 
 const columns = computed<TableColumn[]>(() => [
   { key: 'email', label: t('common.email'), width: 'minmax(200px, 2fr)', mono: true },
+  { key: 'lane', label: t('delivery.lane'), width: '110px' },
   { key: 'status', label: t('common.status'), width: '120px' },
   { key: 'error_class', label: t('delivery.errorClass'), width: '120px' },
   { key: 'attempt_count', label: t('delivery.attempts'), width: '90px', align: 'end' },
@@ -73,28 +107,51 @@ const columns = computed<TableColumn[]>(() => [
   { key: 'updated', label: t('common.updated'), width: '180px', secondary: true },
 ])
 
-// The filter is an exact match on the normalized address, so it applies on
-// submit rather than on every keystroke.
-function applyEmail() {
+// The email, campaign, since and until filters are exact matches, so they
+// apply on submit rather than on every keystroke.
+function applyFilters() {
+  campaignIdApplied.value = campaignIdFilter.value.trim()
   emailApplied.value = email.value.trim()
+  sinceApplied.value = since.value.trim()
+  untilApplied.value = until.value.trim()
 }
 
 function clearFilters() {
+  campaignIdFilter.value = ''
+  campaignIdApplied.value = ''
+  lanes.value = []
   statuses.value = []
   errorClasses.value = []
   email.value = ''
   emailApplied.value = ''
+  since.value = ''
+  sinceApplied.value = ''
+  until.value = ''
+  untilApplied.value = ''
+}
+
+/** `datetime-local` has no timezone; the API wants an instant. */
+function toInstant(localValue: string): string {
+  const date = new Date(localValue)
+  return Number.isNaN(date.getTime()) ? localValue : date.toISOString()
 }
 
 const filtered = computed(
-  () => statuses.value.length > 0 || errorClasses.value.length > 0 || emailApplied.value !== '',
+  () =>
+    campaignIdApplied.value !== '' ||
+    lanes.value.length > 0 ||
+    statuses.value.length > 0 ||
+    errorClasses.value.length > 0 ||
+    emailApplied.value !== '' ||
+    sinceApplied.value !== '' ||
+    untilApplied.value !== '',
 )
 </script>
 
 <template>
   <div class="sp-page">
     <SpPageHeader :title="t('delivery.title')">
-      <template #breadcrumb>
+      <template v-if="campaignId" #breadcrumb>
         <SpLink :to="{ name: 'campaign', params: { campaignId } }"
           >← {{ t('campaign.one') }}</SpLink
         >
@@ -108,6 +165,7 @@ const filtered = computed(
     </SpPageHeader>
 
     <div class="sp-toolbar">
+      <SpMultiFilter v-model="lanes" :legend="t('delivery.filterLane')" :options="laneOptions" />
       <SpMultiFilter
         v-model="statuses"
         :legend="t('delivery.filterStatus')"
@@ -118,13 +176,23 @@ const filtered = computed(
         :legend="t('delivery.filterErrorClass')"
         :options="errorClassOptions"
       />
-      <form @submit.prevent="applyEmail">
-        <SpField v-slot="{ id }" :label="t('delivery.searchEmail')">
-          <SpInput :id="id" v-model="email" type="email" placeholder="a@x.com" />
-        </SpField>
-      </form>
-      <SpButton @click="applyEmail">{{ t('common.search') }}</SpButton>
     </div>
+
+    <form class="sp-toolbar sp-page__block" @submit.prevent="applyFilters">
+      <SpField v-slot="{ id }" :label="t('delivery.filterCampaign')">
+        <SpInput :id="id" v-model="campaignIdFilter" placeholder="c1" />
+      </SpField>
+      <SpField v-slot="{ id }" :label="t('delivery.searchEmail')">
+        <SpInput :id="id" v-model="email" type="email" placeholder="a@x.com" />
+      </SpField>
+      <SpField v-slot="{ id }" :label="t('delivery.filterSince')">
+        <SpInput :id="id" v-model="since" type="datetime-local" />
+      </SpField>
+      <SpField v-slot="{ id }" :label="t('delivery.filterUntil')">
+        <SpInput :id="id" v-model="until" type="datetime-local" />
+      </SpField>
+      <SpButton type="submit">{{ t('common.search') }}</SpButton>
+    </form>
 
     <SpErrorNotice
       :error="list.error.value"
@@ -150,6 +218,7 @@ const filtered = computed(
           {{ (row as Delivery).email }}
         </SpLink>
       </template>
+      <template #[`cell-lane`]="{ row }">{{ (row as Delivery).lane }}</template>
       <template #[`cell-status`]="{ row }">
         <SpStatusBadge kind="delivery" :value="(row as Delivery).status" />
       </template>

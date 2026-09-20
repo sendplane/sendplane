@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ContentMode, PreviewRecipient, Template, Vars } from '@sendplane/api'
+import type { ContentMode, I18nBundle, PreviewRecipient, Template, Vars } from '@sendplane/api'
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
 import SpButton from '../components/SpButton.vue'
@@ -90,10 +90,16 @@ const i18nKeys = useAsync(
 const i18nBundle = useAsync(
   (signal) =>
     props.templateId
-      ? client.get('/api/v1/templates/{templateId}/i18n', {
-          params: { path: { templateId: props.templateId }, query: { format: 'json' as const } },
-          signal,
-        })
+      ? client
+          .get('/api/v1/templates/{templateId}/i18n', {
+            params: { path: { templateId: props.templateId }, query: { format: 'json' as const } },
+            signal,
+          })
+          // The endpoint's 200 has two content types (`application/json` and
+          // `application/x-yaml`, the latter used by `getI18nYaml`), so the
+          // generated type is a union; `format: 'json'` guarantees the JSON
+          // shape at runtime.
+          .then((data) => data as I18nBundle)
       : Promise.resolve(undefined),
   { watch: () => props.templateId },
 )

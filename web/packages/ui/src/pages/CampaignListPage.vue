@@ -107,7 +107,11 @@ async function create() {
   }
 }
 
-const countOf = (campaign: Campaign, status: string) => campaign.stats?.by_status?.[status] ?? 0
+// `sent` reads the spec's top-level aggregate (MTA-accepted), not
+// `by_status.sent`: they differ once a delivery bounces or complains and
+// leaves the `sent` status without shrinking the accepted count.
+const sentOf = (campaign: Campaign) => campaign.stats?.sent ?? 0
+const failedOf = (campaign: Campaign) => campaign.stats?.by_status?.failed ?? 0
 </script>
 
 <template>
@@ -191,10 +195,10 @@ const countOf = (campaign: Campaign, status: string) => campaign.stats?.by_statu
         <SpStatusBadge kind="campaign" :value="(row as Campaign).status" />
       </template>
       <template #[`cell-sent`]="{ row }">
-        {{ formatNumber(countOf(row as Campaign, 'sent'), locale) }}
+        {{ formatNumber(sentOf(row as Campaign), locale) }}
       </template>
       <template #[`cell-failed`]="{ row }">
-        {{ formatNumber(countOf(row as Campaign, 'failed'), locale) }}
+        {{ formatNumber(failedOf(row as Campaign), locale) }}
       </template>
       <template #[`cell-schedule`]="{ row }">
         {{ formatDateTime((row as Campaign).schedule_at ?? (row as Campaign).started_at, locale) }}

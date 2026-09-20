@@ -46,7 +46,11 @@ const links = useAsync(
 
 const stats = computed(() => campaign.data.value?.stats)
 const byStatus = computed(() => stats.value?.by_status ?? {})
-const sent = computed(() => byStatus.value.sent ?? 0)
+// `stats.sent` (MTA-accepted) is the spec's fixed denominator for engagement
+// rates; it is not the same number as `by_status.sent` (deliveries currently
+// in status `sent`), since a bounce or complaint moves a delivery out of that
+// status without shrinking the rate's denominator.
+const sent = computed(() => stats.value?.sent ?? 0)
 
 const statusCounts = computed(() =>
   DELIVERY_STATUSES.map((status) => ({ status, count: byStatus.value[status] ?? 0 })).filter(
@@ -198,6 +202,12 @@ async function retryFailed() {
       class="sp-page__block"
     >
       <div class="sp-stats-grid sp-page__block">
+        <SpStat
+          :label="t('common.total')"
+          :value="formatNumber(stats?.total, locale)"
+          :sub="t('campaign.rateOfTotal', { rate: formatRate(sent, stats?.total, locale) })"
+          :hint="t('campaign.totalHint')"
+        />
         <SpStat
           v-for="entry in statusCounts"
           :key="entry.status"

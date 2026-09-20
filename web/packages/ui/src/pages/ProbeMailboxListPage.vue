@@ -95,8 +95,6 @@ function body() {
     port: Number(draft.value.port),
     tls: draft.value.tls,
     enabled: draft.value.enabled,
-    // `inbox_folder` and `enabled` carry `default:` in the spec, which makes
-    // openapi-typescript emit them as required on the input type.
     inbox_folder: draft.value.inbox_folder || 'INBOX',
     ...(draft.value.username ? { username: draft.value.username } : {}),
     ...(draft.value.password ? { password: draft.value.password } : {}),

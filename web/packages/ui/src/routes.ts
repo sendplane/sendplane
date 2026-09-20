@@ -42,6 +42,13 @@ export const routes: readonly SendplaneRoute[] = [
     params: ['campaignId'],
   },
   {
+    name: 'deliveries',
+    path: '/deliveries',
+    page: () => import('./pages/DeliveryListPage.vue'),
+    params: [],
+    navKey: 'nav.deliveries',
+  },
+  {
     name: 'delivery',
     path: '/deliveries/:deliveryId',
     page: () => import('./pages/DeliveryDetailPage.vue'),
