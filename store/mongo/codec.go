@@ -15,29 +15,34 @@ import (
 )
 
 // --- times -------------------------------------------------------------
+//
+// Times are BSON dates, which is what makes them comparable, indexable and
+// readable from the shell. A BSON date holds milliseconds, which is exactly
+// the contract's resolution (store/doc.go), so every instant is truncated on
+// the way in and nothing is silently rounded.
 
-// encTime stores a time.Time as nanoseconds since the Unix epoch, or null for
-// the zero time (the contract's NULL). BSON dates are milliseconds, which
-// would round timestamps the caller handed in, so they are not used.
-func encTime(t time.Time) *int64 {
+// encTime encodes a nullable timestamp: the zero time (the contract's NULL)
+// becomes BSON null, everything else a BSON date truncated to milliseconds.
+func encTime(t time.Time) *time.Time {
 	if t.IsZero() {
 		return nil
 	}
-	n := t.UTC().UnixNano()
-	return &n
+	u := store.TruncateTime(t)
+	return &u
 }
 
 // decTime is the inverse of encTime.
-func decTime(n *int64) time.Time {
-	if n == nil {
+func decTime(t *time.Time) time.Time {
+	if t == nil {
 		return time.Time{}
 	}
-	return time.Unix(0, *n).UTC()
+	return t.UTC()
 }
 
-// ns is encTime for fields that are never NULL (created_at, updated_at) and
-// for the right-hand side of range filters.
-func ns(t time.Time) int64 { return t.UTC().UnixNano() }
+// ts is encTime for fields that are never NULL (created_at, updated_at) and
+// for the right-hand side of range filters, where the bound has to be
+// truncated the same way the stored value was.
+func ts(t time.Time) time.Time { return store.TruncateTime(t) }
 
 // --- enums -------------------------------------------------------------
 
@@ -173,13 +178,16 @@ func countDuplicates(err error) (dups int, rest error) {
 // Listings are keyset-paginated on (created_at, _id): a row inserted after a
 // page was read sorts after the cursor and is never repeated or skipped.
 type cursor struct {
-	createdAt int64
+	createdAt time.Time
 	id        string
 }
 
+// encodeCursor renders a cursor as Unix milliseconds plus the _id. The unit is
+// the stored resolution, so decoding it back gives exactly the created_at of
+// the row the cursor came from.
 func encodeCursor(c cursor) string {
 	return base64.RawURLEncoding.EncodeToString(
-		[]byte(strconv.FormatInt(c.createdAt, 10) + "|" + c.id))
+		[]byte(strconv.FormatInt(c.createdAt.UnixMilli(), 10) + "|" + c.id))
 }
 
 func decodeCursor(s string) (cursor, error) {
@@ -195,7 +203,7 @@ func decodeCursor(s string) (cursor, error) {
 	if err != nil {
 		return cursor{}, fmt.Errorf("%w: cursor %q", store.ErrInvalid, s)
 	}
-	return cursor{createdAt: n, id: id}, nil
+	return cursor{createdAt: time.UnixMilli(n).UTC(), id: id}, nil
 }
 
 // afterCursor is the keyset predicate for everything that sorts after c.

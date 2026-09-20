@@ -35,38 +35,21 @@ func (a *args) add(x any) string {
 // A zero time.Time is SQL NULL (store/doc.go), and Go has no nullable string,
 // so the optional string columns are NOT NULL DEFAULT ''.
 
-// tsIn maps a Go time to a nullable timestamptz parameter. It truncates to
-// microseconds, which is what PostgreSQL would do anyway, so that a value used
-// as a comparison bound matches a stored one exactly.
+// tsIn maps a Go time to a nullable timestamptz parameter, truncated to the
+// contract's millisecond resolution (store.TruncateTime). Every instant that
+// reaches the database goes through it, including the ones used only as a
+// comparison bound, so a stored value and a bound derived from the same
+// time.Time compare exactly.
 func tsIn(t time.Time) *time.Time {
 	if t.IsZero() {
 		return nil
 	}
-	u := t.UTC().Truncate(time.Microsecond)
+	u := store.TruncateTime(t)
 	return &u
 }
 
 // tsInNN is tsIn for a NOT NULL column.
-func tsInNN(t time.Time) time.Time { return t.UTC().Truncate(time.Microsecond) }
-
-// subMicro is the sub-microsecond remainder of t, in nanoseconds. timestamptz
-// resolves to microseconds; delivery keeps this remainder in a companion
-// column so that the instants a caller supplies come back unchanged.
-func subMicro(t time.Time) int16 {
-	if t.IsZero() {
-		return 0
-	}
-	return int16(t.UTC().Nanosecond() % 1000)
-}
-
-// tsOutNS reapplies a sub-microsecond remainder to a scanned timestamp.
-func tsOutNS(p *time.Time, ns int16) time.Time {
-	t := tsOut(p)
-	if t.IsZero() || ns == 0 {
-		return t
-	}
-	return t.Add(time.Duration(ns))
-}
+func tsInNN(t time.Time) time.Time { return store.TruncateTime(t) }
 
 // tsOut maps a scanned nullable timestamptz back to a Go time.
 func tsOut(p *time.Time) time.Time {

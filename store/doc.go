@@ -44,8 +44,14 @@
 //
 // # Times and nullability
 //
-// All times are UTC. A zero time.Time means SQL NULL; the conditional
-// updates (SetFirstOpened, SetFirstClicked, SetUnsubscribed) act on that.
-// Free-form recipient data is map[string]any, opaque payloads are
-// json.RawMessage. IDs are UUIDv7 strings (NewID).
+// Every implementation stores times at millisecond resolution and returns
+// them in UTC; callers must not depend on finer precision. Implementations
+// truncate on write (TruncateTime), so an instant handed to a repository
+// comes back truncated, and a caller comparing the two compares through
+// TruncateTime.
+//
+// A zero time.Time means SQL NULL; the conditional updates (SetFirstOpened,
+// SetFirstClicked, SetUnsubscribed) act on that, and TruncateTime keeps the
+// zero time zero. Free-form recipient data is map[string]any, opaque payloads
+// are json.RawMessage. IDs are UUIDv7 strings (NewID).
 package store

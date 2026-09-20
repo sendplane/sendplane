@@ -130,7 +130,9 @@ type RetryFilter struct {
 	// CampaignID is empty to target deliveries without a campaign.
 	CampaignID string
 	// DeliveryIDs restricts the filter to specific deliveries (single-delivery
-	// retry). Nil means "every match".
+	// retry). Nil means "every match"; an empty but non-nil slice matches
+	// nothing, so a caller that filtered its own list down to zero requeues
+	// nothing instead of the whole campaign.
 	DeliveryIDs  []string
 	Statuses     []DeliveryStatus
 	ErrorClasses []ErrorClass
@@ -154,6 +156,10 @@ type DeliveryRepo interface {
 	// actually inserted. Deliveries without a campaign are always inserted.
 	// EmailNorm must already be normalized (see NormalizeEmail); an empty one
 	// is ErrInvalid.
+	//
+	// The whole batch is validated before anything is written: one bad row
+	// makes the call return (0, ErrInvalid) with no row inserted, so a
+	// rejected chunk can be fixed and re-sent as a whole.
 	InsertBatch(ctx context.Context, ds []Delivery) (inserted int, err error)
 
 	Get(ctx context.Context, id string) (*Delivery, error)
@@ -184,7 +190,9 @@ type DeliveryRepo interface {
 	CountByStatus(ctx context.Context, campaignID string) (map[DeliveryStatus]int64, error)
 
 	// BulkTransition moves up to limit deliveries between statuses, so cancel
-	// can walk a million rows in chunks.
+	// can walk a million rows in chunks. An empty from matches any status;
+	// rows already in the target status are never counted, which is what lets
+	// a caller loop until it returns 0.
 	BulkTransition(ctx context.Context, campaignID string, from []DeliveryStatus, to DeliveryStatus, limit int) (int, error)
 
 	// Requeue is the manual retry: matching deliveries go back to queued with

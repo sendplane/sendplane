@@ -9,7 +9,7 @@ import (
 
 // This file holds the BSON documents and their codecs. Keeping them explicit
 // (instead of tagging the store models) keeps the on-disk names, the enum
-// encoding and the nanosecond timestamps out of the contract package.
+// encoding and the timestamp truncation out of the contract package.
 
 // --- shared pieces -----------------------------------------------------
 
@@ -55,7 +55,7 @@ type transportDoc struct {
 	DomainRatePerSecond map[string]float64 `bson:"domain_rate_per_second"`
 	Status              int32              `bson:"status"`
 	StatusReason        string             `bson:"status_reason"`
-	StatusChangedAt     *int64             `bson:"status_changed_at"`
+	StatusChangedAt     *time.Time         `bson:"status_changed_at"`
 }
 
 func transportMeta() meta[store.Transport, transportDoc] {
@@ -69,7 +69,7 @@ func transportMeta() meta[store.Transport, transportDoc] {
 		enc: func(v *store.Transport) *transportDoc {
 			return &transportDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
-					CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, Host: v.Host, Port: int32(v.Port), TLS: string(v.TLS),
 				Username: v.Username, Password: v.Password,
 				MaxConns: int32(v.MaxConns), RatePerSecond: v.RatePerSecond,
@@ -97,15 +97,15 @@ func transportMeta() meta[store.Transport, transportDoc] {
 
 type senderDoc struct {
 	Base            `bson:",inline"`
-	Name            string `bson:"name"`
-	FromName        string `bson:"from_name"`
-	FromEmail       string `bson:"from_email"`
-	ReplyTo         string `bson:"reply_to"`
-	TransportID     string `bson:"transport_id"`
-	DomainID        string `bson:"domain_id"`
-	Health          int32  `bson:"health"`
-	HealthReason    string `bson:"health_reason"`
-	HealthCheckedAt *int64 `bson:"health_checked_at"`
+	Name            string     `bson:"name"`
+	FromName        string     `bson:"from_name"`
+	FromEmail       string     `bson:"from_email"`
+	ReplyTo         string     `bson:"reply_to"`
+	TransportID     string     `bson:"transport_id"`
+	DomainID        string     `bson:"domain_id"`
+	Health          int32      `bson:"health"`
+	HealthReason    string     `bson:"health_reason"`
+	HealthCheckedAt *time.Time `bson:"health_checked_at"`
 }
 
 func senderMeta() meta[store.Sender, senderDoc] {
@@ -119,7 +119,7 @@ func senderMeta() meta[store.Sender, senderDoc] {
 		enc: func(v *store.Sender) *senderDoc {
 			return &senderDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
-					CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, FromName: v.FromName, FromEmail: v.FromEmail,
 				ReplyTo: v.ReplyTo, TransportID: v.TransportID, DomainID: v.DomainID,
 				Health: int32(v.Health), HealthReason: v.HealthReason,
@@ -143,15 +143,15 @@ func senderMeta() meta[store.Sender, senderDoc] {
 
 type domainDoc struct {
 	Base             `bson:",inline"`
-	Domain           string   `bson:"domain"`
-	DKIMSelector     string   `bson:"dkim_selector"`
-	DKIMPrivateKey   []byte   `bson:"dkim_private_key"`
-	ReturnPathDomain string   `bson:"return_path_domain"`
-	ExpectedSPF      string   `bson:"expected_spf"`
-	OutboundIPs      []string `bson:"outbound_ips"`
-	Health           int32    `bson:"health"`
-	HealthReason     string   `bson:"health_reason"`
-	HealthCheckedAt  *int64   `bson:"health_checked_at"`
+	Domain           string     `bson:"domain"`
+	DKIMSelector     string     `bson:"dkim_selector"`
+	DKIMPrivateKey   []byte     `bson:"dkim_private_key"`
+	ReturnPathDomain string     `bson:"return_path_domain"`
+	ExpectedSPF      string     `bson:"expected_spf"`
+	OutboundIPs      []string   `bson:"outbound_ips"`
+	Health           int32      `bson:"health"`
+	HealthReason     string     `bson:"health_reason"`
+	HealthCheckedAt  *time.Time `bson:"health_checked_at"`
 }
 
 func domainMeta() meta[store.SendingDomain, domainDoc] {
@@ -165,7 +165,7 @@ func domainMeta() meta[store.SendingDomain, domainDoc] {
 		enc: func(v *store.SendingDomain) *domainDoc {
 			return &domainDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
-					CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Domain: v.Domain, DKIMSelector: v.DKIMSelector, DKIMPrivateKey: v.DKIMPrivateKey,
 				ReturnPathDomain: v.ReturnPathDomain, ExpectedSPF: v.ExpectedSPF,
 				OutboundIPs: v.OutboundIPs,
@@ -215,7 +215,7 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 		enc: func(v *store.ProbeMailbox) *probeMailboxDoc {
 			return &probeMailboxDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
-					CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, Address: v.Address, Host: v.Host, Port: int32(v.Port),
 				TLS: string(v.TLS), Username: v.Username, Password: v.Password,
 				InboxFolder: v.InboxFolder, SpamFolder: v.SpamFolder,
@@ -256,7 +256,7 @@ func layoutMeta() meta[store.Layout, layoutDoc] {
 		enc: func(v *store.Layout) *layoutDoc {
 			return &layoutDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
-					CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, Mode: string(v.Mode), Body: v.Body, I18n: encI18n(v.I18n),
 			}
 		},
@@ -298,7 +298,7 @@ func templateMeta() meta[store.Template, templateDoc] {
 		enc: func(v *store.Template) *templateDoc {
 			return &templateDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
-					CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, LayoutID: v.LayoutID, Subject: v.Subject,
 				Preheader: v.Preheader, Mode: string(v.Mode), Body: v.Body,
 				Blocks: encRaw(v.Blocks), Text: v.Text, I18n: encI18n(v.I18n),
@@ -340,7 +340,7 @@ func versionMeta() meta[store.MessageVersion, versionDoc] {
 		created: func(v *store.MessageVersion) *time.Time { return &v.CreatedAt },
 		enc: func(v *store.MessageVersion) *versionDoc {
 			return &versionDoc{
-				Base:       Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ns(v.CreatedAt)},
+				Base:       Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ts(v.CreatedAt)},
 				TemplateID: v.TemplateID, LayoutID: v.LayoutID,
 				SubjectTpl: v.SubjectTpl, HTMLTpl: v.HTMLTpl, TextTpl: v.TextTpl,
 				I18n: encI18n(v.I18n), DefaultLocale: v.DefaultLocale,
@@ -362,28 +362,28 @@ func versionMeta() meta[store.MessageVersion, versionDoc] {
 
 type probeRunDoc struct {
 	Base         `bson:",inline"`
-	SenderID     string `bson:"sender_id"`
-	MailboxID    string `bson:"mailbox_id"`
-	DeliveryID   string `bson:"delivery_id"`
-	Status       int32  `bson:"status"`
-	Reason       string `bson:"reason"`
-	Delivered    bool   `bson:"delivered"`
-	Folder       string `bson:"folder"`
-	Latency      int64  `bson:"latency_ns"`
-	SPF          string `bson:"spf"`
-	DKIM         string `bson:"dkim"`
-	DMARC        string `bson:"dmarc"`
-	DKIMDomain   string `bson:"dkim_domain"`
-	DKIMSelector string `bson:"dkim_selector"`
-	DMARCPolicy  string `bson:"dmarc_policy"`
-	TLS          bool   `bson:"tls"`
-	ObservedIP   string `bson:"observed_ip"`
-	PTR          string `bson:"ptr"`
-	PTRMatch     bool   `bson:"ptr_match"`
-	DNS          []byte `bson:"dns"`
-	RawHeaders   string `bson:"raw_headers"`
-	StartedAt    *int64 `bson:"started_at"`
-	ReceivedAt   *int64 `bson:"received_at"`
+	SenderID     string     `bson:"sender_id"`
+	MailboxID    string     `bson:"mailbox_id"`
+	DeliveryID   string     `bson:"delivery_id"`
+	Status       int32      `bson:"status"`
+	Reason       string     `bson:"reason"`
+	Delivered    bool       `bson:"delivered"`
+	Folder       string     `bson:"folder"`
+	Latency      int64      `bson:"latency_ns"`
+	SPF          string     `bson:"spf"`
+	DKIM         string     `bson:"dkim"`
+	DMARC        string     `bson:"dmarc"`
+	DKIMDomain   string     `bson:"dkim_domain"`
+	DKIMSelector string     `bson:"dkim_selector"`
+	DMARCPolicy  string     `bson:"dmarc_policy"`
+	TLS          bool       `bson:"tls"`
+	ObservedIP   string     `bson:"observed_ip"`
+	PTR          string     `bson:"ptr"`
+	PTRMatch     bool       `bson:"ptr_match"`
+	DNS          []byte     `bson:"dns"`
+	RawHeaders   string     `bson:"raw_headers"`
+	StartedAt    *time.Time `bson:"started_at"`
+	ReceivedAt   *time.Time `bson:"received_at"`
 }
 
 func probeRunMeta() meta[store.ProbeRun, probeRunDoc] {
@@ -394,7 +394,7 @@ func probeRunMeta() meta[store.ProbeRun, probeRunDoc] {
 		created: func(v *store.ProbeRun) *time.Time { return &v.CreatedAt },
 		enc: func(v *store.ProbeRun) *probeRunDoc {
 			return &probeRunDoc{
-				Base:     Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ns(v.CreatedAt)},
+				Base:     Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ts(v.CreatedAt)},
 				SenderID: v.SenderID, MailboxID: v.MailboxID, DeliveryID: v.DeliveryID,
 				Status: int32(v.Status), Reason: v.Reason, Delivered: v.Delivered,
 				Folder: v.Folder, Latency: int64(v.Latency),
@@ -430,7 +430,7 @@ type statsDoc struct {
 	UniqueClicks       int64            `bson:"unique_clicks"`
 	Unsubscribed       int64            `bson:"unsubscribed"`
 	UnsubscribeClicked int64            `bson:"unsubscribe_clicked"`
-	ComputedAt         *int64           `bson:"computed_at"`
+	ComputedAt         *time.Time       `bson:"computed_at"`
 }
 
 func encStats(s store.CampaignStats) statsDoc {
@@ -457,9 +457,9 @@ type campaignDoc struct {
 	DefaultLocale string         `bson:"default_locale"`
 	Vars          map[string]any `bson:"vars"`
 	Status        int32          `bson:"status"`
-	ScheduleAt    *int64         `bson:"schedule_at"`
-	StartedAt     *int64         `bson:"started_at"`
-	CompletedAt   *int64         `bson:"completed_at"`
+	ScheduleAt    *time.Time     `bson:"schedule_at"`
+	StartedAt     *time.Time     `bson:"started_at"`
+	CompletedAt   *time.Time     `bson:"completed_at"`
 	Stats         statsDoc       `bson:"stats"`
 }
 
@@ -474,7 +474,7 @@ func campaignMeta() meta[store.Campaign, campaignDoc] {
 		enc: func(v *store.Campaign) *campaignDoc {
 			return &campaignDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
-					CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, VersionID: v.VersionID, SenderID: v.SenderID,
 				DefaultLocale: v.DefaultLocale, Vars: v.Vars, Status: int32(v.Status),
 				ScheduleAt: encTime(v.ScheduleAt), StartedAt: encTime(v.StartedAt),
@@ -499,17 +499,17 @@ func campaignMeta() meta[store.Campaign, campaignDoc] {
 
 type bounceDoc struct {
 	Base           `bson:",inline"`
-	DeliveryID     string `bson:"delivery_id"`
-	Type           int32  `bson:"type"`
-	Source         string `bson:"source"`
-	Verified       bool   `bson:"verified"`
-	Recipient      string `bson:"recipient"`
-	EmailNorm      string `bson:"email_norm"`
-	SMTPStatus     string `bson:"smtp_status"`
-	DiagnosticCode string `bson:"diagnostic_code"`
-	MessageID      string `bson:"message_id"`
-	Raw            []byte `bson:"raw"`
-	ReceivedAt     *int64 `bson:"received_at"`
+	DeliveryID     string     `bson:"delivery_id"`
+	Type           int32      `bson:"type"`
+	Source         string     `bson:"source"`
+	Verified       bool       `bson:"verified"`
+	Recipient      string     `bson:"recipient"`
+	EmailNorm      string     `bson:"email_norm"`
+	SMTPStatus     string     `bson:"smtp_status"`
+	DiagnosticCode string     `bson:"diagnostic_code"`
+	MessageID      string     `bson:"message_id"`
+	Raw            []byte     `bson:"raw"`
+	ReceivedAt     *time.Time `bson:"received_at"`
 }
 
 func bounceMeta() meta[store.BounceEvent, bounceDoc] {
@@ -520,7 +520,7 @@ func bounceMeta() meta[store.BounceEvent, bounceDoc] {
 		created: func(v *store.BounceEvent) *time.Time { return &v.CreatedAt },
 		enc: func(v *store.BounceEvent) *bounceDoc {
 			return &bounceDoc{
-				Base:       Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ns(v.CreatedAt)},
+				Base:       Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ts(v.CreatedAt)},
 				DeliveryID: v.DeliveryID, Type: int32(v.Type), Source: string(v.Source),
 				Verified: v.Verified, Recipient: v.Recipient, EmailNorm: v.EmailNorm,
 				SMTPStatus: v.SMTPStatus, DiagnosticCode: v.DiagnosticCode,
@@ -543,9 +543,9 @@ func bounceMeta() meta[store.BounceEvent, bounceDoc] {
 // --- tenant settings ---------------------------------------------------
 
 type signingKeyDoc struct {
-	KID       string `bson:"kid"`
-	Secret    []byte `bson:"secret"`
-	CreatedAt *int64 `bson:"created_at"`
+	KID       string     `bson:"kid"`
+	Secret    []byte     `bson:"secret"`
+	CreatedAt *time.Time `bson:"created_at"`
 }
 
 type trackingConfigDoc struct {
@@ -578,7 +578,7 @@ func encSettings(v *store.TenantSettings) *settingsDoc {
 	}
 	return &settingsDoc{
 		Base: Base{ID: v.TenantID, TenantID: v.TenantID, Version: v.Version,
-			CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+			CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 		BackoffNS: backoff, MaxAttempts: int32(v.Retry.MaxAttempts),
 		RetentionDays: int32(v.RetentionDays), SuppressionEnabled: v.SuppressionEnabled,
 		UnsubscribeMode:        string(v.UnsubscribeMode),
@@ -641,10 +641,10 @@ func decChunk(d *chunkDoc) *store.RecipientChunk {
 
 type suppressionDoc struct {
 	Base             `bson:",inline"`
-	EmailNorm        string `bson:"email_norm"`
-	Reason           string `bson:"reason"`
-	SourceDeliveryID string `bson:"source_delivery_id"`
-	ExpiresAt        *int64 `bson:"expires_at"`
+	EmailNorm        string     `bson:"email_norm"`
+	Reason           string     `bson:"reason"`
+	SourceDeliveryID string     `bson:"source_delivery_id"`
+	ExpiresAt        *time.Time `bson:"expires_at"`
 }
 
 func decSuppression(d *suppressionDoc) *store.Suppression {
@@ -674,16 +674,16 @@ type trackingDoc struct {
 
 type outboxDoc struct {
 	Base          `bson:",inline"`
-	Type          string `bson:"type"`
-	Payload       []byte `bson:"payload"`
-	Status        string `bson:"status"`
-	Attempts      int32  `bson:"attempts"`
-	NextAttemptAt *int64 `bson:"next_attempt_at"`
-	LeaseOwner    string `bson:"lease_owner"`
-	LeaseUntil    *int64 `bson:"lease_until"`
-	ClaimToken    string `bson:"claim_token"`
-	LastError     string `bson:"last_error"`
-	DeliveredAt   *int64 `bson:"delivered_at"`
+	Type          string     `bson:"type"`
+	Payload       []byte     `bson:"payload"`
+	Status        string     `bson:"status"`
+	Attempts      int32      `bson:"attempts"`
+	NextAttemptAt *time.Time `bson:"next_attempt_at"`
+	LeaseOwner    string     `bson:"lease_owner"`
+	LeaseUntil    *time.Time `bson:"lease_until"`
+	ClaimToken    string     `bson:"claim_token"`
+	LastError     string     `bson:"last_error"`
+	DeliveredAt   *time.Time `bson:"delivered_at"`
 }
 
 func decOutbox(d *outboxDoc) *store.OutboxEvent {
@@ -700,25 +700,25 @@ func decOutbox(d *outboxDoc) *store.OutboxEvent {
 // --- lock --------------------------------------------------------------
 
 type lockDoc struct {
-	ID         string `bson:"_id"`
-	TenantID   string `bson:"tenant_id"`
-	Name       string `bson:"name"`
-	Owner      string `bson:"owner"`
-	AcquiredAt int64  `bson:"acquired_at"`
-	ExpiresAt  int64  `bson:"expires_at"`
+	ID         string    `bson:"_id"`
+	TenantID   string    `bson:"tenant_id"`
+	Name       string    `bson:"name"`
+	Owner      string    `bson:"owner"`
+	AcquiredAt time.Time `bson:"acquired_at"`
+	ExpiresAt  time.Time `bson:"expires_at"`
 }
 
 // --- worker ------------------------------------------------------------
 
 type workerDoc struct {
-	ID          string  `bson:"_id"`
-	TenantID    string  `bson:"tenant_id"`
-	WorkerID    string  `bson:"worker_id"`
-	Role        string  `bson:"role"`
-	Lanes       []int32 `bson:"lanes"`
-	Concurrency int32   `bson:"concurrency"`
-	StartedAt   int64   `bson:"started_at"`
-	LastSeenAt  int64   `bson:"last_seen_at"`
+	ID          string    `bson:"_id"`
+	TenantID    string    `bson:"tenant_id"`
+	WorkerID    string    `bson:"worker_id"`
+	Role        string    `bson:"role"`
+	Lanes       []int32   `bson:"lanes"`
+	Concurrency int32     `bson:"concurrency"`
+	StartedAt   time.Time `bson:"started_at"`
+	LastSeenAt  time.Time `bson:"last_seen_at"`
 }
 
 func decWorker(d *workerDoc) store.Worker {
@@ -750,25 +750,25 @@ type deliveryDoc struct {
 	UnsubscribeURL string         `bson:"unsubscribe_url"`
 	AttemptCount   int32          `bson:"attempt_count"`
 	RetryGen       int32          `bson:"retry_gen"`
-	NextAttemptAt  *int64         `bson:"next_attempt_at"`
+	NextAttemptAt  *time.Time     `bson:"next_attempt_at"`
 	LeaseOwner     string         `bson:"lease_owner"`
-	LeaseUntil     *int64         `bson:"lease_until"`
+	LeaseUntil     *time.Time     `bson:"lease_until"`
 	ClaimToken     string         `bson:"claim_token"`
 	LastErrorClass int32          `bson:"last_error_class"`
 	LastSMTPCode   int32          `bson:"last_smtp_code"`
 	LastError      string         `bson:"last_error"`
 	MessageID      string         `bson:"message_id"`
-	SentAt         *int64         `bson:"sent_at"`
-	FinishedAt     *int64         `bson:"finished_at"`
-	FirstOpenedAt  *int64         `bson:"first_opened_at"`
-	FirstClickedAt *int64         `bson:"first_clicked_at"`
-	UnsubscribedAt *int64         `bson:"unsubscribed_at"`
+	SentAt         *time.Time     `bson:"sent_at"`
+	FinishedAt     *time.Time     `bson:"finished_at"`
+	FirstOpenedAt  *time.Time     `bson:"first_opened_at"`
+	FirstClickedAt *time.Time     `bson:"first_clicked_at"`
+	UnsubscribedAt *time.Time     `bson:"unsubscribed_at"`
 }
 
 func encDelivery(v *store.Delivery) *deliveryDoc {
 	return &deliveryDoc{
 		Base: Base{ID: v.ID, TenantID: v.TenantID,
-			CreatedAt: ns(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
+			CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 		CampaignID: v.CampaignID, VersionID: v.VersionID, SenderID: v.SenderID,
 		Lane: int32(v.Lane), Priority: int32(v.Priority), Status: int32(v.Status),
 		Email: v.Email, EmailNorm: v.EmailNorm, Name: v.Name, Locale: v.Locale,
@@ -808,21 +808,21 @@ func decDelivery(d *deliveryDoc) *store.Delivery {
 
 type attemptDoc struct {
 	Base         `bson:",inline"`
-	DeliveryID   string `bson:"delivery_id"`
-	AttemptNo    int32  `bson:"attempt_no"`
-	RetryGen     int32  `bson:"retry_gen"`
-	TransportID  string `bson:"transport_id"`
-	StartedAt    *int64 `bson:"started_at"`
-	FinishedAt   *int64 `bson:"finished_at"`
-	SMTPCode     int32  `bson:"smtp_code"`
-	EnhancedCode string `bson:"enhanced_code"`
-	ErrorClass   int32  `bson:"error_class"`
-	Error        string `bson:"error"`
+	DeliveryID   string     `bson:"delivery_id"`
+	AttemptNo    int32      `bson:"attempt_no"`
+	RetryGen     int32      `bson:"retry_gen"`
+	TransportID  string     `bson:"transport_id"`
+	StartedAt    *time.Time `bson:"started_at"`
+	FinishedAt   *time.Time `bson:"finished_at"`
+	SMTPCode     int32      `bson:"smtp_code"`
+	EnhancedCode string     `bson:"enhanced_code"`
+	ErrorClass   int32      `bson:"error_class"`
+	Error        string     `bson:"error"`
 }
 
 func encAttempt(v *store.DeliveryAttempt) *attemptDoc {
 	return &attemptDoc{
-		Base:       Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ns(v.CreatedAt)},
+		Base:       Base{ID: v.ID, TenantID: v.TenantID, CreatedAt: ts(v.CreatedAt)},
 		DeliveryID: v.DeliveryID, AttemptNo: int32(v.AttemptNo), RetryGen: int32(v.RetryGen),
 		TransportID: v.TransportID,
 		StartedAt:   encTime(v.StartedAt), FinishedAt: encTime(v.FinishedAt),

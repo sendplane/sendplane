@@ -68,7 +68,7 @@ func (r *campaignRepo) UpdateStats(ctx context.Context, campaignID string, s sto
 		r.s.scope(bson.E{Key: "_id", Value: campaignID}),
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "stats", Value: encStats(s)},
-			{Key: "updated_at", Value: ns(r.s.p.now())},
+			{Key: "updated_at", Value: ts(r.s.p.now())},
 		}}})
 	if err != nil {
 		return wrap("update campaign stats", err)
@@ -194,9 +194,9 @@ func (r *chunkRepo) Put(ctx context.Context, c *store.RecipientChunk) error {
 				{Key: "accepted", Value: int64(c.Accepted)},
 				{Key: "duplicates", Value: int64(c.Duplicates)},
 				{Key: "invalid", Value: int64(c.Invalid)},
-				{Key: "updated_at", Value: ns(now)},
+				{Key: "updated_at", Value: ts(now)},
 			}},
-			{Key: "$setOnInsert", Value: bson.D{{Key: "created_at", Value: ns(created)}}},
+			{Key: "$setOnInsert", Value: bson.D{{Key: "created_at", Value: ts(created)}}},
 		},
 		options.UpdateOne().SetUpsert(true))
 	if err != nil {
@@ -221,7 +221,7 @@ func (r *suppressionRepo) Upsert(ctx context.Context, v *store.Suppression) erro
 	}
 	id := key(r.s.tenant, v.EmailNorm)
 	doc := &suppressionDoc{
-		Base:      Base{ID: id, TenantID: r.s.tenant, CreatedAt: ns(v.CreatedAt)},
+		Base:      Base{ID: id, TenantID: r.s.tenant, CreatedAt: ts(v.CreatedAt)},
 		EmailNorm: v.EmailNorm, Reason: string(v.Reason),
 		SourceDeliveryID: v.SourceDeliveryID, ExpiresAt: encTime(v.ExpiresAt),
 	}
@@ -241,7 +241,7 @@ func (r *suppressionRepo) IsSuppressed(ctx context.Context, emailNorm string, no
 		return false, nil, wrap("is suppressed", err)
 	}
 	s := decSuppression(&d)
-	if !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now) {
+	if !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(ts(now)) {
 		return false, s, nil
 	}
 	return true, s, nil
@@ -284,7 +284,7 @@ func (r *trackingRepo) InsertEvents(ctx context.Context, evs []store.TrackingEve
 			e.CreatedAt = now
 		}
 		docs = append(docs, &trackingDoc{
-			Base:       Base{ID: e.ID, TenantID: r.s.tenant, CreatedAt: ns(e.CreatedAt)},
+			Base:       Base{ID: e.ID, TenantID: r.s.tenant, CreatedAt: ts(e.CreatedAt)},
 			DeliveryID: e.DeliveryID, CampaignID: e.CampaignID, Kind: int32(e.Kind),
 			URL: e.URL, LinkNo: int32(e.LinkNo), UserAgent: e.UserAgent,
 			IPHash: e.IPHash, SuspectedBot: e.SuspectedBot,
@@ -405,7 +405,7 @@ func (r *outboxRepo) Enqueue(ctx context.Context, evs []store.OutboxEvent) error
 			e.NextAttemptAt = e.CreatedAt
 		}
 		docs = append(docs, &outboxDoc{
-			Base:    Base{ID: e.ID, TenantID: r.s.tenant, CreatedAt: ns(e.CreatedAt)},
+			Base:    Base{ID: e.ID, TenantID: r.s.tenant, CreatedAt: ts(e.CreatedAt)},
 			Type:    e.Type,
 			Payload: encRaw(e.Payload),
 			Status:  string(store.OutboxPending),
@@ -422,11 +422,11 @@ func (r *outboxRepo) Enqueue(ctx context.Context, evs []store.OutboxEvent) error
 func (r *outboxRepo) ClaimPending(ctx context.Context, limit int, lease time.Duration, owner string, now time.Time) ([]store.OutboxEvent, error) {
 	due := r.s.scope(
 		bson.E{Key: "status", Value: string(store.OutboxPending)},
-		bson.E{Key: "next_attempt_at", Value: bson.D{{Key: "$lte", Value: ns(now)}}},
+		bson.E{Key: "next_attempt_at", Value: bson.D{{Key: "$lte", Value: ts(now)}}},
 	)
 	free := bson.D{{Key: "$or", Value: bson.A{
 		bson.D{{Key: "lease_owner", Value: ""}},
-		bson.D{{Key: "lease_until", Value: bson.D{{Key: "$lte", Value: ns(now)}}}},
+		bson.D{{Key: "lease_until", Value: bson.D{{Key: "$lte", Value: ts(now)}}}},
 	}}}
 	filter := and(due, free)
 
@@ -438,7 +438,7 @@ func (r *outboxRepo) ClaimPending(ctx context.Context, limit int, lease time.Dur
 	if _, err := r.coll().UpdateMany(ctx, and(filter, bson.D{inIDs(ids)}),
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "lease_owner", Value: owner},
-			{Key: "lease_until", Value: ns(now.Add(lease))},
+			{Key: "lease_until", Value: ts(now.Add(lease))},
 			{Key: "claim_token", Value: token},
 		}}}); err != nil {
 		return nil, wrap("claim outbox", err)
@@ -464,7 +464,7 @@ func (r *outboxRepo) MarkDelivered(ctx context.Context, id string, at time.Time)
 	res, err := r.coll().UpdateOne(ctx, r.s.scope(bson.E{Key: "_id", Value: id}),
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "status", Value: string(store.OutboxDelivered)},
-			{Key: "delivered_at", Value: ns(at)},
+			{Key: "delivered_at", Value: ts(at)},
 			{Key: "lease_owner", Value: ""},
 			{Key: "lease_until", Value: nil},
 			{Key: "claim_token", Value: ""},
@@ -490,7 +490,7 @@ func (r *outboxRepo) MarkFailed(ctx context.Context, id string, nextAttempt time
 	} else {
 		set = append(set,
 			bson.E{Key: "status", Value: string(store.OutboxPending)},
-			bson.E{Key: "next_attempt_at", Value: ns(nextAttempt)})
+			bson.E{Key: "next_attempt_at", Value: ts(nextAttempt)})
 	}
 	res, err := r.coll().UpdateOne(ctx, r.s.scope(bson.E{Key: "_id", Value: id}),
 		bson.D{
@@ -530,7 +530,7 @@ func (r *lockRepo) Acquire(ctx context.Context, name, owner string, ttl time.Dur
 		{Key: "_id", Value: id},
 		{Key: "$or", Value: bson.A{
 			bson.D{{Key: "owner", Value: owner}},
-			bson.D{{Key: "expires_at", Value: bson.D{{Key: "$lte", Value: ns(now)}}}},
+			bson.D{{Key: "expires_at", Value: bson.D{{Key: "$lte", Value: ts(now)}}}},
 		}},
 	}
 	update := mongo.Pipeline{{{Key: "$set", Value: bson.D{
@@ -540,10 +540,10 @@ func (r *lockRepo) Acquire(ctx context.Context, name, owner string, ttl time.Dur
 		// Keep the original acquisition time while the same owner renews.
 		{Key: "acquired_at", Value: bson.D{{Key: "$cond", Value: bson.D{
 			{Key: "if", Value: bson.D{{Key: "$eq", Value: bson.A{"$owner", lit(owner)}}}},
-			{Key: "then", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$acquired_at", ns(now)}}}},
-			{Key: "else", Value: ns(now)},
+			{Key: "then", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$acquired_at", ts(now)}}}},
+			{Key: "else", Value: ts(now)},
 		}}}},
-		{Key: "expires_at", Value: ns(now.Add(ttl))},
+		{Key: "expires_at", Value: ts(now.Add(ttl))},
 	}}}}
 	_, err := r.coll().UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
 	if err != nil {
@@ -559,8 +559,8 @@ func (r *lockRepo) Renew(ctx context.Context, name, owner string, ttl time.Durat
 	res, err := r.coll().UpdateOne(ctx, bson.D{
 		{Key: "_id", Value: key(r.s.tenant, name)},
 		{Key: "owner", Value: owner},
-		{Key: "expires_at", Value: bson.D{{Key: "$gt", Value: ns(now)}}},
-	}, bson.D{{Key: "$set", Value: bson.D{{Key: "expires_at", Value: ns(now.Add(ttl))}}}})
+		{Key: "expires_at", Value: bson.D{{Key: "$gt", Value: ts(now)}}},
+	}, bson.D{{Key: "$set", Value: bson.D{{Key: "expires_at", Value: ts(now.Add(ttl))}}}})
 	if err != nil {
 		return false, wrap("renew lock", err)
 	}
@@ -610,15 +610,15 @@ func (r *workerRepo) Heartbeat(ctx context.Context, w store.Worker) error {
 		{Key: "role", Value: w.Role},
 		{Key: "lanes", Value: laneInts(w.Lanes)},
 		{Key: "concurrency", Value: int32(w.Concurrency)},
-		{Key: "last_seen_at", Value: ns(lastSeen)},
+		{Key: "last_seen_at", Value: ts(lastSeen)},
 	}
 	update := bson.D{{Key: "$set", Value: set}}
 	if w.StartedAt.IsZero() {
 		// An existing row keeps the start it already has.
 		update = append(update, bson.E{Key: "$setOnInsert",
-			Value: bson.D{{Key: "started_at", Value: ns(lastSeen)}}})
+			Value: bson.D{{Key: "started_at", Value: ts(lastSeen)}}})
 	} else {
-		set = append(set, bson.E{Key: "started_at", Value: ns(w.StartedAt)})
+		set = append(set, bson.E{Key: "started_at", Value: ts(w.StartedAt)})
 		update = bson.D{{Key: "$set", Value: set}}
 	}
 	_, err := r.coll().UpdateOne(ctx,
@@ -629,7 +629,7 @@ func (r *workerRepo) Heartbeat(ctx context.Context, w store.Worker) error {
 
 func (r *workerRepo) ListActive(ctx context.Context, since time.Time) ([]store.Worker, error) {
 	cur, err := r.coll().Find(ctx,
-		r.s.scope(bson.E{Key: "last_seen_at", Value: bson.D{{Key: "$gte", Value: ns(since)}}}),
+		r.s.scope(bson.E{Key: "last_seen_at", Value: bson.D{{Key: "$gte", Value: ts(since)}}}),
 		options.Find().SetSort(bson.D{{Key: "worker_id", Value: 1}}))
 	if err != nil {
 		return nil, wrap("list workers", err)

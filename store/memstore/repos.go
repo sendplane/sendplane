@@ -43,6 +43,7 @@ func (r *settingsRepo) Create(_ context.Context, v *store.TenantSettings) error 
 	v.UpdatedAt = now
 	v.Version = 1
 	cp := *v
+	truncate(&cp.CreatedAt, &cp.UpdatedAt)
 	r.s.d.settings = &cp
 	return nil
 }
@@ -65,6 +66,7 @@ func (r *settingsRepo) Update(_ context.Context, v *store.TenantSettings) error 
 	v.UpdatedAt = r.s.p.now()
 	v.Version = cur.Version + 1
 	cp := *v
+	truncate(&cp.CreatedAt, &cp.UpdatedAt)
 	r.s.d.settings = &cp
 	return nil
 }
@@ -154,6 +156,7 @@ func (r *chunkRepo) Put(_ context.Context, c *store.RecipientChunk) error {
 	}
 	c.UpdatedAt = now
 	cp := *c
+	truncate(&cp.CreatedAt, &cp.UpdatedAt)
 	r.s.d.chunks[k] = &cp
 	return nil
 }
@@ -176,6 +179,7 @@ func (r *suppressionRepo) Upsert(_ context.Context, v *store.Suppression) error 
 		v.CreatedAt = r.s.p.now()
 	}
 	cp := *v
+	truncate(&cp.CreatedAt, &cp.ExpiresAt)
 	r.s.d.suppressions[v.EmailNorm] = &cp
 	return nil
 }
@@ -191,7 +195,7 @@ func (r *suppressionRepo) IsSuppressed(_ context.Context, emailNorm string, now 
 		return false, nil, nil
 	}
 	cp := *v
-	if !cp.ExpiresAt.IsZero() && !cp.ExpiresAt.After(now) {
+	if !cp.ExpiresAt.IsZero() && !cp.ExpiresAt.After(store.TruncateTime(now)) {
 		return false, &cp, nil
 	}
 	return true, &cp, nil
@@ -248,6 +252,7 @@ func (r *trackingRepo) InsertEvents(_ context.Context, evs []store.TrackingEvent
 		if e.CreatedAt.IsZero() {
 			e.CreatedAt = now
 		}
+		truncate(&e.CreatedAt)
 		r.s.d.tracking[e.ID] = &e
 	}
 	return nil
@@ -344,6 +349,7 @@ func (r *outboxRepo) Enqueue(_ context.Context, evs []store.OutboxEvent) error {
 		if e.NextAttemptAt.IsZero() {
 			e.NextAttemptAt = e.CreatedAt
 		}
+		truncate(&e.CreatedAt, &e.NextAttemptAt, &e.LeaseUntil, &e.DeliveredAt)
 		r.s.d.outbox[e.ID] = &e
 	}
 	return nil
@@ -355,6 +361,7 @@ func (r *outboxRepo) ClaimPending(_ context.Context, limit int, lease time.Durat
 	if err := r.s.p.check(); err != nil {
 		return nil, err
 	}
+	now = store.TruncateTime(now)
 	ids := make([]string, 0, len(r.s.d.outbox))
 	for id, e := range r.s.d.outbox {
 		if e.Status != store.OutboxPending || e.NextAttemptAt.After(now) {
@@ -373,7 +380,7 @@ func (r *outboxRepo) ClaimPending(_ context.Context, limit int, lease time.Durat
 	for _, id := range ids {
 		e := r.s.d.outbox[id]
 		e.LeaseOwner = owner
-		e.LeaseUntil = now.Add(lease)
+		e.LeaseUntil = store.TruncateTime(now.Add(lease))
 		out = append(out, *e)
 	}
 	return out, nil
@@ -390,7 +397,7 @@ func (r *outboxRepo) MarkDelivered(_ context.Context, id string, at time.Time) e
 		return fmt.Errorf("%w: outbox %s", store.ErrNotFound, id)
 	}
 	e.Status = store.OutboxDelivered
-	e.DeliveredAt = at
+	e.DeliveredAt = store.TruncateTime(at)
 	e.LeaseOwner, e.LeaseUntil = "", time.Time{}
 	return nil
 }
@@ -412,7 +419,7 @@ func (r *outboxRepo) MarkFailed(_ context.Context, id string, nextAttempt time.T
 		e.Status = store.OutboxFailed
 	} else {
 		e.Status = store.OutboxPending
-		e.NextAttemptAt = nextAttempt
+		e.NextAttemptAt = store.TruncateTime(nextAttempt)
 	}
 	return nil
 }
@@ -438,13 +445,14 @@ func (r *lockRepo) Acquire(_ context.Context, name, owner string, ttl time.Durat
 	if err := r.s.p.check(); err != nil {
 		return false, err
 	}
+	now = store.TruncateTime(now)
 	cur, ok := r.s.d.locks[name]
 	if ok && cur.Owner != owner && cur.ExpiresAt.After(now) {
 		return false, nil
 	}
 	l := &store.Lock{
 		TenantID: r.s.tenant, Name: name, Owner: owner,
-		AcquiredAt: now, ExpiresAt: now.Add(ttl),
+		AcquiredAt: now, ExpiresAt: store.TruncateTime(now.Add(ttl)),
 	}
 	if ok && cur.Owner == owner {
 		l.AcquiredAt = cur.AcquiredAt
@@ -459,11 +467,12 @@ func (r *lockRepo) Renew(_ context.Context, name, owner string, ttl time.Duratio
 	if err := r.s.p.check(); err != nil {
 		return false, err
 	}
+	now = store.TruncateTime(now)
 	cur, ok := r.s.d.locks[name]
 	if !ok || cur.Owner != owner || !cur.ExpiresAt.After(now) {
 		return false, nil
 	}
-	cur.ExpiresAt = now.Add(ttl)
+	cur.ExpiresAt = store.TruncateTime(now.Add(ttl))
 	return true, nil
 }
 
@@ -515,6 +524,7 @@ func (r *workerRepo) Heartbeat(_ context.Context, w store.Worker) error {
 	} else if w.StartedAt.IsZero() {
 		w.StartedAt = w.LastSeenAt
 	}
+	truncate(&w.StartedAt, &w.LastSeenAt)
 	r.s.d.workers[w.ID] = &w
 	return nil
 }
@@ -525,6 +535,7 @@ func (r *workerRepo) ListActive(_ context.Context, since time.Time) ([]store.Wor
 	if err := r.s.p.check(); err != nil {
 		return nil, err
 	}
+	since = store.TruncateTime(since)
 	out := make([]store.Worker, 0, len(r.s.d.workers))
 	for _, w := range r.s.d.workers {
 		if w.LastSeenAt.Before(since) {

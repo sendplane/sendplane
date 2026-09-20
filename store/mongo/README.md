@@ -36,10 +36,13 @@ standalone mongod(레플리카셋 아님)로 충분합니다.
 동작합니다. 원자성이 필요한 지점은 세 가지 방식으로 대체합니다.
 
 - **멱등 삽입**: 인제스트는 `InsertMany(ordered:false)` + unique partial 인덱스
-  `{campaign_id:1, email_norm:1}`. 중복 키(11000) 오류 건수만 세서
+  `{tenant_id:1, campaign_id:1, email_norm:1}`. 중복 키(11000) 오류 건수만 세서
   `inserted = len(batch) - duplicates`를 돌려줍니다. 캠페인이 없는 배송
   (transactional·probe)은 `campaign_id` 필드 자체를 넣지 않으므로 partial
-  인덱스에 들어가지 않고 절대 중복 제거되지 않습니다.
+  인덱스에 들어가지 않고 절대 중복 제거되지 않습니다. shared 모드라 한 컬렉션에
+  모든 테넌트가 들어가므로 키는 Postgres의 `delivery_campaign_email`과 똑같이
+  `tenant_id`로 시작합니다. 배치는 **쓰기 전에 전체가 검증**되므로, 한 행이라도
+  `email_norm`이 비어 있으면 아무것도 삽입하지 않고 `(0, ErrInvalid)`입니다.
 - **CAS 전이**: `Complete`/`MarkSent`는 `lease_owner`가 그대로일 때만,
   `Update`는 `version`이 일치할 때만 적용됩니다. `MatchedCount == 0`이면 문서
   존재 여부를 한 번 더 확인해 `ErrNotFound`와 `ErrConflict`를 구분합니다.
@@ -72,9 +75,13 @@ standalone mongod(레플리카셋 아님)로 충분합니다.
   suppression, lock, worker, recipient chunk)는 `tenant\x00...` 형태의 복합 키를
   씁니다.
 - enum은 int32, `[]byte`·`json.RawMessage`는 BSON binary, `vars`는 BSON 문서.
-- **시간은 BSON date가 아니라 Unix epoch 기준 int64 나노초**입니다. BSON date는
-  밀리초 해상도라 호출자가 넘긴 타임스탬프를 조용히 반올림하는데, 계약은
-  `time.Time`을 그대로 돌려주기를 요구합니다(conformance suite가 `Equal`로
-  비교). 영시각(계약의 NULL)은 `null`로 저장합니다.
+- **시간은 BSON date**입니다. BSON date의 해상도인 밀리초가 곧 계약의
+  해상도이고(`store/doc.go`, `store.TruncateTime`), 들어오는 모든 시각은 쓰기
+  직전에 밀리초로 잘립니다 — 반올림이 아니라 절삭이고, 범위 조건의 경계값도
+  같은 방식으로 잘라서 저장값과 정확히 비교됩니다. 영시각(계약의 NULL)은
+  `null`로 저장합니다. date로 두는 덕분에 인덱스·집계 파이프라인·mongosh에서
+  그대로 시각으로 다룰 수 있습니다.
 - 목록은 `(created_at, _id)` 키셋 페이지네이션이고 커서는 base64(불투명)입니다.
-  페이지 사이에 삽입된 행이 이미 읽은 행을 밀어내지 않습니다.
+  커서에는 `created_at`을 Unix 밀리초로 담습니다(저장 해상도와 같으므로 디코딩한
+  값이 원래 행의 `created_at`과 정확히 일치합니다). 페이지 사이에 삽입된 행이
+  이미 읽은 행을 밀어내지 않습니다.

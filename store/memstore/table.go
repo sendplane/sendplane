@@ -10,13 +10,40 @@ import (
 )
 
 // meta gives the generic table access to the bookkeeping fields of a model.
-// version and updated are nil for immutable aggregates.
+// version and updated are nil for immutable aggregates; times is nil for the
+// models whose only timestamps are created/updated.
 type meta[T any] struct {
 	id      func(*T) *string
 	tenant  func(*T) *string
 	version func(*T) *int64
 	created func(*T) *time.Time
 	updated func(*T) *time.Time
+	// times lists the model's remaining timestamps, the ones a SQL backend
+	// would give a column of their own, so they can be truncated on write.
+	times func(*T) []*time.Time
+}
+
+// truncate reduces every time it is given to the resolution the contract
+// stores (store.TruncateTime). A real backend gets this from its column
+// types; memstore keeps Go values, so it has to do it explicitly or the
+// reference implementation would be more precise than the contract.
+func truncate(ps ...*time.Time) {
+	for _, p := range ps {
+		*p = store.TruncateTime(*p)
+	}
+}
+
+// truncateRow applies truncate to every timestamp of a row about to be stored.
+func (t *table[T]) truncateRow(v *T) {
+	if t.m.created != nil {
+		truncate(t.m.created(v))
+	}
+	if t.m.updated != nil {
+		truncate(t.m.updated(v))
+	}
+	if t.m.times != nil {
+		truncate(t.m.times(v)...)
+	}
 }
 
 // table is the shared CRUD implementation. Its method set satisfies the
@@ -60,6 +87,7 @@ func (t *table[T]) Create(_ context.Context, v *T) error {
 		*t.m.version(v) = 1
 	}
 	cp := *v
+	t.truncateRow(&cp)
 	t.rows[*id] = &cp
 	return nil
 }
@@ -107,6 +135,7 @@ func (t *table[T]) Update(_ context.Context, v *T) error {
 		*t.m.updated(v) = t.p.now()
 	}
 	cp := *v
+	t.truncateRow(&cp)
 	t.rows[id] = &cp
 	return nil
 }

@@ -19,11 +19,12 @@
 // key that starts with the tenant so the collection stays partitionable.
 // Enums are stored as int32, []byte and json.RawMessage as BSON binary.
 //
-// Times are stored as int64 nanoseconds since the Unix epoch, not as BSON
-// dates: a BSON date only has millisecond resolution, which would silently
-// round every timestamp the caller handed in, and the conformance suite
-// compares timestamps it wrote with time.Time.Equal. The zero time (the
-// contract's NULL) is stored as null.
+// Times are BSON dates. A BSON date holds milliseconds, which is exactly the
+// contract's resolution (store/doc.go), so every instant is truncated on the
+// way in rather than silently rounded, and range predicates truncate their
+// bound the same way. The zero time (the contract's NULL) is stored as null.
+// Keeping them as dates is what makes them indexable, comparable in the
+// aggregation pipeline and readable from the shell.
 package mongo
 
 import (
@@ -125,7 +126,9 @@ func Open(ctx context.Context, uri, dbName string, opts ...Option) (*Provider, e
 // Database exposes the underlying handle for diagnostics and tests.
 func (p *Provider) Database() *mongo.Database { return p.db }
 
-func (p *Provider) now() time.Time { return p.clock().UTC() }
+// now is the clock stamp this provider writes on documents, already reduced
+// to the resolution the contract stores (store/doc.go).
+func (p *Provider) now() time.Time { return store.TruncateTime(p.clock()) }
 
 // ForTenant returns a store bound to tenantID. Nothing is written: tenants are
 // created implicitly by their first row (ADR-0006).
@@ -231,7 +234,15 @@ func indexes() []index {
 		// Deliveries: the queue indexes (architecture 5.3).
 		{
 			coll: collDelivery, name: "campaign_email_unique",
-			keys: bson.D{{Key: "campaign_id", Value: 1}, {Key: "email_norm", Value: 1}},
+			// The tenant leads the key, like the Postgres index
+			// delivery_campaign_email: shared mode puts every tenant in one
+			// collection, so the uniqueness of a campaign address is a
+			// per-tenant fact and the index stays partitionable.
+			keys: bson.D{
+				{Key: "tenant_id", Value: 1},
+				{Key: "campaign_id", Value: 1},
+				{Key: "email_norm", Value: 1},
+			},
 			opt: func(b *options.IndexOptionsBuilder) *options.IndexOptionsBuilder {
 				// Deliveries without a campaign omit the field entirely, so
 				// they take no part in the unique key (transactional and probe

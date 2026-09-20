@@ -39,13 +39,17 @@ func (r *deliveryRepo) InsertBatch(ctx context.Context, ds []store.Delivery) (in
 	if len(ds) == 0 {
 		return 0, nil
 	}
+	// The whole batch is validated before anything is written, so a rejected
+	// chunk can be fixed and re-sent as a whole (store/delivery.go).
+	for i := range ds {
+		if ds[i].EmailNorm == "" {
+			return 0, fmt.Errorf("%w: delivery %d has no email_norm", store.ErrInvalid, i)
+		}
+	}
 	now := r.s.p.now()
 	docs := make([]any, 0, len(ds))
 	for i := range ds {
 		d := ds[i]
-		if d.EmailNorm == "" {
-			return 0, fmt.Errorf("%w: delivery %d has no email_norm", store.ErrInvalid, i)
-		}
 		if d.ID == "" {
 			d.ID = store.NewID()
 		}
@@ -114,7 +118,7 @@ func (r *deliveryRepo) Claim(ctx context.Context, req store.ClaimRequest) ([]sto
 	filter := r.s.scope(
 		bson.E{Key: "lane", Value: int32(req.Lane)},
 		bson.E{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(claimable)}}},
-		bson.E{Key: "next_attempt_at", Value: bson.D{{Key: "$lte", Value: ns(req.Now)}}},
+		bson.E{Key: "next_attempt_at", Value: bson.D{{Key: "$lte", Value: ts(req.Now)}}},
 	)
 	if req.CampaignIDs != nil {
 		noCampaign := bson.D{{Key: "campaign_id", Value: bson.D{{Key: "$exists", Value: false}}}}
@@ -138,9 +142,9 @@ func (r *deliveryRepo) Claim(ctx context.Context, req store.ClaimRequest) ([]sto
 	if _, err := r.coll().UpdateMany(ctx, leaseFilter, bson.D{{Key: "$set", Value: bson.D{
 		{Key: "status", Value: int32(store.DeliveryLeased)},
 		{Key: "lease_owner", Value: req.WorkerID},
-		{Key: "lease_until", Value: ns(req.Now.Add(req.LeaseFor))},
+		{Key: "lease_until", Value: ts(req.Now.Add(req.LeaseFor))},
 		{Key: "claim_token", Value: token},
-		{Key: "updated_at", Value: ns(req.Now)},
+		{Key: "updated_at", Value: ts(req.Now)},
 	}}}); err != nil {
 		return nil, wrap("claim deliveries", err)
 	}
@@ -183,7 +187,7 @@ func (r *deliveryRepo) Complete(ctx context.Context, results []store.DeliveryRes
 			{Key: "lease_owner", Value: lit("")},
 			{Key: "lease_until", Value: nil},
 			{Key: "claim_token", Value: lit("")},
-			{Key: "updated_at", Value: ns(now)},
+			{Key: "updated_at", Value: ts(now)},
 		}
 		if res.MessageID != "" {
 			set = append(set, bson.E{Key: "message_id", Value: lit(res.MessageID)})
@@ -194,15 +198,15 @@ func (r *deliveryRepo) Complete(ctx context.Context, results []store.DeliveryRes
 			}}}})
 		}
 		if !res.NextAttemptAt.IsZero() {
-			set = append(set, bson.E{Key: "next_attempt_at", Value: ns(res.NextAttemptAt)})
+			set = append(set, bson.E{Key: "next_attempt_at", Value: ts(res.NextAttemptAt)})
 		}
 		if res.NewStatus == store.DeliverySent {
 			// MarkSent may already have stamped it; keep the earlier time.
 			set = append(set, bson.E{Key: "sent_at",
-				Value: bson.D{{Key: "$ifNull", Value: bson.A{"$sent_at", ns(now)}}}})
+				Value: bson.D{{Key: "$ifNull", Value: bson.A{"$sent_at", ts(now)}}}})
 		}
 		if res.NewStatus.Terminal() {
-			set = append(set, bson.E{Key: "finished_at", Value: ns(now)})
+			set = append(set, bson.E{Key: "finished_at", Value: ts(now)})
 		}
 		upd, err := r.coll().UpdateOne(ctx,
 			r.s.scope(
@@ -249,9 +253,9 @@ func (r *deliveryRepo) MarkSent(ctx context.Context, id, owner, messageID string
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "status", Value: int32(store.DeliverySent)},
 			{Key: "message_id", Value: messageID},
-			{Key: "sent_at", Value: ns(at)},
-			{Key: "finished_at", Value: ns(at)},
-			{Key: "updated_at", Value: ns(at)},
+			{Key: "sent_at", Value: ts(at)},
+			{Key: "finished_at", Value: ts(at)},
+			{Key: "updated_at", Value: ts(at)},
 		}}})
 	if err != nil {
 		return wrap("mark sent", err)
@@ -276,7 +280,7 @@ func (r *deliveryRepo) MarkSent(ctx context.Context, id, owner, messageID string
 func (r *deliveryRepo) ReleaseExpiredLeases(ctx context.Context, now time.Time, limit int) (int, error) {
 	filter := r.s.scope(
 		bson.E{Key: "status", Value: int32(store.DeliveryLeased)},
-		bson.E{Key: "lease_until", Value: bson.D{{Key: "$lt", Value: ns(now)}}},
+		bson.E{Key: "lease_until", Value: bson.D{{Key: "$lt", Value: ts(now)}}},
 	)
 	ids, err := findIDs(ctx, r.coll(), filter, idSort, limit)
 	if err != nil || len(ids) == 0 {
@@ -294,8 +298,8 @@ func (r *deliveryRepo) ReleaseExpiredLeases(ctx context.Context, now time.Time, 
 			{Key: "lease_owner", Value: lit("")},
 			{Key: "lease_until", Value: nil},
 			{Key: "claim_token", Value: lit("")},
-			{Key: "next_attempt_at", Value: ns(now)},
-			{Key: "updated_at", Value: ns(now)},
+			{Key: "next_attempt_at", Value: ts(now)},
+			{Key: "updated_at", Value: ts(now)},
 		}}}})
 	if err != nil {
 		return 0, wrap("release expired leases", err)
@@ -344,10 +348,10 @@ func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, fr
 	now := r.s.p.now()
 	set := bson.D{
 		{Key: "status", Value: int32(to)},
-		{Key: "updated_at", Value: ns(now)},
+		{Key: "updated_at", Value: ts(now)},
 	}
 	if to.Terminal() {
-		set = append(set, bson.E{Key: "finished_at", Value: ns(now)})
+		set = append(set, bson.E{Key: "finished_at", Value: ts(now)})
 	}
 	res, err := r.coll().UpdateMany(ctx, and(filter, bson.D{inIDs(ids)}),
 		bson.D{{Key: "$set", Value: set}})
@@ -362,6 +366,7 @@ func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, fr
 func (r *deliveryRepo) Requeue(ctx context.Context, f store.RetryFilter, limit int) (int, error) {
 	filter := r.s.scope(campaignEq(f.CampaignID))
 	if f.DeliveryIDs != nil {
+		// A non-nil but empty list matches nothing (store/delivery.go).
 		filter = append(filter, inIDs(f.DeliveryIDs))
 	}
 	if len(f.Statuses) > 0 {
@@ -379,12 +384,12 @@ func (r *deliveryRepo) Requeue(ctx context.Context, f store.RetryFilter, limit i
 	res, err := r.coll().UpdateMany(ctx, and(filter, bson.D{inIDs(ids)}), bson.D{
 		{Key: "$set", Value: bson.D{
 			{Key: "status", Value: int32(store.DeliveryQueued)},
-			{Key: "next_attempt_at", Value: ns(f.Now)},
+			{Key: "next_attempt_at", Value: ts(f.Now)},
 			{Key: "lease_owner", Value: ""},
 			{Key: "lease_until", Value: nil},
 			{Key: "claim_token", Value: ""},
 			{Key: "finished_at", Value: nil},
-			{Key: "updated_at", Value: ns(f.Now)},
+			{Key: "updated_at", Value: ts(f.Now)},
 		}},
 		{Key: "$inc", Value: bson.D{{Key: "retry_gen", Value: 1}}},
 	})
@@ -403,8 +408,8 @@ func (r *deliveryRepo) setFirst(ctx context.Context, field, id string, at time.T
 			bson.E{Key: field, Value: nil},
 		),
 		bson.D{{Key: "$set", Value: bson.D{
-			{Key: field, Value: ns(at)},
-			{Key: "updated_at", Value: ns(at)},
+			{Key: field, Value: ts(at)},
+			{Key: "updated_at", Value: ts(at)},
 		}}})
 	if err != nil {
 		return false, wrap("set "+field, err)
@@ -429,7 +434,7 @@ func (r *deliveryRepo) SetUnsubscribed(ctx context.Context, id string, at time.T
 // DeleteBefore enforces retention in chunks, dropping the attempts with it.
 func (r *deliveryRepo) DeleteBefore(ctx context.Context, campaignID string, before time.Time, limit int) (int, error) {
 	filter := r.s.scope(campaignEq(campaignID),
-		bson.E{Key: "created_at", Value: bson.D{{Key: "$lt", Value: ns(before)}}})
+		bson.E{Key: "created_at", Value: bson.D{{Key: "$lt", Value: ts(before)}}})
 	ids, err := findIDs(ctx, r.coll(), filter, idSort, limit)
 	if err != nil || len(ids) == 0 {
 		return 0, err

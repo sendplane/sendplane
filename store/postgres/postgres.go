@@ -90,7 +90,9 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Provider, error) {
 // Pool exposes the underlying pool for hosts that need their own statements.
 func (p *Provider) Pool() *pgxpool.Pool { return p.pool }
 
-func (p *Provider) now() time.Time { return p.clock().UTC() }
+// now is the clock stamp this provider writes on rows, already reduced to the
+// resolution the contract stores (store/doc.go).
+func (p *Provider) now() time.Time { return store.TruncateTime(p.clock()) }
 
 func (p *Provider) check() error {
 	if p.closed {

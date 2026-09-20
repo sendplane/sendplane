@@ -76,6 +76,10 @@ UPDATE delivery d SET status = 2, lease_owner = ..., lease_until = ..., updated_
 행은 `ON CONFLICT`가 볼 수 없기 때문). 캠페인이 없는 배달(transactional, probe)은
 `campaign_id`가 NULL이라 인덱스 밖에 있고 절대 중복 제거되지 않습니다.
 
+배치는 **쓰기 전에 전체가 검증**됩니다. 한 행이라도 `email_norm`이 비어 있으면
+아무 행도 넣지 않고 `(0, ErrInvalid)`을 돌려주므로, 호출자는 고친 청크를 통째로
+다시 보내면 됩니다.
+
 "캠페인 없음"은 SQL에서 NULL, Go에서 빈 문자열입니다. 조회는
 `campaign_id IS NOT DISTINCT FROM $n::text`로 두 경우를 한 번에 다룹니다.
 
@@ -91,9 +95,11 @@ UPDATE delivery d SET status = 2, lease_owner = ..., lease_until = ..., updated_
   `lease_owner`로 CAS합니다. 실제로 매치된 행만 `RETURNING id`로 돌려받아 그 행에만
   attempt를 넣으므로, 리스를 잃은 결과와 재전송된 배치는 조용히 무시됩니다. 행 단위
   루프는 없습니다.
-- **시간 정밀도**: `timestamptz`는 마이크로초까지입니다. 계약은 호출자가 준
-  `time.Time`을 그대로 돌려주므로(`storetest`가 `Equal`로 비교), `delivery`의
-  호출자 지정 시각에는 `*_ns smallint` 컬럼을 짝지어 0~999ns 나머지를 보관합니다.
-  다른 테이블은 스스로 시각을 찍으므로 마이크로초가 공식 해상도입니다.
+- **시간 정밀도**: 계약의 해상도는 밀리초입니다(`store/doc.go`,
+  `store.TruncateTime`). `timestamptz`는 마이크로초까지 담을 수 있지만, 이
+  구현은 DB로 나가는 모든 시각을 `tsIn`/`tsInNN`에서 밀리초로 절삭합니다 —
+  저장값뿐 아니라 `next_attempt_at <= $n` 같은 비교 경계값도 같은 함수를 지나므로
+  같은 `time.Time`에서 만든 값끼리는 언제나 정확히 일치합니다. 별도의 나머지
+  보관용 컬럼은 없습니다.
 - **enum**은 `smallint`, 구조화된 값은 `jsonb`, ID는 `text`(UUIDv7 문자열)입니다.
   숫자 enum 값은 on-disk 포맷의 일부입니다(`store/enums.go`).

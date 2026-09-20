@@ -13,7 +13,23 @@ type deliveryRepo struct{ s *tenantStore }
 
 func emailKey(campaignID, emailNorm string) string { return campaignID + "\x00" + emailNorm }
 
+// truncateDelivery reduces every timestamp of a delivery to the resolution
+// the contract stores. It runs on the stored row after each transition, which
+// is where a SQL backend's column types would do it.
+func truncateDelivery(d *store.Delivery) {
+	truncate(&d.NextAttemptAt, &d.LeaseUntil, &d.SentAt, &d.FinishedAt,
+		&d.FirstOpenedAt, &d.FirstClickedAt, &d.UnsubscribedAt,
+		&d.CreatedAt, &d.UpdatedAt)
+}
+
 func (r *deliveryRepo) InsertBatch(_ context.Context, ds []store.Delivery) (int, error) {
+	// The whole batch is validated before anything is written, so a rejected
+	// chunk can be fixed and re-sent as a whole (store/delivery.go).
+	for i := range ds {
+		if ds[i].EmailNorm == "" {
+			return 0, fmt.Errorf("%w: delivery %d has no email_norm", store.ErrInvalid, i)
+		}
+	}
 	r.s.p.mu.Lock()
 	defer r.s.p.mu.Unlock()
 	if err := r.s.p.check(); err != nil {
@@ -23,9 +39,6 @@ func (r *deliveryRepo) InsertBatch(_ context.Context, ds []store.Delivery) (int,
 	inserted := 0
 	for i := range ds {
 		d := ds[i]
-		if d.EmailNorm == "" {
-			return inserted, fmt.Errorf("%w: delivery %d has no email_norm", store.ErrInvalid, i)
-		}
 		if d.CampaignID != "" {
 			k := emailKey(d.CampaignID, d.EmailNorm)
 			if _, dup := r.s.d.campaignEmails[k]; dup {
@@ -46,6 +59,7 @@ func (r *deliveryRepo) InsertBatch(_ context.Context, ds []store.Delivery) (int,
 		if d.NextAttemptAt.IsZero() {
 			d.NextAttemptAt = now
 		}
+		truncateDelivery(&d)
 		r.s.d.deliveries[d.ID] = &d
 		inserted++
 	}
@@ -110,6 +124,7 @@ func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store
 	if err := r.s.p.check(); err != nil {
 		return nil, err
 	}
+	now := store.TruncateTime(req.Now)
 	var campaigns map[string]bool
 	if req.CampaignIDs != nil {
 		campaigns = make(map[string]bool, len(req.CampaignIDs))
@@ -125,7 +140,7 @@ func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store
 		if d.Status != store.DeliveryQueued && d.Status != store.DeliveryDeferred {
 			continue
 		}
-		if d.NextAttemptAt.After(req.Now) {
+		if d.NextAttemptAt.After(now) {
 			continue
 		}
 		if campaigns != nil && d.CampaignID != "" && !campaigns[d.CampaignID] {
@@ -150,8 +165,9 @@ func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store
 	for _, d := range cands {
 		d.Status = store.DeliveryLeased
 		d.LeaseOwner = req.WorkerID
-		d.LeaseUntil = req.Now.Add(req.LeaseFor)
-		d.UpdatedAt = req.Now
+		d.LeaseUntil = now.Add(req.LeaseFor)
+		d.UpdatedAt = now
+		truncateDelivery(d)
 		out = append(out, *d)
 	}
 	return out, nil
@@ -190,6 +206,7 @@ func (r *deliveryRepo) Complete(_ context.Context, results []store.DeliveryResul
 		}
 		d.LeaseOwner, d.LeaseUntil = "", time.Time{}
 		d.UpdatedAt = now
+		truncateDelivery(d)
 
 		if res.Attempt != nil {
 			a := *res.Attempt
@@ -201,6 +218,7 @@ func (r *deliveryRepo) Complete(_ context.Context, results []store.DeliveryResul
 			if a.CreatedAt.IsZero() {
 				a.CreatedAt = now
 			}
+			truncateAttempt(&a)
 			r.s.d.attempts[a.ID] = &a
 		}
 	}
@@ -225,6 +243,7 @@ func (r *deliveryRepo) MarkSent(_ context.Context, id, owner, messageID string, 
 	d.SentAt = at
 	d.FinishedAt = at
 	d.UpdatedAt = at
+	truncateDelivery(d)
 	// The lease is kept so the batched Complete can still attach the attempt.
 	return nil
 }
@@ -235,6 +254,7 @@ func (r *deliveryRepo) ReleaseExpiredLeases(_ context.Context, now time.Time, li
 	if err := r.s.p.check(); err != nil {
 		return 0, err
 	}
+	now = store.TruncateTime(now)
 	ids := make([]string, 0, 16)
 	for id, d := range r.s.d.deliveries {
 		if d.Status != store.DeliveryLeased || d.LeaseUntil.IsZero() || !d.LeaseUntil.Before(now) {
@@ -256,6 +276,7 @@ func (r *deliveryRepo) ReleaseExpiredLeases(_ context.Context, now time.Time, li
 		d.LeaseOwner, d.LeaseUntil = "", time.Time{}
 		d.NextAttemptAt = now
 		d.UpdatedAt = now
+		truncateDelivery(d)
 	}
 	return len(ids), nil
 }
@@ -301,6 +322,7 @@ func (r *deliveryRepo) BulkTransition(_ context.Context, campaignID string, from
 			d.FinishedAt = now
 		}
 		d.UpdatedAt = now
+		truncateDelivery(d)
 	}
 	return len(ids), nil
 }
@@ -311,6 +333,8 @@ func (r *deliveryRepo) Requeue(_ context.Context, f store.RetryFilter, limit int
 	if err := r.s.p.check(); err != nil {
 		return 0, err
 	}
+	at := store.TruncateTime(f.Now)
+	// A non-nil but empty list matches nothing (store/delivery.go).
 	var only map[string]bool
 	if f.DeliveryIDs != nil {
 		only = make(map[string]bool, len(f.DeliveryIDs))
@@ -336,10 +360,11 @@ func (r *deliveryRepo) Requeue(_ context.Context, f store.RetryFilter, limit int
 		d := r.s.d.deliveries[id]
 		d.Status = store.DeliveryQueued
 		d.RetryGen++
-		d.NextAttemptAt = f.Now
+		d.NextAttemptAt = at
 		d.LeaseOwner, d.LeaseUntil = "", time.Time{}
 		d.FinishedAt = time.Time{}
-		d.UpdatedAt = f.Now
+		d.UpdatedAt = at
+		truncateDelivery(d)
 	}
 	return len(ids), nil
 }
@@ -360,6 +385,7 @@ func (r *deliveryRepo) setFirst(id string, at time.Time, field func(*store.Deliv
 	}
 	*p = at
 	d.UpdatedAt = at
+	truncateDelivery(d)
 	return true, nil
 }
 
@@ -381,6 +407,7 @@ func (r *deliveryRepo) DeleteBefore(_ context.Context, campaignID string, before
 	if err := r.s.p.check(); err != nil {
 		return 0, err
 	}
+	before = store.TruncateTime(before)
 	ids := make([]string, 0, 16)
 	for id, d := range r.s.d.deliveries {
 		if d.CampaignID != campaignID || !d.CreatedAt.Before(before) {
@@ -409,6 +436,10 @@ func (r *deliveryRepo) DeleteBefore(_ context.Context, campaignID string, before
 
 type attemptRepo struct{ s *tenantStore }
 
+func truncateAttempt(a *store.DeliveryAttempt) {
+	truncate(&a.StartedAt, &a.FinishedAt, &a.CreatedAt)
+}
+
 func (r *attemptRepo) Insert(_ context.Context, as []store.DeliveryAttempt) error {
 	r.s.p.mu.Lock()
 	defer r.s.p.mu.Unlock()
@@ -425,6 +456,7 @@ func (r *attemptRepo) Insert(_ context.Context, as []store.DeliveryAttempt) erro
 		if a.CreatedAt.IsZero() {
 			a.CreatedAt = now
 		}
+		truncateAttempt(&a)
 		r.s.d.attempts[a.ID] = &a
 	}
 	return nil

@@ -48,6 +48,8 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 
 	t.Run("Deliveries", func(t *testing.T) {
 		t.Run("InsertBatchIdempotent", func(t *testing.T) { testInsertBatchIdempotent(t, p) })
+		t.Run("InsertBatchAtomic", func(t *testing.T) { testInsertBatchAtomic(t, p) })
+		t.Run("TimePrecision", func(t *testing.T) { testTimePrecision(t, p) })
 		t.Run("Claim", func(t *testing.T) { testClaim(t, p) })
 		t.Run("ClaimConcurrent", func(t *testing.T) { testClaimConcurrent(t, p) })
 		t.Run("CompleteCAS", func(t *testing.T) { testCompleteCAS(t, p) })
@@ -105,6 +107,19 @@ func mustBe(t *testing.T, what string, err, want error) {
 func eq[T comparable](t *testing.T, what string, got, want T) {
 	t.Helper()
 	if got != want {
+		t.Fatalf("%s: got %v, want %v", what, got, want)
+	}
+}
+
+// eqTime compares a timestamp read back from a store with the instant the
+// suite handed in. The contract stores times at millisecond resolution
+// (store/doc.go), so want is compared through store.TruncateTime: the suite
+// keeps building its instants from an untruncated time.Now, which is what
+// exercises the truncation path in every implementation.
+func eqTime(t *testing.T, what string, got, want time.Time) {
+	t.Helper()
+	want = store.TruncateTime(want)
+	if got.IsZero() != want.IsZero() || !got.Equal(want) {
 		t.Fatalf("%s: got %v, want %v", what, got, want)
 	}
 }

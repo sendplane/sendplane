@@ -9,6 +9,10 @@
 --     (store/enums.go).
 --   * A zero time.Time is SQL NULL, which is what the conditional updates
 --     (set_first_*) and the "never expires" suppression rely on.
+--   * timestamptz holds microseconds, but the contract's resolution is
+--     milliseconds (store/doc.go): every instant is truncated on the way in,
+--     so a stored value and a comparison bound built from the same time.Time
+--     match exactly and every backend returns the same thing.
 --   * Optional strings are NOT NULL DEFAULT '': Go has no NULL string. The one
 --     exception is delivery.campaign_id, which must be NULL for "no campaign"
 --     so that the partial unique index only covers campaign deliveries.
@@ -246,20 +250,7 @@ CREATE TABLE IF NOT EXISTS delivery (
   first_clicked_at timestamptz,
   unsubscribed_at  timestamptz,
   created_at       timestamptz NOT NULL,
-  updated_at       timestamptz NOT NULL,
-  -- timestamptz resolves to microseconds, but the contract hands a caller's
-  -- own time.Time back unchanged (Claim's lease deadline, the scheduling and
-  -- tracking instants storetest compares with Equal). These columns hold the
-  -- sub-microsecond remainder, 0..999 ns, of the instant next to them so that
-  -- the round trip is lossless. They are only on delivery: every other table
-  -- stamps its own times and microseconds are the documented resolution.
-  next_attempt_at_ns  smallint NOT NULL DEFAULT 0,
-  lease_until_ns      smallint NOT NULL DEFAULT 0,
-  sent_at_ns          smallint NOT NULL DEFAULT 0,
-  finished_at_ns      smallint NOT NULL DEFAULT 0,
-  first_opened_at_ns  smallint NOT NULL DEFAULT 0,
-  first_clicked_at_ns smallint NOT NULL DEFAULT 0,
-  unsubscribed_at_ns  smallint NOT NULL DEFAULT 0
+  updated_at       timestamptz NOT NULL
 );
 
 -- Idempotent ingest: re-sending the same chunk inserts nothing (ADR-0007).

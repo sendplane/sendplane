@@ -19,11 +19,11 @@ import (
 // It is exported only because the BSON codec skips unexported embedded
 // fields, which would silently drop every inlined _id and tenant_id.
 type Base struct {
-	ID        string `bson:"_id"`
-	TenantID  string `bson:"tenant_id"`
-	Version   int64  `bson:"version,omitempty"`
-	CreatedAt int64  `bson:"created_at"`
-	UpdatedAt *int64 `bson:"updated_at"`
+	ID        string     `bson:"_id"`
+	TenantID  string     `bson:"tenant_id"`
+	Version   int64      `bson:"version,omitempty"`
+	CreatedAt time.Time  `bson:"created_at"`
+	UpdatedAt *time.Time `bson:"updated_at"`
 }
 
 func (b *Base) baseOf() *Base { return b }

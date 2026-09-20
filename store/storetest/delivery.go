@@ -143,9 +143,7 @@ func testClaim(t *testing.T, p store.Provider) {
 		for i := range batch {
 			eq(t, "claimed status", batch[i].Status, store.DeliveryLeased)
 			eq(t, "claimed owner", batch[i].LeaseOwner, "w1")
-			if !batch[i].LeaseUntil.Equal(now.Add(time.Minute)) {
-				t.Fatalf("lease_until: got %v, want %v", batch[i].LeaseUntil, now.Add(time.Minute))
-			}
+			eqTime(t, "lease_until", batch[i].LeaseUntil, now.Add(time.Minute))
 		}
 		stored, err := s.Deliveries().Get(ctx, high.ID)
 		must(t, "Get after Claim", err)
@@ -372,9 +370,7 @@ func testCompleteCAS(t *testing.T, p store.Provider) {
 	eq(t, "error class", got.LastErrorClass, store.ErrorClassTransient)
 	eq(t, "smtp code", got.LastSMTPCode, 451)
 	eq(t, "lease released", got.LeaseOwner, "")
-	if !got.NextAttemptAt.Equal(now.Add(time.Minute)) {
-		t.Fatalf("next_attempt_at: got %v, want %v", got.NextAttemptAt, now.Add(time.Minute))
-	}
+	eqTime(t, "next_attempt_at", got.NextAttemptAt, now.Add(time.Minute))
 	att, err = s.Attempts().ListByDelivery(ctx, d.ID, store.Page{Limit: 10})
 	must(t, "ListByDelivery", err)
 	eq(t, "attempt recorded", len(att.Items), 1)
@@ -417,9 +413,7 @@ func testMarkSent(t *testing.T, p store.Provider) {
 	must(t, "Get after MarkSent", err)
 	eq(t, "status", got.Status, store.DeliverySent)
 	eq(t, "message id", got.MessageID, "<msg@example.com>")
-	if !got.SentAt.Equal(sentAt) {
-		t.Fatalf("sent_at: got %v, want %v", got.SentAt, sentAt)
-	}
+	eqTime(t, "sent_at", got.SentAt, sentAt)
 
 	// The batched Complete still attaches the attempt afterwards.
 	must(t, "Complete after MarkSent", r.Complete(ctx, []store.DeliveryResult{{
@@ -537,9 +531,7 @@ func testRequeue(t *testing.T, p store.Provider) {
 	eq(t, "status", got.Status, store.DeliveryQueued)
 	eq(t, "retry generation bumped", got.RetryGen, 1)
 	eq(t, "attempt count kept", got.AttemptCount, 6)
-	if !got.NextAttemptAt.Equal(at) {
-		t.Fatalf("next_attempt_at: got %v, want %v", got.NextAttemptAt, at)
-	}
+	eqTime(t, "next_attempt_at", got.NextAttemptAt, at)
 
 	other, err := r.Get(ctx, permanent.ID)
 	must(t, "Get permanent", err)
@@ -681,9 +673,7 @@ func testSetFirst(t *testing.T, p store.Provider) {
 
 		got, err := r.Get(ctx, d.ID)
 		must(t, "Get", err)
-		if !tc.read(got).Equal(first) {
-			t.Fatalf("%s: got %v, want %v", tc.name, tc.read(got), first)
-		}
+		eqTime(t, tc.name, tc.read(got), first)
 
 		// A token for a delivery retention already removed is dropped, not an
 		// error (architecture 9.1).
@@ -835,4 +825,86 @@ func testAttempts(t *testing.T, p store.Provider) {
 	res, err = r.ListByDelivery(ctx, store.NewID(), store.Page{Limit: 10})
 	must(t, "ListByDelivery unknown", err)
 	eq(t, "unknown delivery", len(res.Items), 0)
+}
+
+// testInsertBatchAtomic pins the all-or-nothing validation of InsertBatch: a
+// single bad row rejects the whole chunk, so the caller can fix it and re-send
+// the same chunk instead of working out which rows already went in.
+func testInsertBatchAtomic(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, _ := fresh(t, p)
+	r := s.Deliveries()
+	now := time.Now().UTC()
+	campaignID := store.NewID()
+
+	good := store.Delivery{
+		ID: store.NewID(), CampaignID: campaignID, Lane: store.LaneBulk,
+		Status: store.DeliveryQueued, Email: "a@example.com", EmailNorm: "a@example.com",
+		NextAttemptAt: now,
+	}
+	// No email_norm: the one thing InsertBatch rejects.
+	bad := store.Delivery{
+		ID: store.NewID(), CampaignID: campaignID, Lane: store.LaneBulk,
+		Status: store.DeliveryQueued, Email: "b@example.com", NextAttemptAt: now,
+	}
+
+	n, err := r.InsertBatch(ctx, []store.Delivery{good, bad})
+	mustBe(t, "InsertBatch with a bad row", err, store.ErrInvalid)
+	eq(t, "nothing inserted", n, 0)
+
+	_, err = r.Get(ctx, good.ID)
+	mustBe(t, "the row before the bad one", err, store.ErrNotFound)
+	counts, err := r.CountByStatus(ctx, campaignID)
+	must(t, "CountByStatus", err)
+	eq(t, "campaign still empty", len(counts), 0)
+
+	// Fixing the row and re-sending the same chunk inserts all of it.
+	bad.EmailNorm = "b@example.com"
+	n, err = r.InsertBatch(ctx, []store.Delivery{good, bad})
+	must(t, "InsertBatch after the fix", err)
+	eq(t, "whole chunk inserted", n, 2)
+}
+
+// testTimePrecision pins the resolution of the contract (store/doc.go): times
+// are stored truncated to whole milliseconds, in UTC. The instant used here
+// has a sub-millisecond remainder above half a millisecond, so an
+// implementation that rounded instead of truncating would fail.
+func testTimePrecision(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, _ := fresh(t, p)
+	r := s.Deliveries()
+
+	want := time.Date(2024, 5, 17, 10, 30, 15, 999888777, time.UTC)
+	d := store.Delivery{
+		ID: store.NewID(), CampaignID: store.NewID(), Lane: store.LaneBulk,
+		Status: store.DeliveryQueued, Email: "a@example.com", EmailNorm: "a@example.com",
+		NextAttemptAt: want,
+	}
+	seed(t, s, []store.Delivery{d})
+
+	got, err := r.Get(ctx, d.ID)
+	must(t, "Get", err)
+	if !got.NextAttemptAt.Equal(store.TruncateTime(want)) {
+		t.Fatalf("next_attempt_at: got %v, want exactly %v",
+			got.NextAttemptAt, store.TruncateTime(want))
+	}
+	eq(t, "sub-millisecond remainder dropped",
+		got.NextAttemptAt.Nanosecond()%int(time.Millisecond/time.Nanosecond), 0)
+	eq(t, "returned in UTC", got.NextAttemptAt.Location().String(), "UTC")
+
+	// The gate is consistent with the stored value: the truncated instant is
+	// due, the one just before it is not.
+	at := store.TruncateTime(want)
+	empty, err := r.Claim(ctx, store.ClaimRequest{
+		Lane: store.LaneBulk, Limit: 10, LeaseFor: time.Minute,
+		WorkerID: "w1", Now: at.Add(-time.Millisecond),
+	})
+	must(t, "Claim before due", err)
+	eq(t, "not due yet", len(empty), 0)
+	batch, err := r.Claim(ctx, store.ClaimRequest{
+		Lane: store.LaneBulk, Limit: 10, LeaseFor: time.Minute,
+		WorkerID: "w1", Now: want,
+	})
+	must(t, "Claim when due", err)
+	eqIDs(t, "due row", claimIDs(batch), []string{d.ID})
 }

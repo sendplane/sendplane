@@ -15,19 +15,15 @@ import (
 )
 
 // deliveryColumns is the column order every delivery read, INSERT and COPY
-// uses. The *_ns columns carry the sub-microsecond remainder of the instant
-// before them (see migrations/0001_init.sql).
+// uses.
 var deliveryColumns = []string{
 	"id", "tenant_id", "campaign_id", "version_id", "sender_id", "lane",
 	"priority", "status", "email", "email_norm", "name", "locale", "vars",
 	"unsubscribe_url", "attempt_count", "retry_gen",
-	"next_attempt_at", "next_attempt_at_ns",
-	"lease_owner", "lease_until", "lease_until_ns",
+	"next_attempt_at", "lease_owner", "lease_until",
 	"last_error_class", "last_smtp_code", "last_error", "message_id",
-	"sent_at", "sent_at_ns", "finished_at", "finished_at_ns",
-	"first_opened_at", "first_opened_at_ns",
-	"first_clicked_at", "first_clicked_at_ns",
-	"unsubscribed_at", "unsubscribed_at_ns",
+	"sent_at", "finished_at",
+	"first_opened_at", "first_clicked_at", "unsubscribed_at",
 	"created_at", "updated_at",
 }
 
@@ -55,14 +51,10 @@ func deliveryValues(d *store.Delivery) ([]any, error) {
 		d.ID, d.TenantID, idIn(d.CampaignID), d.VersionID, d.SenderID,
 		i16(d.Lane), d.Priority, i16(d.Status), d.Email, d.EmailNorm, d.Name,
 		d.Locale, vars, d.UnsubscribeURL, d.AttemptCount, d.RetryGen,
-		tsInNN(d.NextAttemptAt), subMicro(d.NextAttemptAt),
-		d.LeaseOwner, tsIn(d.LeaseUntil), subMicro(d.LeaseUntil),
+		tsInNN(d.NextAttemptAt), d.LeaseOwner, tsIn(d.LeaseUntil),
 		i16(d.LastErrorClass), d.LastSMTPCode, d.LastError, d.MessageID,
-		tsIn(d.SentAt), subMicro(d.SentAt),
-		tsIn(d.FinishedAt), subMicro(d.FinishedAt),
-		tsIn(d.FirstOpenedAt), subMicro(d.FirstOpenedAt),
-		tsIn(d.FirstClickedAt), subMicro(d.FirstClickedAt),
-		tsIn(d.UnsubscribedAt), subMicro(d.UnsubscribedAt),
+		tsIn(d.SentAt), tsIn(d.FinishedAt),
+		tsIn(d.FirstOpenedAt), tsIn(d.FirstClickedAt), tsIn(d.UnsubscribedAt),
 		tsInNN(d.CreatedAt), tsInNN(d.UpdatedAt),
 	}, nil
 }
@@ -72,17 +64,15 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	var campaign *string
 	var vars []byte
 	var lane, status, errClass int16
-	var nextNS, leaseNS, sentNS, finNS, openNS, clickNS, unsubNS int16
 	var nextAt time.Time
 	var leaseUntil, sentAt, finishedAt, opened, clicked, unsubscribed *time.Time
 	if err := r.Scan(
 		&d.ID, &d.TenantID, &campaign, &d.VersionID, &d.SenderID, &lane,
 		&d.Priority, &status, &d.Email, &d.EmailNorm, &d.Name, &d.Locale,
 		&vars, &d.UnsubscribeURL, &d.AttemptCount, &d.RetryGen,
-		&nextAt, &nextNS, &d.LeaseOwner, &leaseUntil, &leaseNS,
+		&nextAt, &d.LeaseOwner, &leaseUntil,
 		&errClass, &d.LastSMTPCode, &d.LastError, &d.MessageID,
-		&sentAt, &sentNS, &finishedAt, &finNS,
-		&opened, &openNS, &clicked, &clickNS, &unsubscribed, &unsubNS,
+		&sentAt, &finishedAt, &opened, &clicked, &unsubscribed,
 		&d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -91,13 +81,13 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	d.Lane = enumOut[store.Lane](lane)
 	d.Status = enumOut[store.DeliveryStatus](status)
 	d.LastErrorClass = enumOut[store.ErrorClass](errClass)
-	d.NextAttemptAt = tsOutNS(&nextAt, nextNS)
-	d.LeaseUntil = tsOutNS(leaseUntil, leaseNS)
-	d.SentAt = tsOutNS(sentAt, sentNS)
-	d.FinishedAt = tsOutNS(finishedAt, finNS)
-	d.FirstOpenedAt = tsOutNS(opened, openNS)
-	d.FirstClickedAt = tsOutNS(clicked, clickNS)
-	d.UnsubscribedAt = tsOutNS(unsubscribed, unsubNS)
+	d.NextAttemptAt = nextAt.UTC()
+	d.LeaseUntil = tsOut(leaseUntil)
+	d.SentAt = tsOut(sentAt)
+	d.FinishedAt = tsOut(finishedAt)
+	d.FirstOpenedAt = tsOut(opened)
+	d.FirstClickedAt = tsOut(clicked)
+	d.UnsubscribedAt = tsOut(unsubscribed)
 	d.CreatedAt, d.UpdatedAt = d.CreatedAt.UTC(), d.UpdatedAt.UTC()
 	return &d, jsonOut(vars, &d.Vars)
 }
@@ -124,6 +114,13 @@ func (r *deliveryRepo) InsertBatch(ctx context.Context, ds []store.Delivery) (in
 	if err := r.p.check(); err != nil {
 		return 0, err
 	}
+	// The whole batch is validated before anything is written, so a rejected
+	// chunk can be fixed and re-sent as a whole (store/delivery.go).
+	for i := range ds {
+		if ds[i].EmailNorm == "" {
+			return 0, fmt.Errorf("%w: delivery %d has no email_norm", store.ErrInvalid, i)
+		}
+	}
 	now := r.p.now()
 	rows := make([][]any, 0, len(ds))
 	// Collapse duplicates inside the batch: ON CONFLICT cannot see rows the
@@ -131,9 +128,6 @@ func (r *deliveryRepo) InsertBatch(ctx context.Context, ds []store.Delivery) (in
 	seen := make(map[string]bool, len(ds))
 	for i := range ds {
 		d := ds[i]
-		if d.EmailNorm == "" {
-			return 0, fmt.Errorf("%w: delivery %d has no email_norm", store.ErrInvalid, i)
-		}
 		if d.CampaignID != "" {
 			key := d.CampaignID + "\x00" + d.EmailNorm
 			if seen[key] {
@@ -338,7 +332,6 @@ func (r *deliveryRepo) Claim(ctx context.Context, req store.ClaimRequest) ([]sto
 		a.add(limitOrAll(req.Limit)) + " FOR UPDATE SKIP LOCKED) " +
 		"UPDATE delivery d SET status = 2, lease_owner = " + a.add(req.WorkerID) +
 		", lease_until = " + a.add(tsIn(leaseUntil)) +
-		", lease_until_ns = " + a.add(subMicro(leaseUntil)) +
 		", updated_at = " + a.add(tsInNN(req.Now)) +
 		" FROM c WHERE d.id = c.id RETURNING " + deliveryColsD
 
@@ -392,7 +385,6 @@ func (r *deliveryRepo) Complete(ctx context.Context, results []store.DeliveryRes
 	owners := make([]string, n)
 	statuses := make([]int16, n)
 	nextAt := make([]*time.Time, n)
-	nextNS := make([]int16, n)
 	classes := make([]int16, n)
 	codes := make([]int32, n)
 	errs := make([]string, n)
@@ -404,7 +396,6 @@ func (r *deliveryRepo) Complete(ctx context.Context, results []store.DeliveryRes
 		owners[i] = res.LeaseOwner
 		statuses[i] = i16(res.NewStatus)
 		nextAt[i] = tsIn(res.NextAttemptAt)
-		nextNS[i] = subMicro(res.NextAttemptAt)
 		classes[i] = i16(res.ErrorClass)
 		codes[i] = smtpCode(res.SMTPCode)
 		errs[i] = res.Error
@@ -428,27 +419,22 @@ UPDATE delivery d SET
     message_id       = CASE WHEN r.message_id <> '' THEN r.message_id ELSE d.message_id END,
     attempt_count    = d.attempt_count + CASE WHEN r.increment THEN 1 ELSE 0 END,
     next_attempt_at  = COALESCE(r.next_attempt_at, d.next_attempt_at),
-    next_attempt_at_ns = CASE WHEN r.next_attempt_at IS NULL
-                              THEN d.next_attempt_at_ns ELSE r.next_attempt_ns END,
-    sent_at          = CASE WHEN r.new_status = 4 AND d.sent_at IS NULL THEN $12 ELSE d.sent_at END,
-    sent_at_ns       = CASE WHEN r.new_status = 4 AND d.sent_at IS NULL THEN $13 ELSE d.sent_at_ns END,
-    finished_at      = CASE WHEN r.terminal THEN $12 ELSE d.finished_at END,
-    finished_at_ns   = CASE WHEN r.terminal THEN $13 ELSE d.finished_at_ns END,
+    sent_at          = CASE WHEN r.new_status = 4 AND d.sent_at IS NULL THEN $11 ELSE d.sent_at END,
+    finished_at      = CASE WHEN r.terminal THEN $11 ELSE d.finished_at END,
     lease_owner      = '',
     lease_until      = NULL,
-    lease_until_ns   = 0,
-    updated_at       = $12
-FROM unnest($1::text[], $2::text[], $3::smallint[], $4::timestamptz[], $5::smallint[],
-            $6::smallint[], $7::int[], $8::text[], $9::text[], $10::bool[], $11::bool[])
-     AS r(delivery_id, lease_owner, new_status, next_attempt_at, next_attempt_ns,
+    updated_at       = $11
+FROM unnest($1::text[], $2::text[], $3::smallint[], $4::timestamptz[],
+            $5::smallint[], $6::int[], $7::text[], $8::text[], $9::bool[], $10::bool[])
+     AS r(delivery_id, lease_owner, new_status, next_attempt_at,
           error_class, smtp_code, error_text, message_id, increment, terminal)
-WHERE d.id = r.delivery_id AND d.tenant_id = $14
+WHERE d.id = r.delivery_id AND d.tenant_id = $12
   AND r.lease_owner <> '' AND d.lease_owner = r.lease_owner
 RETURNING d.id`
 
-	rows, err := tx.Query(ctx, q, ids, owners, statuses, nextAt, nextNS,
+	rows, err := tx.Query(ctx, q, ids, owners, statuses, nextAt,
 		classes, codes, errs, msgIDs, incs, terms,
-		tsInNN(now), subMicro(now), r.tenant)
+		tsInNN(now), r.tenant)
 	if err != nil {
 		return mapErr(err)
 	}
@@ -489,11 +475,9 @@ func (r *deliveryRepo) MarkSent(ctx context.Context, id, owner, messageID string
 		return err
 	}
 	const q = `UPDATE delivery SET status = 4, message_id = $3,
-	    sent_at = $4, sent_at_ns = $5, finished_at = $4, finished_at_ns = $5,
-	    updated_at = $4
-	  WHERE id = $1 AND tenant_id = $2 AND status = 2 AND lease_owner <> '' AND lease_owner = $6`
-	tag, err := r.p.pool.Exec(ctx, q, id, r.tenant, messageID,
-		tsInNN(at), subMicro(at), owner)
+	    sent_at = $4, finished_at = $4, updated_at = $4
+	  WHERE id = $1 AND tenant_id = $2 AND status = 2 AND lease_owner <> '' AND lease_owner = $5`
+	tag, err := r.p.pool.Exec(ctx, q, id, r.tenant, messageID, tsInNN(at), owner)
 	if err != nil {
 		return mapErr(err)
 	}
@@ -525,9 +509,8 @@ func (r *deliveryRepo) ReleaseExpiredLeases(ctx context.Context, now time.Time, 
 		" AND status = 2 AND lease_until IS NOT NULL AND lease_until < " + a.add(tsInNN(now)) +
 		" ORDER BY id LIMIT " + a.add(limitOrAll(limit)) + " FOR UPDATE SKIP LOCKED) " +
 		"UPDATE delivery d SET status = CASE WHEN d.attempt_count > 0 THEN 3 ELSE 1 END," +
-		" lease_owner = '', lease_until = NULL, lease_until_ns = 0," +
+		" lease_owner = '', lease_until = NULL," +
 		" next_attempt_at = " + a.add(tsInNN(now)) +
-		", next_attempt_at_ns = " + a.add(subMicro(now)) +
 		", updated_at = " + a.add(tsInNN(now)) +
 		" FROM c WHERE d.id = c.id"
 	tag, err := r.p.pool.Exec(ctx, q, a.v...)
@@ -554,8 +537,7 @@ func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, fr
 		" ORDER BY id LIMIT " + a.add(limitOrAll(limit)) + " FOR UPDATE SKIP LOCKED) " +
 		"UPDATE delivery d SET status = " + a.add(i16(to))
 	if to.Terminal() {
-		q += ", finished_at = " + a.add(tsInNN(now)) +
-			", finished_at_ns = " + a.add(subMicro(now))
+		q += ", finished_at = " + a.add(tsInNN(now))
 	}
 	q += ", updated_at = " + a.add(tsInNN(now)) + " FROM c WHERE d.id = c.id"
 	tag, err := r.p.pool.Exec(ctx, q, a.v...)
@@ -587,9 +569,8 @@ func (r *deliveryRepo) Requeue(ctx context.Context, f store.RetryFilter, limit i
 		" ORDER BY id LIMIT " + a.add(limitOrAll(limit)) + " FOR UPDATE SKIP LOCKED) " +
 		"UPDATE delivery d SET status = 1, retry_gen = d.retry_gen + 1," +
 		" next_attempt_at = " + a.add(tsInNN(f.Now)) +
-		", next_attempt_at_ns = " + a.add(subMicro(f.Now)) +
-		", lease_owner = '', lease_until = NULL, lease_until_ns = 0," +
-		" finished_at = NULL, finished_at_ns = 0, updated_at = " + a.add(tsInNN(f.Now)) +
+		", lease_owner = '', lease_until = NULL," +
+		" finished_at = NULL, updated_at = " + a.add(tsInNN(f.Now)) +
 		" FROM c WHERE d.id = c.id"
 	tag, err := r.p.pool.Exec(ctx, q, a.v...)
 	if err != nil {
@@ -605,9 +586,9 @@ func (r *deliveryRepo) setFirst(ctx context.Context, col, id string, at time.Tim
 	if err := r.p.check(); err != nil {
 		return false, err
 	}
-	q := fmt.Sprintf(`UPDATE delivery SET %s = $3, %s_ns = $4, updated_at = $3
-	    WHERE id = $1 AND tenant_id = $2 AND %s IS NULL`, col, col, col)
-	tag, err := r.p.pool.Exec(ctx, q, id, r.tenant, tsInNN(at), subMicro(at))
+	q := fmt.Sprintf(`UPDATE delivery SET %s = $3, updated_at = $3
+	    WHERE id = $1 AND tenant_id = $2 AND %s IS NULL`, col, col)
+	tag, err := r.p.pool.Exec(ctx, q, id, r.tenant, tsInNN(at))
 	if err != nil {
 		return false, mapErr(err)
 	}

@@ -230,7 +230,7 @@ func (r *suppressionRepo) IsSuppressed(ctx context.Context, emailNorm string, no
 	s.Reason = store.SuppressionReason(reason)
 	s.CreatedAt = s.CreatedAt.UTC()
 	s.ExpiresAt = tsOut(expires)
-	if !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(now) {
+	if !s.ExpiresAt.IsZero() && !s.ExpiresAt.After(store.TruncateTime(now)) {
 		return false, &s, nil
 	}
 	return true, &s, nil

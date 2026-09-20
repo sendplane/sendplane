@@ -3,7 +3,9 @@
 // exists so domain logic can be unit tested without a database.
 //
 // It is not a persistence layer: everything lives in mutex-protected maps and
-// is lost when the process exits.
+// is lost when the process exits. It still applies the contract's timestamp
+// resolution (store.TruncateTime) on write, so code written against memstore
+// does not silently rely on a precision a real database cannot keep.
 package memstore
 
 import (
@@ -48,7 +50,9 @@ func New(opts ...Option) *Provider {
 	return p
 }
 
-func (p *Provider) now() time.Time { return p.clock().UTC() }
+// now is the clock stamp memstore writes on rows, already reduced to the
+// resolution the contract stores (store/doc.go).
+func (p *Provider) now() time.Time { return store.TruncateTime(p.clock()) }
 
 func (p *Provider) check() error {
 	if p.closed {
@@ -196,6 +200,7 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 		version: func(v *store.Transport) *int64 { return &v.Version },
 		created: func(v *store.Transport) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.Transport) *time.Time { return &v.UpdatedAt },
+		times:   func(v *store.Transport) []*time.Time { return []*time.Time{&v.StatusChangedAt} },
 	}}
 	s.senders = &table[store.Sender]{p: p, tenant: tenant, rows: d.senders, m: meta[store.Sender]{
 		id:      func(v *store.Sender) *string { return &v.ID },
@@ -203,6 +208,7 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 		version: func(v *store.Sender) *int64 { return &v.Version },
 		created: func(v *store.Sender) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.Sender) *time.Time { return &v.UpdatedAt },
+		times:   func(v *store.Sender) []*time.Time { return []*time.Time{&v.HealthCheckedAt} },
 	}}
 	s.domains = &table[store.SendingDomain]{p: p, tenant: tenant, rows: d.domains, m: meta[store.SendingDomain]{
 		id:      func(v *store.SendingDomain) *string { return &v.ID },
@@ -210,6 +216,7 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 		version: func(v *store.SendingDomain) *int64 { return &v.Version },
 		created: func(v *store.SendingDomain) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.SendingDomain) *time.Time { return &v.UpdatedAt },
+		times:   func(v *store.SendingDomain) []*time.Time { return []*time.Time{&v.HealthCheckedAt} },
 	}}
 	s.probeMailboxes = &table[store.ProbeMailbox]{p: p, tenant: tenant, rows: d.probeMailboxes, m: meta[store.ProbeMailbox]{
 		id:      func(v *store.ProbeMailbox) *string { return &v.ID },
@@ -236,6 +243,7 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 		id:      func(v *store.ProbeRun) *string { return &v.ID },
 		tenant:  func(v *store.ProbeRun) *string { return &v.TenantID },
 		created: func(v *store.ProbeRun) *time.Time { return &v.CreatedAt },
+		times:   func(v *store.ProbeRun) []*time.Time { return []*time.Time{&v.StartedAt, &v.ReceivedAt} },
 	}}}
 	s.versions = &versionRepo{table[store.MessageVersion]{p: p, tenant: tenant, rows: d.versions, m: meta[store.MessageVersion]{
 		id:      func(v *store.MessageVersion) *string { return &v.ID },
@@ -248,11 +256,15 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 		version: func(v *store.Campaign) *int64 { return &v.Version },
 		created: func(v *store.Campaign) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.Campaign) *time.Time { return &v.UpdatedAt },
+		times: func(v *store.Campaign) []*time.Time {
+			return []*time.Time{&v.ScheduleAt, &v.StartedAt, &v.CompletedAt}
+		},
 	}}}
 	s.bounces = &bounceRepo{table[store.BounceEvent]{p: p, tenant: tenant, rows: d.bounces, m: meta[store.BounceEvent]{
 		id:      func(v *store.BounceEvent) *string { return &v.ID },
 		tenant:  func(v *store.BounceEvent) *string { return &v.TenantID },
 		created: func(v *store.BounceEvent) *time.Time { return &v.CreatedAt },
+		times:   func(v *store.BounceEvent) []*time.Time { return []*time.Time{&v.ReceivedAt} },
 	}}}
 	s.settings = &settingsRepo{s}
 	s.chunks = &chunkRepo{s}
