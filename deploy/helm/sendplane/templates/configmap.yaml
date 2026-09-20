@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sendplane.configMapName" . }}
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+data:
+  # ${VAR} references (SENDPLANE_STORE_DSN, SENDPLANE_SECRETS_KEY,
+  # SENDPLANE_WEBHOOK_SECRET) are expanded by cmd/sendplane itself against the
+  # container environment, which templates/secret.yaml populates from the
+  # DSN/keys Secret. Nothing in the cluster needs to template this file.
+  config.yaml: |
+    {{- .Values.config | toYaml | nindent 4 }}

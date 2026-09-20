@@ -1,0 +1,164 @@
+# Default values for the sendplane chart. See deploy/helm/sendplane/README.md
+# for a short overview (Korean) and cmd/sendplane/config.example.yaml for the
+# full config.yaml schema that .Values.config mirrors.
+
+image:
+  repository: sendplane
+  # Defaults to .Chart.appVersion when unset.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# --- control: API + leader loops (scheduler, finalizer, canceller, reaper,
+# retention, outbox). Runs >=2 replicas behind a PDB so the leader lease
+# always has a standby (docs/architecture.md 14). -----------------------
+control:
+  roles: control
+  replicas: 2
+  listen: 8080
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  service:
+    port: 80
+  pdb:
+    enabled: true
+    minAvailable: 1
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    # API host: the REST console/API (sp.Handler()).
+    apiHost: ""
+    # trackingDomain host: open pixel / click / unsubscribe links embedded in
+    # sent mail (architecture 9). Routed to the same control Service as the
+    # API, since both are served by the same Handler().
+    trackingHost: ""
+    tls: []
+    # - secretName: sendplane-tls
+    #   hosts: [api.example.com, track.example.com]
+
+# --- sender: claim/render/SMTP loop. Scales on load, transactional lane is
+# always served first (architecture 8.1). --------------------------------
+sender:
+  roles: sender
+  replicas: 2
+  listen: 8080
+  resources:
+    requests: { cpu: 200m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  autoscaling:
+    # HorizontalPodAutoscaler on CPU. See templates/hpa-sender.yaml for a
+    # commented-out KEDA ScaledObject alternative that scales on a Prometheus
+    # queue-depth query instead of CPU, which tracks send backlog more
+    # directly than CPU does.
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+# --- bounce: IMAP/POP3 bounce mailbox poller. Single replica: it owns no
+# leader lease of its own (RunBounce is one loop, not a leader election). ---
+bounce:
+  enabled: true
+  roles: bounce
+  replicas: 1
+  listen: 8080
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# --- migrate: runs `sendplane --migrate` as a Helm pre-install/pre-upgrade
+# hook Job, so the schema is always current before any role starts. ---------
+migrate:
+  enabled: true
+  backoffLimit: 3
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+serviceMonitor:
+  # Requires the Prometheus Operator CRDs. sendplane's Metrics interface
+  # (host.Metrics) needs a Prometheus-exporting adapter wired in by whoever
+  # builds Options.Metrics; this only wires the Kubernetes scrape config.
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+  labels: {}
+
+# config.yaml, rendered verbatim into the ConfigMap
+# (templates/configmap.yaml) and mounted at /etc/sendplane/config.yaml. Any
+# ${VAR} value is expanded by the binary itself (os.ExpandEnv) against the
+# container's environment, which is how secrets.storeDSN /
+# secrets.secretsKey / secrets.webhookSecret below reach it without a second
+# templating pass: the Secret sets the env var, the ConfigMap references it.
+config:
+  store:
+    driver: postgres        # postgres | mongo
+    dsn: ${SENDPLANE_STORE_DSN}
+    mongo_db: sendplane     # only used when driver is mongo
+  secrets:
+    key: ${SENDPLANE_SECRETS_KEY}
+  auth:
+    mode: apikey             # apikey | jwt | none ("none" is for local dev only)
+    api_keys: []
+    # - key_hash: <hex sha256 of the key>
+    #   tenant: acme
+    #   principal: acme-ci
+    #   roles: [admin]
+    jwt:
+      issuer: ""
+      audience: ""
+      jwks_url: ""
+      tenant_claim: tenant
+      roles_claim: roles
+  authz:
+    mode: allow_all          # allow_all | roles
+    roles: {}
+  events:
+    webhook:
+      url: ""
+      secret: ${SENDPLANE_WEBHOOK_SECRET}
+      timeout: 10s
+      allow_private_networks: false
+  sender:
+    lanes:
+      transactional: 8
+      bulk: 32
+      probe: 1
+    claim_batch: 200
+    lease_for: 5m
+    ehlo_name: ""
+    default_rate_per_second: 0
+  limits: {}
+  log:
+    level: info
+    format: json
+
+# Secret values. Either point existingSecret at a Secret you manage yourself
+# (it must define the same keys: SENDPLANE_STORE_DSN, SENDPLANE_SECRETS_KEY,
+# SENDPLANE_WEBHOOK_SECRET), or fill the plaintext fields below and let the
+# chart create one (templates/secret.yaml) — fine for a values file kept out
+# of version control (e.g. via --set-file or a sealed-secrets/external-secrets
+# pipeline that renders this chart), not for one committed as-is.
+secrets:
+  existingSecret: ""
+  storeDSN: ""
+  secretsKey: ""
+  webhookSecret: ""

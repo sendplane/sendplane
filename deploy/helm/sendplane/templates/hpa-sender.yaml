@@ -1,0 +1,53 @@
+{{- if .Values.sender.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sendplane.fullname" . }}-sender
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sender
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sendplane.fullname" . }}-sender
+  minReplicas: {{ .Values.sender.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.sender.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.sender.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+
+# --- KEDA alternative (not applied by this chart) ---------------------
+#
+# CPU is a poor proxy for send backlog: a sender can be CPU-idle while a
+# campaign queues thousands of deliveries (MX slow to accept, rate-limited
+# transport, ...). If KEDA is installed, a ScaledObject on
+# sendplane_delivery_queue_depth (a metric the control plane's Metrics sink
+# would need to publish; see docs/architecture.md 12) tracks that directly:
+#
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: {{ include "sendplane.fullname" . }}-sender
+# spec:
+#   scaleTargetRef:
+#     name: {{ include "sendplane.fullname" . }}-sender
+#   minReplicaCount: {{ .Values.sender.autoscaling.minReplicas }}
+#   maxReplicaCount: {{ .Values.sender.autoscaling.maxReplicas }}
+#   triggers:
+#     - type: prometheus
+#       metadata:
+#         serverAddress: http://prometheus-operated.monitoring:9090
+#         metricName: sendplane_queue_depth
+#         query: sum(sendplane_delivery_queue_depth{lane="bulk"})
+#         threshold: "5000"
+#
+# Using it instead of the HorizontalPodAutoscaler above: set
+# sender.autoscaling.enabled to false (so this chart does not also create an
+# HPA fighting KEDA's own HPA) and apply the ScaledObject separately, or fork
+# this template.

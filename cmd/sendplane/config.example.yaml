@@ -1,0 +1,79 @@
+# Example configuration for cmd/sendplane. Copy, edit, and point --config (or
+# SENDPLANE_CONFIG) at it. Every ${VAR} below is expanded against the process
+# environment before the YAML is parsed (os.ExpandEnv), which is how the Helm
+# chart injects the DSN and the secrets key from a Kubernetes Secret without a
+# separate templating pass — see deploy/helm/sendplane/templates/configmap.yaml
+# and secret.yaml.
+#
+# Every field has a runtime default except store.driver/dsn, secrets.key and
+# whatever auth.mode you pick requires; see cmd/sendplane/config.go for the
+# exact defaults.
+
+store:
+  # "postgres" or "mongo".
+  driver: postgres
+  dsn: ${SENDPLANE_STORE_DSN}
+  # Only used when driver is "mongo".
+  mongo_db: sendplane
+
+secrets:
+  # 32 raw bytes, base64-encoded (AES-256-GCM). Generate one with:
+  #   openssl rand -base64 32
+  key: ${SENDPLANE_SECRETS_KEY}
+
+auth:
+  # "apikey", "jwt" or "none". "none" authenticates every request as a fixed
+  # local-dev principal and logs a warning on startup — do not use it outside
+  # local development.
+  mode: apikey
+  api_keys:
+    - key_hash: ${SENDPLANE_API_KEY_HASH} # hex(sha256(the actual key)), never the key itself
+      tenant: acme
+      principal: acme-ci
+      roles: [admin]
+  jwt:
+    issuer: https://auth.example.com/
+    audience: sendplane
+    jwks_url: https://auth.example.com/.well-known/jwks.json
+    tenant_claim: tenant   # claim name that holds the tenant ID
+    roles_claim: roles     # claim name that holds a []string or space-separated string
+
+authz:
+  # "allow_all" (default) or "roles".
+  mode: roles
+  roles:
+    admin:  ["*"]
+    editor: ["template.*", "campaign.read", "campaign.write"]
+    sender: ["campaign.send", "message.send"]
+
+events:
+  webhook:
+    url: https://app.example.com/hooks/sendplane
+    secret: ${SENDPLANE_WEBHOOK_SECRET} # HMAC-SHA256 key for the X-Sendplane-Signature header
+    timeout: 10s
+    # SSRF guard: reject destinations that resolve to a loopback/private/
+    # link-local address unless this is set. Leave it false in production.
+    allow_private_networks: false
+
+sender:
+  # Defaults to the pod hostname; set explicitly if you need a stable ID
+  # across restarts (it is a lease owner, see docs/architecture.md 8.1).
+  worker_id: ""
+  lanes:
+    transactional: 8
+    bulk: 32
+    probe: 1
+  claim_batch: 200
+  lease_for: 5m
+  ehlo_name: mail.example.com
+  default_rate_per_second: 0 # 0 = unlimited, unless the transport configures its own rate
+
+limits:
+  max_recipients_per_campaign: 10000000
+  max_vars_bytes: 8192
+  max_body_bytes: 2097152
+  max_recipient_line_bytes: 65536
+
+log:
+  level: info  # debug | info | warn | error
+  format: json # json | text

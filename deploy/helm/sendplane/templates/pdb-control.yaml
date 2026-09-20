@@ -1,0 +1,15 @@
+{{- if .Values.control.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sendplane.fullname" . }}-control
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+spec:
+  minAvailable: {{ .Values.control.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "sendplane.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: control
+{{- end }}

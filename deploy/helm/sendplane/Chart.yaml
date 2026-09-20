@@ -1,0 +1,19 @@
+apiVersion: v2
+name: sendplane
+description: >-
+  sendplane reference deployment: control (API + leader loops), sender
+  (claim/render/SMTP) and bounce (IMAP/POP3 poller) roles of the single
+  sendplane image (docs/architecture.md 14, ADR-0001).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/sendplane/sendplane
+keywords:
+  - email
+  - smtp
+  - mail
+  - campaign
+maintainers:
+  - name: sendplane
+sources:
+  - https://github.com/sendplane/sendplane

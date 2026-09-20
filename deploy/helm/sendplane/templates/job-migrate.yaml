@@ -1,0 +1,41 @@
+{{- if .Values.migrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sendplane.fullname" . }}-migrate
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    # Runs store.Provider.Migrate before any control/sender/bounce pod starts,
+    # both on first install and on every upgrade (a new sendplane version may
+    # ship a new migration). before-hook-creation removes the previous run's
+    # Job first, so this name can stay fixed across revisions.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "sendplane.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: {{ include "sendplane.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/sendplane/config.yaml
+            - --migrate
+          envFrom:
+            {{- include "sendplane.envFrom" . | nindent 12 }}
+          volumeMounts:
+            {{- include "sendplane.configVolumeMount" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+      volumes:
+        {{- include "sendplane.configVolume" . | nindent 8 }}
+{{- end }}

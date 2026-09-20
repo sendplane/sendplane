@@ -1,0 +1,44 @@
+sendplane is deployed as {{ include "sendplane.fullname" . }}.
+
+Roles running:
+  control : {{ .Values.control.replicas }} replica(s){{ if .Values.control.pdb.enabled }}, PDB minAvailable={{ .Values.control.pdb.minAvailable }}{{ end }}
+  sender  : {{ if .Values.sender.autoscaling.enabled }}autoscaling {{ .Values.sender.autoscaling.minReplicas }}-{{ .Values.sender.autoscaling.maxReplicas }} on CPU{{ else }}{{ .Values.sender.replicas }} replica(s){{ end }}
+  bounce  : {{ if .Values.bounce.enabled }}{{ .Values.bounce.replicas }} replica(s){{ else }}disabled{{ end }}
+
+{{- if .Values.migrate.enabled }}
+A pre-install/pre-upgrade Job ({{ include "sendplane.fullname" . }}-migrate) ran
+store migrations before any of the above started.
+{{- else }}
+migrate.enabled is false: nobody ran store migrations for this release. Run
+one of the pods with `sendplane --migrate`, or set migrate.enabled=true.
+{{- end }}
+
+Check rollout status:
+  kubectl rollout status deployment/{{ include "sendplane.fullname" . }}-control
+  kubectl rollout status deployment/{{ include "sendplane.fullname" . }}-sender
+{{- if .Values.bounce.enabled }}
+  kubectl rollout status deployment/{{ include "sendplane.fullname" . }}-bounce
+{{- end }}
+
+{{- if .Values.control.ingress.enabled }}
+
+Ingress hosts:
+{{- if .Values.control.ingress.apiHost }}
+  API      : http{{ if .Values.control.ingress.tls }}s{{ end }}://{{ .Values.control.ingress.apiHost }}
+{{- end }}
+{{- if .Values.control.ingress.trackingHost }}
+  tracking : http{{ if .Values.control.ingress.tls }}s{{ end }}://{{ .Values.control.ingress.trackingHost }}
+{{- end }}
+{{- else }}
+
+control.ingress.enabled is false: reach the API through
+  kubectl port-forward svc/{{ include "sendplane.fullname" . }}-control 8080:{{ .Values.control.service.port }}
+{{- end }}
+
+{{- if eq (.Values.secrets.existingSecret | default "") "" }}
+
+WARNING: secrets.existingSecret is unset, so this release created a Secret
+from secrets.storeDSN / secrets.secretsKey / secrets.webhookSecret in your
+values. Prefer an existingSecret (sealed-secrets, external-secrets, ...) for
+anything beyond local testing.
+{{- end }}

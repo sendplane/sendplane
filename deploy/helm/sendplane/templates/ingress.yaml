@@ -1,0 +1,53 @@
+{{/*
+Both hosts route to the same control Service: the tracking domain's open
+pixel / click / unsubscribe links (architecture 9) are served by the same
+sp.Handler() as the REST API, just under a different Host header.
+*/}}
+{{- if .Values.control.ingress.enabled }}
+{{- $fullName := include "sendplane.fullname" . }}
+{{- $svcPort := .Values.control.service.port }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}-control
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+  {{- with .Values.control.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.control.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.control.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- if .Values.control.ingress.apiHost }}
+    - host: {{ .Values.control.ingress.apiHost }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-control
+                port:
+                  number: {{ $svcPort }}
+    {{- end }}
+    {{- if .Values.control.ingress.trackingHost }}
+    - host: {{ .Values.control.ingress.trackingHost }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-control
+                port:
+                  number: {{ $svcPort }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,63 @@
+{{- if .Values.bounce.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sendplane.fullname" . }}-bounce
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bounce
+spec:
+  replicas: {{ .Values.bounce.replicas }}
+  selector:
+    matchLabels:
+      {{- include "sendplane.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: bounce
+  template:
+    metadata:
+      labels:
+        {{- include "sendplane.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bounce
+      {{- with .Values.bounce.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: sendplane
+          image: {{ include "sendplane.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/sendplane/config.yaml
+            - --roles={{ .Values.bounce.roles }}
+            - --listen=:{{ .Values.bounce.listen }}
+          ports:
+            # No inbound traffic is routed here (no Service for bounce);
+            # this exists only for the kubelet's own /healthz probe below.
+            - name: http
+              containerPort: {{ .Values.bounce.listen }}
+          envFrom:
+            {{- include "sendplane.envFrom" . | nindent 12 }}
+          volumeMounts:
+            {{- include "sendplane.configVolumeMount" . | nindent 12 }}
+          {{- include "sendplane.probes" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.bounce.resources | nindent 12 }}
+      volumes:
+        {{- include "sendplane.configVolume" . | nindent 8 }}
+      {{- with .Values.bounce.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bounce.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.bounce.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

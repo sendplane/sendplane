@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sendplane.fullname" . }}-sender
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sender
+spec:
+  {{- if not .Values.sender.autoscaling.enabled }}
+  replicas: {{ .Values.sender.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "sendplane.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: sender
+  template:
+    metadata:
+      labels:
+        {{- include "sendplane.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: sender
+      {{- with .Values.sender.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: sendplane
+          image: {{ include "sendplane.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/sendplane/config.yaml
+            - --roles={{ .Values.sender.roles }}
+            - --listen=:{{ .Values.sender.listen }}
+          ports:
+            # No inbound traffic is routed here (no Service for sender);
+            # this exists only for the kubelet's own /healthz probe below.
+            - name: http
+              containerPort: {{ .Values.sender.listen }}
+          envFrom:
+            {{- include "sendplane.envFrom" . | nindent 12 }}
+          volumeMounts:
+            {{- include "sendplane.configVolumeMount" . | nindent 12 }}
+          {{- include "sendplane.probes" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.sender.resources | nindent 12 }}
+      volumes:
+        {{- include "sendplane.configVolume" . | nindent 8 }}
+      {{- with .Values.sender.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.sender.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.sender.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

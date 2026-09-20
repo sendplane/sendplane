@@ -1,8 +1,20 @@
 COMPOSE ?= docker compose
-.PHONY: build test test-store lint vet fmt-check dev-up dev-down ci
+.PHONY: build gen gen-check test test-store lint vet fmt-check dev-up dev-down ci docker
 
 build:
 	go build ./...
+
+# internal/api/gen.go is generated from api/openapi.yaml, which is the single
+# source of truth (architecture 15). The generator is pinned by the `tool`
+# directive in go.mod, so this is reproducible without installing anything.
+gen:
+	go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
+	gofmt -w internal/api/gen.go
+
+# CI fails on drift between the spec and the checked-in generated code.
+gen-check: gen
+	@git diff --exit-code -- internal/api/gen.go || \
+		(echo "internal/api/gen.go is stale; run make gen and commit the result"; exit 1)
 
 test:
 	go test -race ./...
@@ -28,4 +40,9 @@ dev-up:
 dev-down:
 	$(COMPOSE) -f deploy/dev/docker-compose.yml down
 
-ci: fmt-check vet lint test
+# Builds the single reference image (cmd/sendplane + cmd/chaos-smtp;
+# deploy/dev/Dockerfile) that deploy/helm/sendplane deploys.
+docker:
+	docker build -f deploy/dev/Dockerfile -t sendplane:dev .
+
+ci: gen-check fmt-check vet lint test

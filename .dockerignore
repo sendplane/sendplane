@@ -1,0 +1,44 @@
+# Keep the build context to what `go build ./cmd/...` actually needs: Go
+# sources, go.mod/go.sum, and anything they embed. Everything else here only
+# slows `docker build` down or risks leaking local state into the image.
+
+.git/
+.github/
+
+# Deploy tooling is not part of the image; the Helm chart *deploys* it.
+deploy/helm/
+deploy/dev/docker-compose.yml
+
+# Docs, ADRs, license/readmes: not needed to build a binary.
+docs/
+*.md
+LICENSE
+
+# Frontend workspace (Vue/Vite/pnpm) is a separate deployable, not linked
+# into the Go binaries.
+web/
+node_modules/
+**/node_modules/
+**/dist/
+
+# Local dev / editor / CI state.
+.env*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.memory/
+.golangci.yml
+.editorconfig
+
+# Build/test artifacts that should never be baked into an image.
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+/dist/
+/bin/
