@@ -1,0 +1,16 @@
+# oapi-codegen configuration for api/openapi.yaml.
+#
+#   go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
+#
+# The spec is the single source of truth (architecture 15): CI regenerates and
+# fails on drift.
+package: api
+output: internal/api/gen.go
+generate:
+  models: true
+  chi-server: true
+  strict-server: true
+  embedded-spec: false
+output-options:
+  skip-prune: true   # RecipientLine is reachable only via x-ndjson-line-schema; pruning would drop it
+  nullable-type: true

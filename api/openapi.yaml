@@ -1,0 +1,3595 @@
+openapi: 3.1.0
+info:
+  title: sendplane API
+  version: 0.1.0
+  summary: Mail sending engine REST API.
+  description: |
+    sendplane is a library-first mail sending engine (see docs/architecture.md).
+    The host application owns accounts, RBAC and the unsubscribe destination;
+    sendplane owns templates, campaigns, deliveries, bounces and tracking.
+
+    ## Mounting
+
+    `Sendplane.Handler()` serves everything below `/api/v1` plus the public
+    tracking routes below `/t`. The host mounts that handler on its own mux, so
+    the origin in `servers` is the host's.
+
+    ## Tenancy
+
+    A tenant is never a path parameter. The host's `TenantResolver` derives it
+    from the authenticated principal or the request, and the store layer is
+    bound to it (ADR-0001, ADR-0006). Every object in this API therefore belongs
+    to the caller's tenant implicitly.
+
+    ## Authentication
+
+    Authentication is host-provided. The reference binary ships an API-key and a
+    JWT `Authenticator`, so the spec declares a generic `bearerAuth` and
+    `apiKeyAuth` scheme; a host that plugs in its own `Authenticator` may accept
+    something else entirely. Both schemes are optional at the document level and
+    the public tracking routes clear `security` explicitly.
+
+    ## Authorization
+
+    Every operation declares the closed-set `Action` it requires through the
+    `x-sendplane-action` extension (architecture 3). The host's `Authorizer`
+    maps those strings onto its own RBAC. `none` marks a route that skips
+    `Authorize` because it is public.
+
+    | Action | Covers |
+    | --- | --- |
+    | `settings.read` / `settings.write` | tenant settings |
+    | `sender.read` / `sender.write` | transports, senders, sending domains, probe mailboxes, probe runs |
+    | `template.read` / `template.write` | layouts, templates, i18n bundles, previews, publishes, message versions |
+    | `campaign.read` / `campaign.write` | campaign CRUD, recipient ingest, link report, unsubscribe notifications |
+    | `campaign.send` | start, pause, resume, cancel, bulk retry |
+    | `message.send` | transactional send |
+    | `delivery.read` | deliveries, attempts, bounces |
+    | `delivery.write` | single-delivery retry and unsubscribe notification |
+    | `suppression.read` / `suppression.write` | suppression list |
+    | `event.read` / `event.write` | event outbox listing and replay |
+    | `none` | public tracking routes and the liveness probe |
+
+    ## Pagination
+
+    List endpoints are cursor paginated: `limit` (1-1000, default 50) and
+    `cursor`, answering `{ "items": [...], "next_cursor": "..." }`.
+    `next_cursor` is absent or empty on the last page.
+
+    ## Optimistic concurrency
+
+    Mutable objects carry a monotonically increasing `version`. A `PUT` must
+    echo the version it read; a mismatch answers `409` with code
+    `version_conflict`.
+
+    ## Idempotency
+
+    `POST /messages` and `POST /campaigns/{campaignId}/recipients` accept an
+    `Idempotency-Key` header. Replaying a completed request returns the stored
+    result instead of sending again (architecture 7.2).
+
+    ## Secrets
+
+    SMTP passwords, DKIM private keys, IMAP passwords and tracking signing
+    secrets are `writeOnly`: they are encrypted at rest by the host's
+    `SecretCipher` and never appear in a response. A `has_*` boolean reports
+    whether one is set.
+
+    ## Limits
+
+    `Limits` caps recipients per campaign, body size and per-recipient `vars`
+    size (architecture 16). A request over a transport-level size cap is
+    rejected with `413`; a request that parses but breaks a configured limit is
+    rejected with `422` and code `limit_exceeded`.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  contact:
+    name: sendplane
+    url: https://github.com/joseph/sendplane
+
+servers:
+  - url: '{origin}'
+    description: |
+      The host application's own origin. sendplane has no origin of its own: the
+      host mounts `Sendplane.Handler()` on its mux. The public tracking routes
+      below `/t` are additionally reachable through the tenant's
+      `tracking_domain`, which must route to the same handler.
+    variables:
+      origin:
+        default: https://app.your-host.tld
+        description: Scheme and authority the sendplane handler is mounted under.
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+tags:
+  - name: Tenant Settings
+    description: Retry policy, retention, suppression, unsubscribe mode and tracking configuration.
+  - name: Transports
+    description: SMTP accounts, their rate limits and circuit state.
+  - name: Senders
+    description: From identities bound to a transport and a sending domain.
+  - name: Sending Domains
+    description: DKIM material, return-path domain and observed outbound IPs.
+  - name: Probe Mailboxes
+    description: IMAP accounts loopback probe mail is recovered from.
+  - name: Probe Runs
+    description: Loopback probe history and manual triggers (architecture 11).
+  - name: Layouts
+    description: Reusable wrappers with a content slot and their own i18n bundle.
+  - name: Templates
+    description: Editable message sources, their i18n bundles, previews and publishes.
+  - name: Message Versions
+    description: Immutable publish snapshots that sending actually uses.
+  - name: Campaigns
+    description: Bulk sends, recipient ingest and lifecycle control.
+  - name: Deliveries
+    description: One recipient of one message version, plus its attempt history.
+  - name: Messages (transactional)
+    description: One-off sends that bypass campaigns.
+  - name: Suppressions
+    description: Opt-in built-in do-not-send list (ADR-0008).
+  - name: Bounces
+    description: Parsed DSNs and feedback reports (architecture 10).
+  - name: Events
+    description: Event outbox listing, dead letters and replay (architecture 12).
+  - name: Tracking (public)
+    description: |
+      Unauthenticated routes the tenant's `tracking_domain` points at
+      (architecture 9.1). The token carries the delivery, the interaction kind
+      and, for clicks, the destination, all under an HMAC, so no per-recipient
+      link is stored and an open redirect is impossible. These routes are rate
+      limited and never return anything but a pixel, a redirect or an empty 200.
+  - name: Health
+    description: Liveness, transport circuit state and sender loopback verdicts.
+
+paths:
+  /healthz:
+    get:
+      operationId: getServiceHealth
+      summary: Liveness and readiness probe
+      tags: [Health]
+      security: []
+      x-sendplane-action: none
+      responses:
+        '200':
+          description: Service is up.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ServiceHealth' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/settings:
+    get:
+      operationId: getTenantSettings
+      summary: Read tenant settings
+      description: Settings are created with defaults on first access; this never returns 404.
+      tags: [Tenant Settings]
+      x-sendplane-action: settings.read
+      responses:
+        '200':
+          description: Current settings.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantSettings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateTenantSettings
+      summary: Replace tenant settings
+      tags: [Tenant Settings]
+      x-sendplane-action: settings.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TenantSettingsUpdate' }
+      responses:
+        '200':
+          description: Updated settings.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantSettings' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/transports:
+    get:
+      operationId: listTransports
+      summary: List transports
+      tags: [Transports]
+      x-sendplane-action: sender.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of transports.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransportList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createTransport
+      summary: Create a transport
+      tags: [Transports]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransportInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transport' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/transports/{transportId}:
+    parameters:
+      - { $ref: '#/components/parameters/TransportId' }
+    get:
+      operationId: getTransport
+      summary: Read a transport
+      tags: [Transports]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: The transport.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateTransport
+      summary: Replace a transport
+      description: Omitting `password` keeps the stored one.
+      tags: [Transports]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransportUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Transport' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteTransport
+      summary: Delete a transport
+      tags: [Transports]
+      x-sendplane-action: sender.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/transports/{transportId}/health:
+    parameters:
+      - { $ref: '#/components/parameters/TransportId' }
+    get:
+      operationId: getTransportHealth
+      summary: Read transport circuit state
+      description: |
+        Repeated auth, TLS or connection failures mark a transport `unhealthy`
+        and stop routing to it until an EHLO+AUTH probe recovers it
+        (architecture 8.3).
+      tags: [Health]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: Current circuit state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransportHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/senders:
+    get:
+      operationId: listSenders
+      summary: List senders
+      tags: [Senders]
+      x-sendplane-action: sender.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of senders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SenderList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createSender
+      summary: Create a sender
+      tags: [Senders]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SenderInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sender' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/senders/{senderId}:
+    parameters:
+      - { $ref: '#/components/parameters/SenderId' }
+    get:
+      operationId: getSender
+      summary: Read a sender
+      tags: [Senders]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: The sender.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sender' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateSender
+      summary: Replace a sender
+      tags: [Senders]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SenderUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sender' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteSender
+      summary: Delete a sender
+      tags: [Senders]
+      x-sendplane-action: sender.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/senders/{senderId}/health:
+    parameters:
+      - { $ref: '#/components/parameters/SenderId' }
+    get:
+      operationId: getSenderHealth
+      summary: Read sender loopback health
+      description: |
+        The summary verdict is the worst of the latest probe run per mailbox
+        (architecture 11.4).
+      tags: [Health]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: Latest verdict per probe mailbox.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SenderHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/senders/{senderId}/probe:
+    parameters:
+      - { $ref: '#/components/parameters/SenderId' }
+    post:
+      operationId: triggerProbeRun
+      summary: Trigger a loopback probe now
+      description: |
+        Enqueues a `lane=probe` delivery per enabled probe mailbox and returns
+        the run IDs to poll. This replaces a "test SMTP connection" button: the
+        probe uses the real transport, DKIM signing and return path
+        (architecture 11.2).
+      tags: [Probe Runs]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProbeTriggerRequest' }
+      responses:
+        '202':
+          description: Probe deliveries enqueued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProbeTriggerResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/sending-domains:
+    get:
+      operationId: listSendingDomains
+      summary: List sending domains
+      tags: [Sending Domains]
+      x-sendplane-action: sender.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of sending domains.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendingDomainList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createSendingDomain
+      summary: Create a sending domain
+      tags: [Sending Domains]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendingDomainInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendingDomain' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/sending-domains/{domainId}:
+    parameters:
+      - { $ref: '#/components/parameters/DomainId' }
+    get:
+      operationId: getSendingDomain
+      summary: Read a sending domain
+      tags: [Sending Domains]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: The sending domain.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendingDomain' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateSendingDomain
+      summary: Replace a sending domain
+      description: Omitting `dkim_private_key` keeps the stored one.
+      tags: [Sending Domains]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SendingDomainUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendingDomain' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteSendingDomain
+      summary: Delete a sending domain
+      tags: [Sending Domains]
+      x-sendplane-action: sender.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/probe-mailboxes:
+    get:
+      operationId: listProbeMailboxes
+      summary: List probe mailboxes
+      tags: [Probe Mailboxes]
+      x-sendplane-action: sender.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of probe mailboxes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProbeMailboxList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createProbeMailbox
+      summary: Create a probe mailbox
+      tags: [Probe Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProbeMailboxInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProbeMailbox' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/probe-mailboxes/{mailboxId}:
+    parameters:
+      - { $ref: '#/components/parameters/MailboxId' }
+    get:
+      operationId: getProbeMailbox
+      summary: Read a probe mailbox
+      tags: [Probe Mailboxes]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: The probe mailbox.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProbeMailbox' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateProbeMailbox
+      summary: Replace a probe mailbox
+      description: Omitting `password` keeps the stored one.
+      tags: [Probe Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProbeMailboxUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProbeMailbox' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteProbeMailbox
+      summary: Delete a probe mailbox
+      tags: [Probe Mailboxes]
+      x-sendplane-action: sender.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/probe-runs:
+    get:
+      operationId: listProbeRuns
+      summary: List probe runs for a sender
+      tags: [Probe Runs]
+      x-sendplane-action: sender.read
+      parameters:
+        - name: sender_id
+          in: query
+          required: true
+          description: Probe history is always read per sender.
+          schema: { type: string, format: uuid }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of probe runs, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProbeRunList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/probe-runs/{runId}:
+    parameters:
+      - { $ref: '#/components/parameters/RunId' }
+    get:
+      operationId: getProbeRun
+      summary: Read a probe run
+      tags: [Probe Runs]
+      x-sendplane-action: sender.read
+      responses:
+        '200':
+          description: The probe run, including the DNS diagnosis.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProbeRun' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/layouts:
+    get:
+      operationId: listLayouts
+      summary: List layouts
+      tags: [Layouts]
+      x-sendplane-action: template.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of layouts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LayoutList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createLayout
+      summary: Create a layout
+      tags: [Layouts]
+      x-sendplane-action: template.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LayoutInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Layout' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/layouts/{layoutId}:
+    parameters:
+      - { $ref: '#/components/parameters/LayoutId' }
+    get:
+      operationId: getLayout
+      summary: Read a layout
+      tags: [Layouts]
+      x-sendplane-action: template.read
+      responses:
+        '200':
+          description: The layout.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Layout' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateLayout
+      summary: Replace a layout
+      description: Published message versions are unaffected; they carry their own merged copy.
+      tags: [Layouts]
+      x-sendplane-action: template.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LayoutUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Layout' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteLayout
+      summary: Delete a layout
+      tags: [Layouts]
+      x-sendplane-action: template.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates:
+    get:
+      operationId: listTemplates
+      summary: List templates
+      tags: [Templates]
+      x-sendplane-action: template.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of templates.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createTemplate
+      summary: Create a template
+      tags: [Templates]
+      x-sendplane-action: template.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates/{templateId}:
+    parameters:
+      - { $ref: '#/components/parameters/TemplateId' }
+    get:
+      operationId: getTemplate
+      summary: Read a template
+      tags: [Templates]
+      x-sendplane-action: template.read
+      responses:
+        '200':
+          description: The template.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateTemplate
+      summary: Replace a template
+      description: Editing never affects a running campaign; it keeps its own message version.
+      tags: [Templates]
+      x-sendplane-action: template.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteTemplate
+      summary: Delete a template
+      tags: [Templates]
+      x-sendplane-action: template.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates/{templateId}/preview:
+    parameters:
+      - { $ref: '#/components/parameters/TemplateId' }
+    post:
+      operationId: previewTemplate
+      summary: Render a template preview
+      description: |
+        Renders through the same code path sending uses, so the result is
+        authoritative (architecture 6.3). The template is compiled on the fly;
+        no message version is created.
+      tags: [Templates]
+      x-sendplane-action: template.read
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PreviewRequest' }
+      responses:
+        '200':
+          description: Rendered subject, HTML and text.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PreviewResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates/{templateId}/publish:
+    parameters:
+      - { $ref: '#/components/parameters/TemplateId' }
+    post:
+      operationId: publishTemplate
+      summary: Publish a template into an immutable message version
+      description: |
+        Merges the layout slot and i18n bundles, compiles MJML once and extracts
+        the trackable links. Missing i18n keys block the publish unless the
+        tenant relaxed that (architecture 6.2, 6.3).
+      tags: [Templates]
+      x-sendplane-action: template.write
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PublishRequest' }
+      responses:
+        '201':
+          description: The new message version, now the template's published one.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageVersion' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates/{templateId}/i18n:
+    parameters:
+      - { $ref: '#/components/parameters/TemplateId' }
+    get:
+      operationId: getTemplateI18n
+      summary: Export a template i18n bundle
+      description: |
+        Content negotiation picks the representation; `format` overrides the
+        `Accept` header. An empty map for a locale tag means "fall back to the
+        language".
+      tags: [Templates]
+      x-sendplane-action: template.read
+      parameters:
+        - name: format
+          in: query
+          required: false
+          description: Overrides content negotiation.
+          schema:
+            type: string
+            enum: [json, yaml]
+            default: json
+      responses:
+        '200':
+          description: The bundle.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/I18nBundle' }
+            application/x-yaml:
+              schema: { $ref: '#/components/schemas/I18nBundle' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: replaceTemplateI18n
+      summary: Import a template i18n bundle
+      description: |
+        Replaces the whole bundle. Keys the template does not use are reported
+        as warnings; keys it uses but the bundle lacks are reported as
+        `missing_keys` and block a later publish.
+      tags: [Templates]
+      x-sendplane-action: template.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/I18nBundle' }
+          application/x-yaml:
+            schema: { $ref: '#/components/schemas/I18nBundle' }
+      responses:
+        '200':
+          description: Import summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/I18nImportResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates/{templateId}/i18n/keys:
+    parameters:
+      - { $ref: '#/components/parameters/TemplateId' }
+    get:
+      operationId: listTemplateI18nKeys
+      summary: List the i18n keys a template uses
+      description: |
+        Extracted by parsing the subject, body, text part and the layout, so the
+        editor can highlight untranslated keys.
+      tags: [Templates]
+      x-sendplane-action: template.read
+      responses:
+        '200':
+          description: Keys in use with their per-locale coverage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/I18nKeyList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates/{templateId}/versions:
+    parameters:
+      - { $ref: '#/components/parameters/TemplateId' }
+    get:
+      operationId: listMessageVersions
+      summary: List a template's message versions
+      tags: [Message Versions]
+      x-sendplane-action: template.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of versions, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageVersionList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/message-versions/{versionId}:
+    parameters:
+      - { $ref: '#/components/parameters/VersionId' }
+    get:
+      operationId: getMessageVersion
+      summary: Read a message version
+      description: Versions are immutable; retention is the only thing that removes them.
+      tags: [Message Versions]
+      x-sendplane-action: template.read
+      responses:
+        '200':
+          description: The message version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns:
+    get:
+      operationId: listCampaigns
+      summary: List campaigns
+      tags: [Campaigns]
+      x-sendplane-action: campaign.read
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Repeat to match several statuses.
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/CampaignStatus' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of campaigns.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CampaignList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      operationId: createCampaign
+      summary: Create a campaign
+      description: The campaign starts as `draft`; recipients are appended separately.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CampaignInput' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    get:
+      operationId: getCampaign
+      summary: Read a campaign
+      description: |
+        `stats` is a cached aggregate recomputed by the control loop, so it may
+        lag by a few seconds (architecture 7.3).
+      tags: [Campaigns]
+      x-sendplane-action: campaign.read
+      responses:
+        '200':
+          description: The campaign with its cached statistics.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: updateCampaign
+      summary: Replace a campaign
+      description: Only a `draft`, `scheduled` or `paused` campaign can be edited.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CampaignUpdate' }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteCampaign
+      summary: Delete a campaign
+      description: Deletes the campaign's recipient data with it.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/recipients:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    post:
+      operationId: ingestCampaignRecipients
+      summary: Append recipients as an NDJSON stream
+      description: |
+        One JSON object per line, streamed and inserted in batches, so memory
+        stays constant in the chunk size. Call it repeatedly; 10k-100k lines per
+        chunk is the recommended size (architecture 7.2).
+
+        The chunk is idempotent on `Idempotency-Key`, falling back to a hash of
+        the body: replaying a completed chunk returns the stored counts without
+        inserting anything. Addresses are normalized (lowercased, IDN to
+        punycode) and deduplicated per campaign.
+
+        A line over the configured size caps, or `vars` over the per-recipient
+        limit (8 KiB by default), counts as `invalid`; a body over the transport
+        cap is rejected with `413` and a chunk over the per-campaign recipient
+        limit with `422`.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.write
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+              description: Newline-delimited JSON; each line is a `RecipientLine`.
+            x-ndjson-line-schema:
+              $ref: '#/components/schemas/RecipientLine'
+            example: |
+              {"email":"a@x.com","name":"A","locale":"ko","vars":{"plan":"pro"}}
+              {"email":"b@x.com","name":"B","unsubscribe_url":"https://app.example.com/u?t=..."}
+      responses:
+        '200':
+          description: Chunk ingested, or replayed from the stored result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecipientIngestResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/start:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    post:
+      operationId: startCampaign
+      summary: Start or schedule a campaign
+      description: |
+        Requires at least one recipient, a usable sender and transport, a pinned
+        message version and, by policy, no missing i18n keys. Starting does not
+        touch the delivery rows: senders derive eligibility from the running
+        campaign set (ADR-0002).
+      tags: [Campaigns]
+      x-sendplane-action: campaign.send
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartCampaignRequest' }
+      responses:
+        '200':
+          description: Campaign is now `running` or `scheduled`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/pause:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    post:
+      operationId: pauseCampaign
+      summary: Pause a running campaign
+      description: Leased deliveries still in flight finish; nothing new is claimed.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.send
+      responses:
+        '200':
+          description: Campaign is now `paused`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/resume:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    post:
+      operationId: resumeCampaign
+      summary: Resume a paused campaign
+      tags: [Campaigns]
+      x-sendplane-action: campaign.send
+      responses:
+        '200':
+          description: Campaign is `running` again.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/cancel:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    post:
+      operationId: cancelCampaign
+      summary: Cancel a campaign
+      description: |
+        The campaign row flips immediately; its `pending`, `queued` and
+        `deferred` deliveries move to `cancelled` in background chunks, so the
+        counts settle shortly after.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.send
+      responses:
+        '202':
+          description: Cancellation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Campaign' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/retry:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    post:
+      operationId: retryCampaignDeliveries
+      summary: Requeue matching deliveries
+      description: |
+        Bumps `retry_gen` and returns the matches to `queued`, keeping
+        `attempt_count` so the attempt history stays intact (architecture 4.1).
+      tags: [Campaigns]
+      x-sendplane-action: campaign.send
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RetryRequest' }
+      responses:
+        '200':
+          description: How many deliveries were requeued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RetryResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/deliveries:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    get:
+      operationId: listCampaignDeliveries
+      summary: List a campaign's deliveries
+      tags: [Deliveries]
+      x-sendplane-action: delivery.read
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Repeat to match several statuses.
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/DeliveryStatus' }
+        - name: error_class
+          in: query
+          required: false
+          description: Repeat to match several error classes.
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/ErrorClass' }
+        - name: email
+          in: query
+          required: false
+          description: Exact match on the normalized address.
+          schema: { type: string, format: email }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of deliveries.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeliveryList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/links:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    get:
+      operationId: listCampaignLinks
+      summary: Report clicks per link
+      description: |
+        Links come from the published message version in document order, so
+        `link_no` matches the one carried by click tokens. Suspected bot clicks
+        are excluded.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.read
+      responses:
+        '200':
+          description: Click counts per link.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkClickList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/campaigns/{campaignId}/unsubscribes:
+    parameters:
+      - { $ref: '#/components/parameters/CampaignId' }
+    post:
+      operationId: notifyCampaignUnsubscribe
+      summary: Notify a confirmed unsubscribe
+      description: |
+        The path a host uses under `unsubscribe_mode=host`: sendplane never saw
+        the click, so the host reports it and the campaign ratio picks it up
+        (architecture 9.2). Identify the recipient by `delivery_id` or `email`.
+        Repeating it is a no-op because only the first write sets
+        `unsubscribed_at`.
+      tags: [Campaigns]
+      x-sendplane-action: campaign.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UnsubscribeNotice' }
+      responses:
+        '200':
+          description: Recorded, or already recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UnsubscribeResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/deliveries/{deliveryId}:
+    parameters:
+      - { $ref: '#/components/parameters/DeliveryId' }
+    get:
+      operationId: getDelivery
+      summary: Read a delivery
+      tags: [Deliveries]
+      x-sendplane-action: delivery.read
+      responses:
+        '200':
+          description: The delivery.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Delivery' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/deliveries/{deliveryId}/attempts:
+    parameters:
+      - { $ref: '#/components/parameters/DeliveryId' }
+    get:
+      operationId: listDeliveryAttempts
+      summary: List a delivery's SMTP attempts
+      tags: [Deliveries]
+      x-sendplane-action: delivery.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of attempts, oldest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeliveryAttemptList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/deliveries/{deliveryId}/bounces:
+    parameters:
+      - { $ref: '#/components/parameters/DeliveryId' }
+    get:
+      operationId: listDeliveryBounces
+      summary: List bounces correlated to a delivery
+      tags: [Bounces]
+      x-sendplane-action: delivery.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of bounce events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BounceEventList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/deliveries/{deliveryId}/retry:
+    parameters:
+      - { $ref: '#/components/parameters/DeliveryId' }
+    post:
+      operationId: retryDelivery
+      summary: Requeue one delivery
+      tags: [Deliveries]
+      x-sendplane-action: delivery.write
+      responses:
+        '200':
+          description: The requeued delivery.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Delivery' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/deliveries/{deliveryId}/unsubscribe:
+    parameters:
+      - { $ref: '#/components/parameters/DeliveryId' }
+    post:
+      operationId: notifyDeliveryUnsubscribe
+      summary: Notify a confirmed unsubscribe for one delivery
+      description: The per-delivery form of the campaign unsubscribe notification.
+      tags: [Deliveries]
+      x-sendplane-action: delivery.write
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeliveryUnsubscribeNotice' }
+      responses:
+        '200':
+          description: Recorded, or already recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UnsubscribeResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/messages:
+    post:
+      operationId: sendMessage
+      summary: Send a transactional message
+      description: |
+        Creates one `lane=transactional` delivery per recipient and answers
+        immediately; sending happens asynchronously. Passing only `template_id`
+        uses the template's currently published version and reports which one in
+        `version_id`; pass `version_id` to pin an older one.
+
+        `Idempotency-Key` makes a replay return the original result instead of
+        sending again. Suppressed recipients come back with status `suppressed`
+        rather than failing the whole call.
+      tags: [Messages (transactional)]
+      x-sendplane-action: message.send
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageRequest' }
+      responses:
+        '202':
+          description: Accepted; one entry per recipient.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/suppressions:
+    get:
+      operationId: listSuppressions
+      summary: List suppressed addresses
+      tags: [Suppressions]
+      x-sendplane-action: suppression.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of suppressions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuppressionList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/suppressions/{email}:
+    parameters:
+      - { $ref: '#/components/parameters/SuppressionEmail' }
+    get:
+      operationId: getSuppression
+      summary: Read one suppression
+      description: An entry whose `expires_at` has passed answers `404`.
+      tags: [Suppressions]
+      x-sendplane-action: suppression.read
+      responses:
+        '200':
+          description: The suppression.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Suppression' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    put:
+      operationId: upsertSuppression
+      summary: Suppress an address
+      description: |
+        Inserts or replaces the entry. Suppression holds nothing but the
+        normalized address, the reason and a retention window; it is not a
+        contact database (ADR-0008).
+      tags: [Suppressions]
+      x-sendplane-action: suppression.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SuppressionInput' }
+      responses:
+        '200':
+          description: The stored suppression.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Suppression' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      operationId: deleteSuppression
+      summary: Unsuppress an address
+      tags: [Suppressions]
+      x-sendplane-action: suppression.write
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/bounces:
+    get:
+      operationId: listBounces
+      summary: List bounce events
+      description: |
+        Events whose VERP HMAC did not verify are listed with
+        `verified: false`; they never changed a delivery (architecture 10).
+      tags: [Bounces]
+      x-sendplane-action: delivery.read
+      parameters:
+        - name: type
+          in: query
+          required: false
+          description: Repeat to match several bounce types.
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/BounceType' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of bounce events, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BounceEventList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/bounces/{bounceId}:
+    parameters:
+      - { $ref: '#/components/parameters/BounceId' }
+    get:
+      operationId: getBounce
+      summary: Read a bounce event
+      description: '`raw` is present only when the tenant opted into keeping raw messages.'
+      tags: [Bounces]
+      x-sendplane-action: delivery.read
+      responses:
+        '200':
+          description: The bounce event.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BounceEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/events:
+    get:
+      operationId: listEvents
+      summary: List outbox events
+      tags: [Events]
+      x-sendplane-action: event.read
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Defaults to every status.
+          schema: { $ref: '#/components/schemas/OutboxStatus' }
+        - name: type
+          in: query
+          required: false
+          description: Repeat to match several event types, e.g. `delivery.failed`.
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutboxEventList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/events/dead-letter:
+    get:
+      operationId: listDeadLetterEvents
+      summary: List dead-lettered events
+      description: Events the dispatcher gave up on; replay them once the host endpoint is healthy.
+      tags: [Events]
+      x-sendplane-action: event.read
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: One page of failed events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutboxEventList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/events/{eventId}:
+    parameters:
+      - { $ref: '#/components/parameters/EventId' }
+    get:
+      operationId: getEvent
+      summary: Read an outbox event
+      tags: [Events]
+      x-sendplane-action: event.read
+      responses:
+        '200':
+          description: The event with its payload.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutboxEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/events/{eventId}/replay:
+    parameters:
+      - { $ref: '#/components/parameters/EventId' }
+    post:
+      operationId: replayEvent
+      summary: Replay a failed event
+      description: |
+        Returns the event to `pending` with its attempt counter reset, so the
+        dispatcher picks it up on the next loop. Already delivered events answer
+        `409`.
+      tags: [Events]
+      x-sendplane-action: event.write
+      responses:
+        '202':
+          description: Event requeued for dispatch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutboxEvent' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /t/o/{token}:
+    parameters:
+      - { $ref: '#/components/parameters/TrackingToken' }
+    get:
+      operationId: trackOpen
+      summary: Open tracking pixel
+      description: |
+        Always answers a 1x1 transparent GIF with `Cache-Control: no-store`,
+        whether or not the token resolves to a live delivery, so the response
+        leaks nothing.
+      tags: [Tracking (public)]
+      security: []
+      x-sendplane-action: none
+      responses:
+        '200':
+          description: 1x1 transparent GIF.
+          headers:
+            Cache-Control:
+              description: Always `no-store`.
+              schema: { type: string }
+          content:
+            image/gif:
+              schema: { type: string, format: binary }
+        '400':
+          description: Malformed or unverifiable token; the pixel is still returned.
+          content:
+            image/gif:
+              schema: { type: string, format: binary }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /t/c/{token}:
+    parameters:
+      - { $ref: '#/components/parameters/TrackingToken' }
+    get:
+      operationId: trackClick
+      summary: Click redirect
+      description: |
+        Records the click and redirects. The destination is covered by the
+        token's HMAC, so `u` cannot be swapped for an open redirect; a mismatch
+        answers `400` without redirecting.
+      tags: [Tracking (public)]
+      security: []
+      x-sendplane-action: none
+      parameters:
+        - name: u
+          in: query
+          required: true
+          description: Destination URL, also covered by the token signature.
+          schema: { type: string, format: uri }
+      responses:
+        '302':
+          description: Redirect to the signed destination.
+          headers:
+            Location:
+              description: The destination URL.
+              schema: { type: string, format: uri }
+        '400':
+          description: Token or destination did not verify.
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /t/u/{token}:
+    parameters:
+      - { $ref: '#/components/parameters/TrackingToken' }
+    get:
+      operationId: trackUnsubscribeClick
+      summary: Unsubscribe click redirect
+      description: |
+        Records an `unsubscribe_clicked` event, which a mail scanner may have
+        caused, and redirects to the host's confirmation page. Only the
+        one-click POST or a host notification marks the recipient
+        `unsubscribed` (ADR-0011).
+      tags: [Tracking (public)]
+      security: []
+      x-sendplane-action: none
+      responses:
+        '302':
+          description: Redirect to the host unsubscribe destination.
+          headers:
+            Location:
+              description: The host destination carried in the token signature.
+              schema: { type: string, format: uri }
+        '400':
+          description: Token did not verify.
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    post:
+      operationId: oneClickUnsubscribe
+      summary: RFC 8058 one-click unsubscribe
+      description: |
+        The `List-Unsubscribe-Post` target. Records a confirmed `unsubscribed`
+        event, calls the host's `Unsubscribed` hook when one is set and always
+        emits a `recipient.unsubscribed` event. Answers an empty `200` either
+        way.
+      tags: [Tracking (public)]
+      security: []
+      x-sendplane-action: none
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                List-Unsubscribe:
+                  type: string
+                  description: Always `One-Click` per RFC 8058.
+                  enum: [One-Click]
+      responses:
+        '200':
+          description: Unsubscribe recorded.
+        '400':
+          description: Token did not verify.
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Credential the host's `Authenticator` accepts. The reference binary
+        reads a JWT validated against a JWKS; another host may accept anything
+        it likes.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Static API key. The reference binary maps a key to a principal and a
+        tenant; the tenant is never sent by the client.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Clamped into 1-1000.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 1000
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque `next_cursor` from the previous page; omit for the first page.
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Replay key. Repeating a completed request with the same key returns the
+        stored result instead of acting again. Defaults to a hash of the body.
+      schema: { type: string, maxLength: 255 }
+    TransportId:
+      name: transportId
+      in: path
+      required: true
+      description: Transport ID.
+      schema: { type: string, format: uuid }
+    SenderId:
+      name: senderId
+      in: path
+      required: true
+      description: Sender ID.
+      schema: { type: string, format: uuid }
+    DomainId:
+      name: domainId
+      in: path
+      required: true
+      description: Sending domain ID.
+      schema: { type: string, format: uuid }
+    MailboxId:
+      name: mailboxId
+      in: path
+      required: true
+      description: Probe mailbox ID.
+      schema: { type: string, format: uuid }
+    RunId:
+      name: runId
+      in: path
+      required: true
+      description: Probe run ID.
+      schema: { type: string, format: uuid }
+    LayoutId:
+      name: layoutId
+      in: path
+      required: true
+      description: Layout ID.
+      schema: { type: string, format: uuid }
+    TemplateId:
+      name: templateId
+      in: path
+      required: true
+      description: Template ID.
+      schema: { type: string, format: uuid }
+    VersionId:
+      name: versionId
+      in: path
+      required: true
+      description: Message version ID.
+      schema: { type: string, format: uuid }
+    CampaignId:
+      name: campaignId
+      in: path
+      required: true
+      description: Campaign ID.
+      schema: { type: string, format: uuid }
+    DeliveryId:
+      name: deliveryId
+      in: path
+      required: true
+      description: Delivery ID.
+      schema: { type: string, format: uuid }
+    BounceId:
+      name: bounceId
+      in: path
+      required: true
+      description: Bounce event ID.
+      schema: { type: string, format: uuid }
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      description: Outbox event ID.
+      schema: { type: string, format: uuid }
+    SuppressionEmail:
+      name: email
+      in: path
+      required: true
+      description: |
+        URL-encoded address. It is normalized (trimmed, lowercased, IDN domain
+        to punycode) before lookup, so any casing of the same address resolves
+        to the same entry.
+      schema: { type: string, format: email }
+    TrackingToken:
+      name: token
+      in: path
+      required: true
+      description: |
+        `kid` followed by base64url of the delivery ID, the interaction kind,
+        the link number and an HMAC over all of it plus the destination. It
+        verifies without any database lookup (architecture 9.1).
+      schema: { type: string }
+
+  responses:
+    NoContent:
+      description: Deleted.
+    BadRequest:
+      description: Malformed request (`invalid_request`, `invalid_cursor`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or rejected credential (`unauthenticated`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: The host's `Authorizer` denied the operation's action (`forbidden`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: |
+        No such object in the caller's tenant (`not_found`). Cross-tenant
+        access is reported as a 404, never a 403.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: |
+        `version_conflict` (stale `version`), `duplicate` (unique key) or
+        `invalid_state` (the object's state does not allow the transition).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: Body exceeded a configured size cap (`payload_too_large`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnprocessableEntity:
+      description: |
+        Well-formed but rejected: `validation_failed`, `limit_exceeded`,
+        `missing_i18n_keys`, `template_not_published`, `render_failed`,
+        `precondition_failed`.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Rate limited (`rate_limited`).
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer, format: int32 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: Unexpected server-side failure (`internal`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      description: The single error shape every non-2xx response uses.
+      required: [code, message]
+      properties:
+        code:
+          description: |
+            Stable machine-readable code. Clients switch on this, never on the
+            message.
+          type: string
+          enum:
+            - invalid_request
+            - invalid_cursor
+            - unauthenticated
+            - forbidden
+            - not_found
+            - duplicate
+            - version_conflict
+            - invalid_state
+            - payload_too_large
+            - validation_failed
+            - limit_exceeded
+            - missing_i18n_keys
+            - template_not_published
+            - render_failed
+            - precondition_failed
+            - rate_limited
+            - internal
+        message:
+          type: string
+          description: Human-readable English explanation; not for display to end users.
+        details:
+          type: array
+          description: Per-field or per-item detail, when the failure has any.
+          items: { $ref: '#/components/schemas/ErrorDetail' }
+      examples:
+        - code: version_conflict
+          message: 'template 018f...: version 4 is stale, current is 5'
+
+    ErrorDetail:
+      type: object
+      description: One field-level or item-level problem.
+      required: [message]
+      properties:
+        field:
+          type: string
+          description: JSON pointer or dotted path into the request body.
+        message: { type: string }
+        value:
+          description: The offending value, when it is safe to echo.
+
+    PageInfo:
+      type: object
+      description: Cursor pagination envelope fields shared by every list response.
+      properties:
+        next_cursor:
+          type: string
+          description: Pass as `cursor` for the next page. Empty or absent on the last page.
+
+    VersionRequired:
+      type: object
+      description: Optimistic concurrency fragment mixed into every update body.
+      required: [version]
+      properties:
+        version:
+          type: integer
+          format: int64
+          description: The `version` last read. A mismatch answers 409 `version_conflict`.
+
+    DeliveryStatus:
+      type: string
+      description: |
+        Delivery state machine (architecture 4.1). `bounced` is only reachable
+        from `sent`, asynchronously, via a hard DSN.
+      enum: [pending, queued, leased, deferred, sent, failed, bounced, complained, suppressed, cancelled]
+
+    Lane:
+      type: string
+      description: |
+        Scheduling class. `transactional` is filled before `bulk`; `probe`
+        traffic is excluded from campaign statistics, tracking and suppression.
+      enum: [bulk, transactional, probe]
+
+    ErrorClass:
+      type: string
+      description: Normalized SMTP failure classification (architecture 4.2).
+      enum: [none, transient, rate_limited, permanent, policy, auth]
+
+    CampaignStatus:
+      type: string
+      enum: [draft, scheduled, running, paused, completed, cancelled]
+
+    TransportStatus:
+      type: string
+      description: |
+        `cooldown` is a temporary slowdown after rate limiting; `unhealthy`
+        follows repeated auth, TLS or connection failures and is cleared by a
+        probe.
+      enum: [healthy, cooldown, unhealthy]
+
+    BounceType:
+      type: string
+      enum: [unknown, hard, soft, complaint]
+
+    BounceSource:
+      type: string
+      description: Which correlation path matched the DSN back to a delivery.
+      enum: [verp, header, message_id, heuristic]
+
+    HealthStatus:
+      type: string
+      description: |
+        `green` all checks pass and mail landed in the inbox over TLS; `yellow`
+        degraded (spam folder, `p=none`, PTR mismatch, no TLS); `red` not
+        delivered or an authentication failure.
+      enum: [unknown, green, yellow, red]
+
+    TLSMode:
+      type: string
+      enum: [none, starttls, tls]
+
+    ContentMode:
+      type: string
+      description: |
+        `blocks` keeps the block-editor project alongside the MJML it exported;
+        the server only ever compiles the MJML.
+      enum: [blocks, mjml, html]
+
+    UnsubscribeMode:
+      type: string
+      description: |
+        `sendplane` puts a signed tracking URL in the mail and redirects to the
+        host destination; `host` puts the host URL in directly and expects a
+        notification back; `none` omits the link and headers (ADR-0011).
+      enum: [sendplane, host, none]
+
+    SuppressionReason:
+      type: string
+      enum: [hard_bounce, complaint, manual]
+
+    OutboxStatus:
+      type: string
+      description: '`failed` is the dead-letter state.'
+      enum: [pending, delivered, failed]
+
+    Duration:
+      type: string
+      description: Go duration string, e.g. `30s`, `5m`, `12h`.
+      pattern: '^-?([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$'
+      examples: ['5m', '1h30m']
+
+    Vars:
+      type: object
+      description: |
+        Free-form Liquid variables. Capped per recipient by `Limits`
+        (8 KiB by default) and rejected with 422 `limit_exceeded` beyond it.
+      additionalProperties: true
+
+    RetryPolicy:
+      type: object
+      description: Backoff schedule for transient failures (architecture 4.2).
+      properties:
+        backoff:
+          type: array
+          description: |
+            Delay before attempt 1, 2, ... The last entry repeats if
+            `max_attempts` outruns the list. Jitter is applied on top.
+          items: { $ref: '#/components/schemas/Duration' }
+        max_attempts:
+          type: integer
+          format: int32
+          minimum: 1
+          description: |
+            How many transient or rate-limited attempts a delivery may consume.
+            Transport-level faults (auth, TLS) do not count.
+
+    SigningKeyInfo:
+      type: object
+      description: Tracking token HMAC key. The secret itself is never returned.
+      required: [kid]
+      properties:
+        kid:
+          type: string
+          description: Key ID embedded in every token so keys can rotate while old links stay valid.
+        secret:
+          type: string
+          format: byte
+          writeOnly: true
+          description: Base64 HMAC secret. Encrypted at rest; omit to keep the stored one.
+        created_at: { type: string, format: date-time, readOnly: true }
+
+    TrackingConfig:
+      type: object
+      description: Tenant tracking setup (architecture 9).
+      properties:
+        domain:
+          type: string
+          description: |
+            Tracking domain (`t.example.com`) whose DNS must point at the public
+            routes. Required for opens, clicks and `unsubscribe_mode=sendplane`.
+        opens: { type: boolean, description: Insert the open pixel. }
+        clicks: { type: boolean, description: Rewrite links through the click redirect. }
+        signing_keys:
+          type: array
+          description: Newest key signs; older ones keep verifying.
+          items: { $ref: '#/components/schemas/SigningKeyInfo' }
+
+    TenantSettings:
+      type: object
+      description: |
+        Everything sendplane knows about a tenant. sendplane does not manage
+        tenant lifecycle: the row is created with defaults on first access
+        (ADR-0006).
+      required: [tenant_id, version]
+      properties:
+        tenant_id: { type: string, readOnly: true }
+        retry: { $ref: '#/components/schemas/RetryPolicy' }
+        retention_days:
+          type: integer
+          format: int32
+          description: How long deliveries, tracking events, bounces and probe runs are kept.
+        suppression_enabled:
+          type: boolean
+          description: Turn off to manage the do-not-send list in the host instead (ADR-0008).
+        unsubscribe_mode: { $ref: '#/components/schemas/UnsubscribeMode' }
+        unsubscribe_url_template:
+          type: string
+          description: |
+            Liquid evaluated per recipient, e.g.
+            `https://app.example.com/u?e={{ recipient.email | url_encode }}`.
+            A recipient's own `unsubscribe_url` wins over it.
+        default_locale: { type: string, description: 'Fallback locale, e.g. `en`.' }
+        tracking: { $ref: '#/components/schemas/TrackingConfig' }
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    TenantSettingsInput:
+      type: object
+      properties:
+        retry: { $ref: '#/components/schemas/RetryPolicy' }
+        retention_days: { type: integer, format: int32, minimum: 1 }
+        suppression_enabled: { type: boolean }
+        unsubscribe_mode: { $ref: '#/components/schemas/UnsubscribeMode' }
+        unsubscribe_url_template: { type: string }
+        default_locale: { type: string }
+        tracking: { $ref: '#/components/schemas/TrackingConfig' }
+
+    TenantSettingsUpdate:
+      description: Tenant settings replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/TenantSettingsInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    Transport:
+      type: object
+      description: An SMTP account, its rate limits and its circuit state.
+      required: [id, name, host, port, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        host: { type: string }
+        port: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+        tls: { $ref: '#/components/schemas/TLSMode' }
+        username: { type: string }
+        has_password:
+          type: boolean
+          readOnly: true
+          description: Whether a password is stored. The password itself is never returned.
+        max_conns:
+          type: integer
+          format: int32
+          description: Connection pool size per sender replica.
+        rate_per_second:
+          type: number
+          format: double
+          description: Cluster-wide target rate, split across active sender replicas. 0 is unlimited.
+        domain_rate_per_second:
+          type: object
+          description: Per recipient-domain rate caps, keyed by domain (`gmail.com`).
+          additionalProperties: { type: number, format: double }
+        status: { $ref: '#/components/schemas/TransportStatus' }
+        status_reason: { type: string, readOnly: true }
+        status_changed_at: { type: string, format: date-time, readOnly: true }
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    TransportInput:
+      type: object
+      required: [name, host, port]
+      properties:
+        name: { type: string, minLength: 1 }
+        host: { type: string, minLength: 1 }
+        port: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+        tls: { $ref: '#/components/schemas/TLSMode' }
+        username: { type: string }
+        password:
+          type: string
+          writeOnly: true
+          description: Encrypted at rest by the host's `SecretCipher`. Omit on update to keep the stored one.
+        max_conns: { type: integer, format: int32, minimum: 1 }
+        rate_per_second: { type: number, format: double, minimum: 0 }
+        domain_rate_per_second:
+          type: object
+          additionalProperties: { type: number, format: double }
+
+    TransportUpdate:
+      description: Transport replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/TransportInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    TransportList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Transport' }
+
+    Sender:
+      type: object
+      description: A From identity bound to a transport and a sending domain.
+      required: [id, name, from_email, transport_id, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        from_name: { type: string }
+        from_email: { type: string, format: email }
+        reply_to: { type: string }
+        transport_id: { type: string, format: uuid }
+        domain_id: { type: string, format: uuid }
+        health: { $ref: '#/components/schemas/HealthStatus' }
+        health_reason: { type: string, readOnly: true }
+        health_checked_at: { type: string, format: date-time, readOnly: true }
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    SenderInput:
+      type: object
+      required: [name, from_email, transport_id]
+      properties:
+        name: { type: string, minLength: 1 }
+        from_name: { type: string }
+        from_email:
+          type: string
+          format: email
+          description: CR and LF are rejected (header injection, architecture 16).
+        reply_to: { type: string }
+        transport_id: { type: string, format: uuid }
+        domain_id: { type: string, format: uuid }
+
+    SenderUpdate:
+      description: Sender replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/SenderInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    SenderList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Sender' }
+
+    SendingDomain:
+      type: object
+      description: DKIM material, the VERP return-path domain and observed outbound IPs.
+      required: [id, domain, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        domain: { type: string }
+        dkim_selector: { type: string }
+        has_dkim_private_key:
+          type: boolean
+          readOnly: true
+          description: Whether sendplane signs itself. False means the relay signs.
+        return_path_domain:
+          type: string
+          description: Carries the VERP bounce address `bounce+{deliveryID}.{hmac8}@...`.
+        expected_spf: { type: string }
+        outbound_ips:
+          type: array
+          description: Configured, or observed from probe `Received` headers (architecture 11.3).
+          items: { type: string }
+        health: { $ref: '#/components/schemas/HealthStatus' }
+        health_reason: { type: string, readOnly: true }
+        health_checked_at: { type: string, format: date-time, readOnly: true }
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    SendingDomainInput:
+      type: object
+      required: [domain]
+      properties:
+        domain: { type: string, minLength: 1 }
+        dkim_selector: { type: string }
+        dkim_private_key:
+          type: string
+          writeOnly: true
+          description: PEM private key, encrypted at rest. Omit on update to keep the stored one.
+        return_path_domain: { type: string }
+        expected_spf: { type: string }
+        outbound_ips:
+          type: array
+          items: { type: string }
+
+    SendingDomainUpdate:
+      description: Sending domain replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/SendingDomainInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    SendingDomainList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/SendingDomain' }
+
+    ProbeMailbox:
+      type: object
+      description: |
+        IMAP account a loopback probe mail is recovered from. Registering several
+        (Gmail, Outlook, an own MTA) is recommended: the verdict depends on the
+        headers the receiving MTA adds (ADR-0012).
+      required: [id, name, address, host, port, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        address: { type: string, format: email, description: Where probe mail is sent. }
+        host: { type: string }
+        port: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+        tls: { $ref: '#/components/schemas/TLSMode' }
+        username: { type: string }
+        has_password: { type: boolean, readOnly: true }
+        inbox_folder: { type: string }
+        spam_folder: { type: string }
+        authserv_id:
+          type: string
+          description: |
+            Only `Authentication-Results` headers carrying this authserv-id are
+            trusted (RFC 8601).
+        enabled: { type: boolean }
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    ProbeMailboxInput:
+      type: object
+      required: [name, address, host, port]
+      properties:
+        name: { type: string, minLength: 1 }
+        address: { type: string, format: email }
+        host: { type: string, minLength: 1 }
+        port: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+        tls: { $ref: '#/components/schemas/TLSMode' }
+        username: { type: string }
+        password:
+          type: string
+          writeOnly: true
+          description: Encrypted at rest. Omit on update to keep the stored one.
+        inbox_folder: { type: string, default: INBOX }
+        spam_folder: { type: string }
+        authserv_id: { type: string }
+        enabled: { type: boolean, default: true }
+
+    ProbeMailboxUpdate:
+      description: Probe mailbox replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/ProbeMailboxInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    ProbeMailboxList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/ProbeMailbox' }
+
+    ProbeRun:
+      type: object
+      description: |
+        One sender x mailbox loopback result plus the DNS diagnosis gathered
+        alongside it (architecture 11.2).
+      required: [id, sender_id, mailbox_id, status]
+      properties:
+        id: { type: string, format: uuid }
+        sender_id: { type: string, format: uuid }
+        mailbox_id: { type: string, format: uuid }
+        delivery_id:
+          type: string
+          format: uuid
+          description: The `lane=probe` delivery that carried the mail.
+        status: { $ref: '#/components/schemas/HealthStatus' }
+        reason: { type: string, description: 'Explains a non-green status, e.g. `dkim=fail`.' }
+        delivered: { type: boolean }
+        folder: { type: string, description: 'Where the mail landed: `inbox` or `spam`.' }
+        latency: { $ref: '#/components/schemas/Duration' }
+        spf: { type: string, description: 'SPF verdict from `Authentication-Results`.' }
+        dkim: { type: string }
+        dmarc: { type: string }
+        dkim_domain: { type: string }
+        dkim_selector: { type: string }
+        dmarc_policy: { type: string, description: 'The published `p=` value.' }
+        tls: { type: boolean, description: Derived from the `Received` chain. }
+        observed_ip: { type: string }
+        ptr: { type: string }
+        ptr_match: { type: boolean, description: Forward-confirmed reverse DNS. }
+        dns:
+          description: Static SPF/DKIM/DMARC/MX/PTR check results (architecture 11.3).
+          type: object
+          additionalProperties: true
+        raw_headers:
+          type: string
+          description: Kept for diagnosis under the tenant retention period.
+        started_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+
+    ProbeRunList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/ProbeRun' }
+
+    ProbeTriggerRequest:
+      type: object
+      properties:
+        mailbox_ids:
+          type: array
+          description: Restrict the run to these mailboxes. Omit for every enabled one.
+          items: { type: string, format: uuid }
+
+    ProbeTriggerResult:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          description: One entry per mailbox the probe was enqueued for.
+          items:
+            type: object
+            required: [run_id, mailbox_id]
+            properties:
+              run_id: { type: string, format: uuid }
+              mailbox_id: { type: string, format: uuid }
+              delivery_id: { type: string, format: uuid }
+
+    I18nBundle:
+      type: object
+      description: |
+        Translation table of a layout or template. Values are Liquid, so a
+        translation may itself interpolate variables. An empty map for a tag
+        means "fall back to the language" (architecture 6.2).
+      properties:
+        default_locale: { type: string }
+        locales:
+          type: object
+          description: Locale tag (`ko`, `ko-KR`) to key/value pairs.
+          additionalProperties:
+            type: object
+            additionalProperties: { type: string }
+      examples:
+        - default_locale: en
+          locales:
+            en:
+              welcome.title: 'Welcome, {{ recipient.name }}'
+            ko:
+              welcome.title: '{{ recipient.name }}님, 환영합니다'
+            ko-KR: {}
+
+    I18nImportResult:
+      type: object
+      description: Outcome of a bundle import.
+      required: [locales, keys]
+      properties:
+        locales: { type: integer, format: int32, description: Locale tags stored. }
+        keys: { type: integer, format: int32, description: Distinct keys stored. }
+        missing_keys:
+          type: array
+          description: |
+            Keys the template uses that the bundle does not define, per locale.
+            These block a publish unless the tenant relaxed that.
+          items: { $ref: '#/components/schemas/I18nKeyIssue' }
+        unused_keys:
+          type: array
+          description: Keys defined but not referenced anywhere. Warning only.
+          items: { type: string }
+
+    I18nKeyIssue:
+      type: object
+      required: [key, locale]
+      properties:
+        key: { type: string }
+        locale: { type: string }
+
+    I18nKeyList:
+      type: object
+      description: Keys extracted by parsing the subject, body, text part and layout.
+      required: [items]
+      properties:
+        default_locale: { type: string }
+        locales:
+          type: array
+          description: Every locale tag present in the merged bundle.
+          items: { type: string }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/I18nKeyUsage' }
+
+    I18nKeyUsage:
+      type: object
+      required: [key]
+      properties:
+        key: { type: string }
+        used_in:
+          type: array
+          description: Where the key appears.
+          items:
+            type: string
+            enum: [subject, preheader, html, text, layout]
+        missing_locales:
+          type: array
+          description: Locales that do not define the key.
+          items: { type: string }
+
+    Layout:
+      type: object
+      description: |
+        Wraps template bodies around a `{{ content }}` slot and carries its own
+        i18n bundle, merged into the template's at publish time (template keys
+        win).
+      required: [id, name, mode, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        mode: { $ref: '#/components/schemas/ContentMode' }
+        body: { type: string, description: 'MJML or HTML containing `{{ content }}`.' }
+        i18n: { $ref: '#/components/schemas/I18nBundle' }
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    LayoutInput:
+      type: object
+      required: [name, mode, body]
+      properties:
+        name: { type: string, minLength: 1 }
+        mode:
+          description: A layout is authored as `mjml` or `html`, never as blocks.
+          allOf:
+            - $ref: '#/components/schemas/ContentMode'
+        body: { type: string }
+        i18n: { $ref: '#/components/schemas/I18nBundle' }
+
+    LayoutUpdate:
+      description: Layout replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/LayoutInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    LayoutList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Layout' }
+
+    Template:
+      type: object
+      description: |
+        Editable source of a message. Sending never uses it directly: publishing
+        freezes it into a message version.
+      required: [id, name, subject, mode, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        layout_id: { type: string, format: uuid }
+        subject: { type: string }
+        preheader: { type: string }
+        mode: { $ref: '#/components/schemas/ContentMode' }
+        body: { type: string, description: The source the server compiles. }
+        blocks:
+          description: |
+            Block editor project (`grapesjs-mjml`) kept so editing can resume.
+            The server never compiles it.
+          type: object
+          additionalProperties: true
+        text: { type: string, description: Optional plain-text part; empty derives it from the HTML. }
+        i18n: { $ref: '#/components/schemas/I18nBundle' }
+        default_locale: { type: string }
+        published_version_id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: The version transactional sends use when no version is pinned.
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    TemplateInput:
+      type: object
+      required: [name, subject, mode, body]
+      properties:
+        name: { type: string, minLength: 1 }
+        layout_id: { type: string, format: uuid }
+        subject:
+          type: string
+          minLength: 1
+          description: Liquid. CR and LF are rejected.
+        preheader: { type: string }
+        mode: { $ref: '#/components/schemas/ContentMode' }
+        body: { type: string }
+        blocks:
+          type: object
+          additionalProperties: true
+        text: { type: string }
+        i18n: { $ref: '#/components/schemas/I18nBundle' }
+        default_locale: { type: string }
+
+    TemplateUpdate:
+      description: Template replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/TemplateInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    TemplateList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Template' }
+
+    PreviewRequest:
+      type: object
+      description: Sample inputs for a server-side render.
+      properties:
+        locale: { type: string, description: Falls back like a real send would. }
+        recipient: { $ref: '#/components/schemas/PreviewRecipient' }
+        vars:
+          description: Campaign-level variables, merged under the recipient's own.
+          allOf:
+            - $ref: '#/components/schemas/Vars'
+
+    PreviewRecipient:
+      type: object
+      description: Stand-in for the `recipient` Liquid object.
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+        locale: { type: string }
+        vars: { $ref: '#/components/schemas/Vars' }
+        unsubscribe_url: { type: string, format: uri }
+
+    PreviewResult:
+      type: object
+      required: [subject, html, locale]
+      properties:
+        locale: { type: string, description: The locale actually resolved after fallback. }
+        subject: { type: string }
+        html: { type: string }
+        text: { type: string }
+        missing_keys:
+          type: array
+          description: i18n keys that fell through to the key string during this render.
+          items: { $ref: '#/components/schemas/I18nKeyIssue' }
+        warnings:
+          type: array
+          items: { type: string }
+
+    PublishRequest:
+      type: object
+      properties:
+        allow_missing_i18n_keys:
+          type: boolean
+          default: false
+          description: |
+            Publish anyway when keys are untranslated. Only honoured if the
+            tenant policy permits it; otherwise the publish still answers 422
+            `missing_i18n_keys`.
+
+    MessageVersion:
+      type: object
+      description: |
+        Immutable publish snapshot: layout merged, MJML already compiled, i18n
+        bundles merged. A running campaign keeps using its own version even
+        after the template changes (architecture 6.3).
+      required: [id, template_id, subject_tpl, html_tpl]
+      properties:
+        id: { type: string, format: uuid }
+        template_id: { type: string, format: uuid }
+        layout_id: { type: string, format: uuid }
+        subject_tpl: { type: string }
+        html_tpl: { type: string }
+        text_tpl: { type: string }
+        i18n: { $ref: '#/components/schemas/I18nBundle' }
+        default_locale: { type: string }
+        links:
+          type: array
+          description: |
+            Trackable hrefs in document order; the index is the `link_no`
+            carried by click tokens (architecture 9.2).
+          items: { type: string }
+        checksum: { type: string, description: Identifies identical publishes. }
+        created_at: { type: string, format: date-time }
+
+    MessageVersionList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/MessageVersion' }
+
+    CampaignStats:
+      type: object
+      description: |
+        Aggregate recomputed periodically by the control loop and cached on the
+        campaign row; delivery rows are never counted inline (ADR-0003). Ratios
+        use `sent` as the denominator, and bot-suspected interactions are
+        excluded.
+      properties:
+        by_status:
+          type: object
+          description: Delivery count per status.
+          additionalProperties: { type: integer, format: int64 }
+          propertyNames: { $ref: '#/components/schemas/DeliveryStatus' }
+        unique_opens:
+          type: integer
+          format: int64
+          description: Overestimated by privacy proxies; prefer click metrics.
+        unique_clicks: { type: integer, format: int64 }
+        unsubscribed:
+          type: integer
+          format: int64
+          description: Confirmed unsubscribes; the numerator of the unsubscribe rate.
+        unsubscribe_clicked:
+          type: integer
+          format: int64
+          description: Redirect clicks, which a scanner may have caused. Reference metric only.
+        computed_at: { type: string, format: date-time }
+
+    Campaign:
+      type: object
+      description: One bulk send of a message version.
+      required: [id, name, sender_id, status, version]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        version_id:
+          type: string
+          format: uuid
+          description: The message version this campaign is pinned to.
+        sender_id: { type: string, format: uuid }
+        default_locale: { type: string }
+        vars:
+          description: Campaign-wide variables, merged under each recipient's own.
+          allOf:
+            - $ref: '#/components/schemas/Vars'
+        status: { $ref: '#/components/schemas/CampaignStatus' }
+        schedule_at: { type: string, format: date-time, description: Absent means "start now". }
+        started_at: { type: string, format: date-time, readOnly: true }
+        completed_at: { type: string, format: date-time, readOnly: true }
+        stats:
+          readOnly: true
+          allOf:
+            - $ref: '#/components/schemas/CampaignStats'
+        version: { type: integer, format: int64, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    CampaignInput:
+      type: object
+      required: [name, sender_id]
+      properties:
+        name: { type: string, minLength: 1 }
+        version_id:
+          type: string
+          format: uuid
+          description: |
+            Pin a message version. Omit to pin the template's published version
+            at start time; then `template_id` must be given.
+        template_id:
+          type: string
+          format: uuid
+          description: Resolve the version from this template's published one.
+        sender_id: { type: string, format: uuid }
+        default_locale: { type: string }
+        vars: { $ref: '#/components/schemas/Vars' }
+        schedule_at: { type: string, format: date-time }
+
+    CampaignUpdate:
+      description: Campaign replacement carrying the read version.
+      allOf:
+        - $ref: '#/components/schemas/CampaignInput'
+        - $ref: '#/components/schemas/VersionRequired'
+
+    CampaignList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Campaign' }
+
+    RecipientLine:
+      type: object
+      description: |
+        One line of the NDJSON recipient stream. This schema is not a request
+        body on its own; it documents the line format referenced by
+        `x-ndjson-line-schema`.
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          description: |
+            Normalized to lowercase with an IDN domain punycoded before the
+            per-campaign uniqueness check. CR and LF are rejected.
+        name: { type: string }
+        locale:
+          type: string
+          description: |
+            Resolution order is this, then the language only (`ko-KR` to `ko`),
+            then the campaign default, then the template default.
+        vars: { $ref: '#/components/schemas/Vars' }
+        unsubscribe_url:
+          type: string
+          format: uri
+          description: |
+            Per-recipient host destination. Takes precedence over the tenant
+            URL template and the `UnsubscribeURL` hook.
+      examples:
+        - email: a@x.com
+          name: A
+          locale: ko
+          vars: { plan: pro }
+
+    RecipientIngestResult:
+      type: object
+      description: Counts for the chunk just ingested, or replayed from a stored chunk.
+      required: [accepted, duplicates, invalid, total]
+      properties:
+        accepted: { type: integer, format: int64, description: Lines inserted by this chunk. }
+        duplicates:
+          type: integer
+          format: int64
+          description: Lines skipped because the address is already a recipient of this campaign.
+        invalid:
+          type: integer
+          format: int64
+          description: Lines rejected for a bad address or an oversized `vars`.
+        total:
+          type: integer
+          format: int64
+          description: The campaign's recipient count after this chunk, not the chunk size.
+        idempotent_replay:
+          type: boolean
+          description: True when these counts came from a previously completed chunk.
+      examples:
+        - accepted: 99871
+          duplicates: 129
+          invalid: 0
+          total: 1000000
+
+    StartCampaignRequest:
+      type: object
+      properties:
+        schedule_at:
+          type: string
+          format: date-time
+          description: Start at this instant instead of immediately.
+
+    RetryRequest:
+      type: object
+      description: Selects which deliveries go back to `queued`.
+      properties:
+        status:
+          type: array
+          description: Defaults to `["failed"]`.
+          items: { $ref: '#/components/schemas/DeliveryStatus' }
+        error_class:
+          type: array
+          description: Defaults to every class.
+          items: { $ref: '#/components/schemas/ErrorClass' }
+        delivery_ids:
+          type: array
+          description: Restrict to specific deliveries.
+          items: { type: string, format: uuid }
+        limit:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Cap on how many are requeued in this call.
+      examples:
+        - status: [failed]
+          error_class: [transient, rate_limited]
+
+    RetryResult:
+      type: object
+      required: [requeued]
+      properties:
+        requeued: { type: integer, format: int64 }
+
+    LinkClickList:
+      type: object
+      description: Not paginated; the list is as long as the version's link list.
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/LinkClick' }
+
+    LinkClick:
+      type: object
+      required: [link_no, url, clicks, unique_clicks]
+      properties:
+        link_no:
+          type: integer
+          format: int32
+          description: Position in the published version's link list; -1 for a link not in it.
+        url: { type: string }
+        clicks: { type: integer, format: int64, description: Every click event. }
+        unique_clicks: { type: integer, format: int64, description: Distinct deliveries. }
+
+    UnsubscribeNotice:
+      type: object
+      description: |
+        Identify the recipient by `delivery_id` or `email`; exactly one is
+        required.
+      properties:
+        delivery_id: { type: string, format: uuid }
+        email: { type: string, format: email, description: Matched against the normalized address. }
+        source:
+          type: string
+          description: Who reported it. `host` is the usual value under `unsubscribe_mode=host`.
+          enum: [host, api]
+          default: host
+        occurred_at:
+          type: string
+          format: date-time
+          description: Defaults to now.
+      oneOf:
+        - required: [delivery_id]
+        - required: [email]
+
+    DeliveryUnsubscribeNotice:
+      type: object
+      description: Per-delivery form; the delivery is already in the path.
+      properties:
+        source:
+          type: string
+          enum: [host, api]
+          default: host
+        occurred_at: { type: string, format: date-time }
+
+    UnsubscribeResult:
+      type: object
+      required: [recorded]
+      properties:
+        delivery_id: { type: string, format: uuid }
+        recorded:
+          type: boolean
+          description: |
+            False when the recipient was already unsubscribed, which is not an
+            error: only the first write sets `unsubscribed_at`.
+        suppressed:
+          type: boolean
+          description: Whether the address was also added to the suppression list.
+
+    Delivery:
+      type: object
+      description: |
+        One recipient of one message version, and at the same time the queue
+        item senders claim (ADR-0002, ADR-0003). It has no `version`: every
+        transition is a conditional update on status and lease, not optimistic
+        concurrency.
+      required: [id, version_id, sender_id, lane, status, email]
+      properties:
+        id: { type: string, format: uuid }
+        campaign_id:
+          type: string
+          format: uuid
+          description: Absent for transactional and probe deliveries.
+        version_id: { type: string, format: uuid }
+        sender_id: { type: string, format: uuid }
+        lane: { $ref: '#/components/schemas/Lane' }
+        priority: { type: integer, format: int32 }
+        status: { $ref: '#/components/schemas/DeliveryStatus' }
+        email: { type: string, format: email, description: As supplied. }
+        email_norm: { type: string, description: 'Lowercased and punycoded; the deduplication key.' }
+        name: { type: string }
+        locale: { type: string }
+        vars: { $ref: '#/components/schemas/Vars' }
+        unsubscribe_url: { type: string }
+        attempt_count:
+          type: integer
+          format: int32
+          description: Consumed by transient and rate-limited attempts only.
+        retry_gen:
+          type: integer
+          format: int32
+          description: Bumped by a manual retry so the attempt history stays intact.
+        next_attempt_at: { type: string, format: date-time }
+        lease_owner: { type: string, description: Sender replica currently holding the row. }
+        lease_until: { type: string, format: date-time }
+        last_error_class: { $ref: '#/components/schemas/ErrorClass' }
+        last_smtp_code: { type: integer, format: int32 }
+        last_error: { type: string }
+        message_id: { type: string, description: 'The `Message-ID` header, also a bounce correlation key.' }
+        sent_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        first_opened_at: { type: string, format: date-time }
+        first_clicked_at: { type: string, format: date-time }
+        unsubscribed_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    DeliveryList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Delivery' }
+
+    DeliveryAttempt:
+      type: object
+      description: One SMTP attempt. Response codes, errors, the transport used and the duration live here, never on the delivery.
+      required: [id, delivery_id, attempt_no]
+      properties:
+        id: { type: string, format: uuid }
+        delivery_id: { type: string, format: uuid }
+        attempt_no:
+          type: integer
+          format: int32
+          description: The `attempt_count` this attempt produced.
+        retry_gen: { type: integer, format: int32 }
+        transport_id: { type: string, format: uuid }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        smtp_code: { type: integer, format: int32 }
+        enhanced_code: { type: string, description: 'RFC 3463 code, e.g. `4.7.28`.' }
+        error_class: { $ref: '#/components/schemas/ErrorClass' }
+        error: { type: string }
+        created_at: { type: string, format: date-time }
+
+    DeliveryAttemptList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/DeliveryAttempt' }
+
+    MessageRecipient:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+        locale: { type: string }
+        vars:
+          description: Merged over the request-level `vars`.
+          allOf:
+            - $ref: '#/components/schemas/Vars'
+
+    MessageRequest:
+      type: object
+      description: One transactional send fanned out to up to 1000 recipients.
+      required: [sender_id, to]
+      properties:
+        template_id:
+          type: string
+          format: uuid
+          description: Uses the template's currently published version. Required unless `version_id` is given.
+        version_id:
+          type: string
+          format: uuid
+          description: Pin an exact message version instead of the published one.
+        sender_id: { type: string, format: uuid }
+        to:
+          type: array
+          description: |
+            Each entry becomes its own delivery with its own envelope; they are
+            not a single multi-recipient message.
+          minItems: 1
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/MessageRecipient' }
+        vars:
+          description: Request-level variables, merged under each recipient's own.
+          allOf:
+            - $ref: '#/components/schemas/Vars'
+        default_locale: { type: string }
+        headers:
+          type: object
+          description: |
+            Extra headers, restricted to the configured whitelist. Values
+            containing CR or LF are rejected; a header outside the whitelist
+            answers 422 `validation_failed`.
+          additionalProperties: { type: string }
+        priority:
+          type: integer
+          format: int32
+          default: 0
+          description: Higher is claimed first within the transactional lane.
+      examples:
+        - template_id: 018f5a2c-0000-7000-8000-000000000001
+          sender_id: 018f5a2c-0000-7000-8000-000000000002
+          vars: { product: sendplane }
+          to:
+            - { email: a@x.com, name: A, locale: ko, vars: { plan: pro } }
+
+    MessageResult:
+      type: object
+      required: [version_id, deliveries]
+      properties:
+        version_id:
+          type: string
+          format: uuid
+          description: The message version actually used, so the caller can reproduce the render.
+        deliveries:
+          type: array
+          items: { $ref: '#/components/schemas/MessageResultItem' }
+        idempotent_replay:
+          type: boolean
+          description: True when this is the stored result of an earlier identical request.
+
+    MessageResultItem:
+      type: object
+      required: [delivery_id, email, status]
+      properties:
+        delivery_id: { type: string, format: uuid }
+        email: { type: string, format: email, description: As supplied. }
+        status:
+          description: '`queued` normally, or `suppressed` when the address is on the do-not-send list.'
+          allOf:
+            - $ref: '#/components/schemas/DeliveryStatus'
+
+    Suppression:
+      type: object
+      description: |
+        One do-not-send entry. It holds the address, why and until when, and
+        nothing else about the recipient (ADR-0008).
+      required: [email_norm, reason, created_at]
+      properties:
+        email_norm: { type: string, format: email }
+        reason: { $ref: '#/components/schemas/SuppressionReason' }
+        source_delivery_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: Absent means it never expires. }
+
+    SuppressionInput:
+      type: object
+      required: [reason]
+      properties:
+        reason: { $ref: '#/components/schemas/SuppressionReason' }
+        source_delivery_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+
+    SuppressionList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Suppression' }
+
+    BounceEvent:
+      type: object
+      description: One parsed DSN (RFC 3464) or feedback report (RFC 5965).
+      required: [id, type, source, verified]
+      properties:
+        id: { type: string, format: uuid }
+        delivery_id: { type: string, format: uuid, description: Absent when correlation failed. }
+        type: { $ref: '#/components/schemas/BounceType' }
+        source: { $ref: '#/components/schemas/BounceSource' }
+        verified:
+          type: boolean
+          description: |
+            False when the VERP HMAC did not match. Such events are recorded for
+            audit but never change a delivery.
+        recipient: { type: string }
+        email_norm: { type: string }
+        smtp_status: { type: string, description: 'The DSN `Status:` field, e.g. `5.1.1`.' }
+        diagnostic_code: { type: string }
+        message_id: { type: string }
+        raw:
+          description: Original message, kept only when the tenant opted in.
+          type: string
+        received_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+
+    BounceEventList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/BounceEvent' }
+
+    OutboxEvent:
+      type: object
+      description: |
+        An event queued for the host, written in the same store as the
+        transition it describes so no cross-repository transaction is needed
+        (architecture 12).
+      required: [id, type, status]
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          description: |
+            One of `delivery.sent|deferred|failed|bounced|complained|suppressed`,
+            `campaign.started|paused|completed|cancelled`,
+            `transport.unhealthy|recovered`, `sender.health_changed`,
+            `recipient.unsubscribed`, `delivery.opened|clicked`,
+            `i18n.missing_key`.
+        payload:
+          description: Event body; the shape depends on `type`.
+          type: object
+          additionalProperties: true
+        status: { $ref: '#/components/schemas/OutboxStatus' }
+        attempts: { type: integer, format: int32 }
+        next_attempt_at: { type: string, format: date-time }
+        last_error: { type: string }
+        created_at: { type: string, format: date-time }
+        delivered_at: { type: string, format: date-time }
+
+    OutboxEventList:
+      type: object
+      required: [items]
+      allOf:
+        - $ref: '#/components/schemas/PageInfo'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/OutboxEvent' }
+
+    ServiceHealth:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        store:
+          type: string
+          description: Store reachability.
+          enum: [ok, error]
+        version: { type: string, description: Build version of the running binary. }
+
+    TransportHealth:
+      type: object
+      required: [transport_id, status]
+      properties:
+        transport_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/TransportStatus' }
+        reason: { type: string }
+        changed_at: { type: string, format: date-time }
+
+    SenderHealth:
+      type: object
+      description: Worst-of summary across probe mailboxes, with the per-mailbox detail.
+      required: [sender_id, status]
+      properties:
+        sender_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/HealthStatus' }
+        reason: { type: string }
+        checked_at: { type: string, format: date-time }
+        transport_status: { $ref: '#/components/schemas/TransportStatus' }
+        domain_status: { $ref: '#/components/schemas/HealthStatus' }
+        mailboxes:
+          type: array
+          description: Latest probe run per mailbox.
+          items: { $ref: '#/components/schemas/ProbeRun' }
