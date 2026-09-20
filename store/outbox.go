@@ -46,4 +46,12 @@ type OutboxRepo interface {
 	// the dead letter state.
 	MarkFailed(ctx context.Context, id string, nextAttempt time.Time, errMsg string) error
 	List(ctx context.Context, status OutboxStatus, p Page) (Result[OutboxEvent], error)
+	// DeleteBefore removes dispatched events created before the cutoff, at
+	// most limit of them, and returns how many it deleted.
+	//
+	// Only delivered and failed rows are eligible. A pending row is still
+	// owed to the host however old it is, and a failed one is the dead letter
+	// the host lists and replays, so retention is the only thing that ever
+	// removes it. A limit <= 0 means "every match".
+	DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error)
 }

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -70,7 +70,7 @@ func TestCampaignStateMachine(t *testing.T) {
 	for _, tc := range table {
 		name := tc.action + "/" + tc.from.String()
 		t.Run(name, func(t *testing.T) {
-			_, st, _, c := newFixture(t, sendplane.Hooks{})
+			_, st, _, c := newFixture(t, host.Hooks{})
 			ctx := context.Background()
 			cam := readyCampaign(t, st, tc.from)
 
@@ -110,7 +110,7 @@ func TestCampaignStateMachine(t *testing.T) {
 }
 
 func TestStartCampaignSchedulesAndStarts(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{})
+	_, st, _, c := newFixture(t, host.Hooks{})
 
 	later := seedAndStart(t, st, c, baseTime.Add(time.Hour))
 	scheduled := getCampaign(t, st, later.ID)
@@ -156,7 +156,7 @@ func TestStartCampaignPreconditions(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("no recipients", func(t *testing.T) {
-		_, st, _, c := newFixture(t, sendplane.Hooks{})
+		_, st, _, c := newFixture(t, host.Hooks{})
 		sender := seedSender(t, st)
 		cam := seedCampaign(t, st, store.CampaignDraft, func(c *store.Campaign) { c.SenderID = sender.ID })
 		if err := c.StartCampaign(ctx, st, cam.ID, time.Time{}); !errors.Is(err, ErrNoRecipients) {
@@ -165,7 +165,7 @@ func TestStartCampaignPreconditions(t *testing.T) {
 	})
 
 	t.Run("no version", func(t *testing.T) {
-		_, st, _, c := newFixture(t, sendplane.Hooks{})
+		_, st, _, c := newFixture(t, host.Hooks{})
 		sender := seedSender(t, st)
 		cam := seedCampaign(t, st, store.CampaignDraft, func(c *store.Campaign) {
 			c.SenderID, c.VersionID = sender.ID, ""
@@ -177,7 +177,7 @@ func TestStartCampaignPreconditions(t *testing.T) {
 	})
 
 	t.Run("sender missing", func(t *testing.T) {
-		_, st, _, c := newFixture(t, sendplane.Hooks{})
+		_, st, _, c := newFixture(t, host.Hooks{})
 		cam := seedCampaign(t, st, store.CampaignDraft, func(c *store.Campaign) { c.SenderID = "" })
 		seedDeliveries(t, st, cam.ID, store.DeliveryPending, 1)
 		if err := c.StartCampaign(ctx, st, cam.ID, time.Time{}); !errors.Is(err, ErrNoSender) {
@@ -186,7 +186,7 @@ func TestStartCampaignPreconditions(t *testing.T) {
 	})
 
 	t.Run("sender does not exist", func(t *testing.T) {
-		_, st, _, c := newFixture(t, sendplane.Hooks{})
+		_, st, _, c := newFixture(t, host.Hooks{})
 		cam := seedCampaign(t, st, store.CampaignDraft, func(c *store.Campaign) { c.SenderID = "ghost" })
 		seedDeliveries(t, st, cam.ID, store.DeliveryPending, 1)
 		if err := c.StartCampaign(ctx, st, cam.ID, time.Time{}); !errors.Is(err, ErrNoSender) {
@@ -195,7 +195,7 @@ func TestStartCampaignPreconditions(t *testing.T) {
 	})
 
 	t.Run("campaign missing", func(t *testing.T) {
-		_, st, _, c := newFixture(t, sendplane.Hooks{})
+		_, st, _, c := newFixture(t, host.Hooks{})
 		if err := c.StartCampaign(ctx, st, "ghost", time.Time{}); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("err = %v, want store.ErrNotFound", err)
 		}
@@ -203,7 +203,7 @@ func TestStartCampaignPreconditions(t *testing.T) {
 }
 
 func TestCancelCampaignRecordsFinishTime(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{})
+	_, st, _, c := newFixture(t, host.Hooks{})
 	ctx := context.Background()
 
 	cam := readyCampaign(t, st, store.CampaignRunning)
@@ -226,7 +226,7 @@ func TestCancelCampaignRecordsFinishTime(t *testing.T) {
 }
 
 func TestRetryCampaignRequeuesAndResumes(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{}, WithBatches(Batches{RetryChunk: 2}))
+	_, st, _, c := newFixture(t, host.Hooks{}, WithBatches(Batches{RetryChunk: 2}))
 	ctx := context.Background()
 
 	cam := seedCampaign(t, st, store.CampaignCompleted, func(c *store.Campaign) {
@@ -268,7 +268,7 @@ func TestRetryCampaignRequeuesAndResumes(t *testing.T) {
 }
 
 func TestRetryCampaignEmptyIDListMatchesNothing(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{})
+	_, st, _, c := newFixture(t, host.Hooks{})
 	ctx := context.Background()
 
 	cam := seedCampaign(t, st, store.CampaignCompleted)
@@ -287,7 +287,7 @@ func TestRetryCampaignEmptyIDListMatchesNothing(t *testing.T) {
 }
 
 func TestRetryCampaignDefaultsToFailed(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{})
+	_, st, _, c := newFixture(t, host.Hooks{})
 	ctx := context.Background()
 
 	cam := seedCampaign(t, st, store.CampaignRunning)
@@ -309,7 +309,7 @@ func TestRetryCampaignDefaultsToFailed(t *testing.T) {
 }
 
 func TestPauseResumeKeepsDeliveriesUntouched(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{})
+	_, st, _, c := newFixture(t, host.Hooks{})
 	ctx := context.Background()
 
 	cam := readyCampaign(t, st, store.CampaignRunning)

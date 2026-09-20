@@ -16,7 +16,8 @@ type settingsRepo struct {
 }
 
 const settingsCols = `retry, retention_days, suppression_enabled, unsubscribe_mode,
-	unsubscribe_url_template, default_locale, tracking, version, created_at, updated_at`
+	unsubscribe_url_template, unsubscribe_one_click, default_locale, tracking,
+	version, created_at, updated_at`
 
 func (r *settingsRepo) Get(ctx context.Context) (*store.TenantSettings, error) {
 	if err := r.p.check(); err != nil {
@@ -27,7 +28,8 @@ func (r *settingsRepo) Get(ctx context.Context) (*store.TenantSettings, error) {
 	var retry, tracking []byte
 	var mode string
 	err := r.p.pool.QueryRow(ctx, q, r.tenant).Scan(&retry, &v.RetentionDays,
-		&v.SuppressionEnabled, &mode, &v.UnsubscribeURLTemplate, &v.DefaultLocale,
+		&v.SuppressionEnabled, &mode, &v.UnsubscribeURLTemplate,
+		&v.UnsubscribeOneClick, &v.DefaultLocale,
 		&tracking, &v.Version, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("tenant settings %s: %w", r.tenant, mapErr(err))
@@ -65,11 +67,13 @@ func (r *settingsRepo) Create(ctx context.Context, v *store.TenantSettings) erro
 	v.Version = 1
 	const q = `INSERT INTO tenant_settings (tenant_id, retry, retention_days,
 	    suppression_enabled, unsubscribe_mode, unsubscribe_url_template,
-	    default_locale, tracking, version, created_at, updated_at)
-	  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	    unsubscribe_one_click, default_locale, tracking, version, created_at,
+	    updated_at)
+	  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 	_, err = r.p.pool.Exec(ctx, q, r.tenant, retry, v.RetentionDays,
 		v.SuppressionEnabled, string(v.UnsubscribeMode), v.UnsubscribeURLTemplate,
-		v.DefaultLocale, tracking, v.Version, tsInNN(v.CreatedAt), tsInNN(v.UpdatedAt))
+		v.UnsubscribeOneClick, v.DefaultLocale, tracking, v.Version,
+		tsInNN(v.CreatedAt), tsInNN(v.UpdatedAt))
 	return mapErr(err)
 }
 
@@ -91,15 +95,16 @@ func (r *settingsRepo) Update(ctx context.Context, v *store.TenantSettings) erro
 	v.TenantID = r.tenant
 	const q = `UPDATE tenant_settings SET retry = $2, retention_days = $3,
 	    suppression_enabled = $4, unsubscribe_mode = $5,
-	    unsubscribe_url_template = $6, default_locale = $7, tracking = $8,
-	    version = version + 1, updated_at = $9
-	  WHERE tenant_id = $1 AND version = $10
+	    unsubscribe_url_template = $6, unsubscribe_one_click = $7,
+	    default_locale = $8, tracking = $9,
+	    version = version + 1, updated_at = $10
+	  WHERE tenant_id = $1 AND version = $11
 	  RETURNING created_at, updated_at, version`
 	var created, updated time.Time
 	var version int64
 	err = r.p.pool.QueryRow(ctx, q, r.tenant, retry, v.RetentionDays,
 		v.SuppressionEnabled, string(v.UnsubscribeMode), v.UnsubscribeURLTemplate,
-		v.DefaultLocale, tracking, r.p.now(), v.Version).
+		v.UnsubscribeOneClick, v.DefaultLocale, tracking, r.p.now(), v.Version).
 		Scan(&created, &updated, &version)
 	if err != nil {
 		var exists bool
@@ -396,6 +401,12 @@ func (r *trackingRepo) LinkClicks(ctx context.Context, campaignID string) ([]sto
 	return out, mapErr(rows.Err())
 }
 
+// DeleteBefore enforces retention on tracking events in chunks
+// (architecture 9.4: they live as long as the deliveries they describe).
+func (r *trackingRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return deleteBefore(ctx, r.p, "tracking_event", r.tenant, before, limit, "")
+}
+
 // --- outbox ------------------------------------------------------------
 
 type outboxRepo struct {
@@ -577,6 +588,13 @@ func (r *outboxRepo) List(ctx context.Context, status store.OutboxStatus, p stor
 		res.Items = items[:p.Limit]
 	}
 	return res, nil
+}
+
+// DeleteBefore removes dispatched events only: a pending row is still owed to
+// the host, whatever its age.
+func (r *outboxRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return deleteBefore(ctx, r.p, "outbox_event", r.tenant, before, limit,
+		" AND status IN ('"+string(store.OutboxDelivered)+"', '"+string(store.OutboxFailed)+"')")
 }
 
 // --- locks -------------------------------------------------------------

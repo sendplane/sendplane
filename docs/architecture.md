@@ -68,7 +68,11 @@ k8s에서는 역할별 Deployment. **모든 역할이 같은 Go 라이브러리�
 
 ```
 github.com/sendplane/sendplane
-├── sendplane.go            // New(), Options, Hooks, Principal, Action 상수  ← 공개 API
+├── sendplane.go            // New(), Options, Sendplane, SenderConfig  ← 공개 API
+├── host/                   // 호스트가 주입하거나 받는 타입들 (공개, leaf)
+│                           //   Principal/Action/Authenticator/Authorizer/TenantResolver,
+│                           //   Hooks/Event/EventSink/OutboundMessage/RecipientContext,
+│                           //   SecretCipher, Limits, Metrics
 ├── store/                  // 리포지터리 인터페이스 + 모델 (공개: 커스텀 DB 구현용)
 │   ├── postgres/           // pgx 기반 구현 + migrations/
 │   ├── mongo/              // mongo-driver 기반 구현 + index bootstrap
@@ -91,12 +95,21 @@ github.com/sendplane/sendplane
 └── docs/
 ```
 
-공개 패키지는 `sendplane`(루트)과 `store`뿐입니다. 나머지는 `internal/`로 막아 Hyrum's Law 표면을 최소화합니다.
+공개 패키지는 `sendplane`(루트), `host`, `store` 셋뿐입니다. 나머지는 `internal/`로 막아 Hyrum's Law 표면을 최소화합니다.
+
+`host`가 따로 있는 이유는 **import 사이클** 하나뿐입니다. 루트는 `Handler`/`RunControl`/`RunSender`를 구현하려고
+`internal/api`·`internal/control`·`internal/sender`를 import하는데, 그 패키지들도 호스트가 주입하는 타입(`Hooks`, `Limits`,
+`EventSink`, `Metrics` …)이 필요합니다. 그래서 그 타입들은 `store`만 import하는 leaf 패키지 `host`에 두고,
+루트가 **타입 별칭**으로 전부 재노출합니다(`type Hooks = host.Hooks`). 호스트는 계속 `sendplane.X`만 쓰면 되고,
+`sendplane.Hooks`와 `host.Hooks`는 같은 타입이라 경계에서 변환이 필요 없습니다.
 
 ## 3. 임베딩 API (`sendplane.New`)
 
 ```go
 package sendplane
+
+// 아래 타입은 전부 host 패키지에 선언되어 있고 루트가 별칭으로 재노출합니다(§2.1).
+// 호스트 코드에서는 sendplane.X 로 쓰면 되고, host.X 와 동일한 타입입니다.
 
 type Options struct {
     Store   store.Provider   // 필수

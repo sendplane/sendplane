@@ -8,18 +8,11 @@ import (
 	"github.com/sendplane/sendplane/store"
 )
 
-// SystemTenantID is the tenant the leader lock lives in.
-//
-// store.Store is tenant-bound on purpose (ADR-0006), but leader election is a
-// cluster-wide singleton with no tenant of its own, so it needs a scope that
-// belongs to no customer. The name starts with an underscore, which tenant IDs
-// handed out by a host never do.
-//
-// This arguably belongs in the store package next to DefaultTenantID, so that
-// a custom store.Provider knows the scope exists and does not, say, iterate it
-// as a real tenant. It is declared here because internal/control may not
-// change the store contract; see the package README.
-const SystemTenantID = "_system"
+// SystemTenantID is the tenant the leader lock lives in. It is an alias for
+// store.SystemTenantID, which is where the scope is defined now that a custom
+// Provider has to know about it (it must serve the scope and keep it out of
+// ActiveTenants).
+const SystemTenantID = store.SystemTenantID
 
 // LeaderLockName is the LockRepo key the control leader holds.
 const LeaderLockName = "control-leader"

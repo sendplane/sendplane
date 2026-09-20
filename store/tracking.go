@@ -56,4 +56,10 @@ type TrackingRepo interface {
 	CountUnique(ctx context.Context, campaignID string) (TrackingCounts, error)
 	// LinkClicks reports clicks per link URL, ordered by LinkNo then URL.
 	LinkClicks(ctx context.Context, campaignID string) ([]LinkClick, error)
+	// DeleteBefore removes events created before the cutoff, at most limit of
+	// them, and returns how many it deleted. Tracking events follow the same
+	// retention as the deliveries they describe (architecture 9.4); the caller
+	// loops until it gets back fewer than limit. A limit <= 0 means "every
+	// match", which is only safe for small tenants.
+	DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error)
 }

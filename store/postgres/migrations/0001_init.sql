@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
   suppression_enabled      boolean     NOT NULL DEFAULT false,
   unsubscribe_mode         text        NOT NULL DEFAULT '',
   unsubscribe_url_template text        NOT NULL DEFAULT '',
+  unsubscribe_one_click    boolean     NOT NULL DEFAULT false,
   default_locale           text        NOT NULL DEFAULT '',
   tracking                 jsonb,
   version                  bigint      NOT NULL DEFAULT 1,
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS transport (
   status                 smallint    NOT NULL DEFAULT 0,
   status_reason          text        NOT NULL DEFAULT '',
   status_changed_at      timestamptz,
+  status_until           timestamptz,
   version                bigint      NOT NULL DEFAULT 1,
   created_at             timestamptz NOT NULL,
   updated_at             timestamptz NOT NULL
@@ -333,6 +335,9 @@ CREATE TABLE IF NOT EXISTS tracking_event (
 );
 CREATE INDEX IF NOT EXISTS tracking_event_by_campaign
   ON tracking_event (tenant_id, campaign_id, kind) WHERE NOT suspected_bot;
+-- Retention deletes walk (tenant_id, created_at).
+CREATE INDEX IF NOT EXISTS tracking_event_retention
+  ON tracking_event (tenant_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS outbox_event (
   id              text PRIMARY KEY,

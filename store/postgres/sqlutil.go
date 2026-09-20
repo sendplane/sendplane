@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -153,6 +154,30 @@ func limitOrAll(limit int) int {
 		return allRows
 	}
 	return limit
+}
+
+// --- retention ---------------------------------------------------------
+
+// deleteBefore is the shared retention delete: the oldest rows of one table
+// first, at most limit of them, optionally narrowed by extra (an already-safe
+// SQL fragment, never caller input). The CTE picks the ids under the list
+// index and the DELETE matches on the primary key, so a chunk never degrades
+// into a table scan and never holds a lock on rows it is not deleting.
+func deleteBefore(ctx context.Context, p *Provider, table, tenant string,
+	before time.Time, limit int, extra string) (int, error) {
+	if err := p.check(); err != nil {
+		return 0, err
+	}
+	a := &args{}
+	q := "WITH c AS (SELECT id FROM " + table + " WHERE tenant_id = " + a.add(tenant) +
+		" AND created_at < " + a.add(tsInNN(before)) + extra +
+		" ORDER BY created_at, id LIMIT " + a.add(limitOrAll(limit)) + ") " +
+		"DELETE FROM " + table + " WHERE id IN (SELECT id FROM c)"
+	tag, err := p.pool.Exec(ctx, q, a.v...)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // --- cursors -----------------------------------------------------------

@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
-func newDispatcher(t *testing.T, st store.Store, sink sendplane.EventSink, c *Control, clk *fakeClock) *outboxDispatcher {
+func newDispatcher(t *testing.T, st store.Store, sink host.EventSink, c *Control, clk *fakeClock) *outboxDispatcher {
 	t.Helper()
 	return &outboxDispatcher{st: st, sink: sink, log: discardLogger(), cfg: &c.cfg, clock: clk.Now}
 }
@@ -33,7 +33,7 @@ func enqueue(t *testing.T, st store.Store, typ string, n int) {
 
 func TestOutboxDispatcherDeliversAndMarks(t *testing.T) {
 	sink := &recordingSink{}
-	_, st, clk, c := newFixture(t, sendplane.Hooks{Events: sink})
+	_, st, clk, c := newFixture(t, host.Hooks{Events: sink})
 	ctx := context.Background()
 
 	enqueue(t, st, EventCampaignCompleted, 5)
@@ -70,7 +70,7 @@ func TestOutboxDispatcherDeliversAndMarks(t *testing.T) {
 func TestOutboxDispatcherBackoffAndDeadLetter(t *testing.T) {
 	sink := &recordingSink{}
 	sink.setErr(errors.New("webhook 503"))
-	_, st, clk, c := newFixture(t, sendplane.Hooks{Events: sink})
+	_, st, clk, c := newFixture(t, host.Hooks{Events: sink})
 	ctx := context.Background()
 
 	enqueue(t, st, EventCampaignCompleted, 1)
@@ -130,7 +130,7 @@ func TestOutboxDispatcherBackoffAndDeadLetter(t *testing.T) {
 
 func TestOutboxDispatcherSkipsNotYetDue(t *testing.T) {
 	sink := &recordingSink{}
-	_, st, clk, c := newFixture(t, sendplane.Hooks{Events: sink})
+	_, st, clk, c := newFixture(t, host.Hooks{Events: sink})
 	ctx := context.Background()
 
 	if err := st.Outbox().Enqueue(ctx, []store.OutboxEvent{{
@@ -149,13 +149,13 @@ func TestOutboxDispatcherSkipsNotYetDue(t *testing.T) {
 }
 
 func TestOutboxLoopNotRegisteredWithoutSink(t *testing.T) {
-	_, _, _, c := newFixture(t, sendplane.Hooks{})
+	_, _, _, c := newFixture(t, host.Hooks{})
 	for _, s := range c.loopSpecs() {
 		if s.name == "outbox" {
 			t.Fatal("the outbox dispatcher was registered without an EventSink")
 		}
 	}
-	_, _, _, withSink := newFixture(t, sendplane.Hooks{Events: &recordingSink{}})
+	_, _, _, withSink := newFixture(t, host.Hooks{Events: &recordingSink{}})
 	found := false
 	for _, s := range withSink.loopSpecs() {
 		if s.name == "outbox" {

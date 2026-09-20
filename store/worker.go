@@ -5,13 +5,24 @@ import (
 	"time"
 )
 
+// The roles a worker row may carry. They are the process roles of
+// docs/architecture.md 2 (--roles=control,sender,bounce) and are constants so
+// that the writer of a heartbeat and the reader counting replicas cannot drift
+// apart over a typo: the sender divides the cluster-wide transport rate by the
+// number of rows whose role is WorkerRoleSender (architecture 8.2).
+const (
+	WorkerRoleSender  = "sender"
+	WorkerRoleControl = "control"
+	WorkerRoleBounce  = "bounce"
+)
+
 // Worker is a sender replica's heartbeat. The active worker count is how the
 // cluster-wide transport rate is divided without a central lock
 // (architecture 8.2).
 type Worker struct {
 	ID       string
 	TenantID string
-	Role     string // sender | control | bounce
+	Role     string // WorkerRoleSender | WorkerRoleControl | WorkerRoleBounce
 	Lanes    []Lane
 	// Concurrency is this replica's worker pool size.
 	Concurrency int

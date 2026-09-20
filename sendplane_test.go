@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store/memstore"
 )
 
@@ -36,7 +39,7 @@ func TestNewDefaults(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	o := s.Options()
-	if o.Logger == nil || o.Clock == nil || o.Authz == nil || o.Tenants == nil {
+	if o.Logger == nil || o.Clock == nil || o.Authz == nil || o.Tenants == nil || o.Metrics == nil {
 		t.Fatalf("New left a default unset: %+v", o)
 	}
 	if o.Limits != sendplane.DefaultLimits {
@@ -76,20 +79,93 @@ func TestPartialLimitsKeepDefaults(t *testing.T) {
 	}
 }
 
-func TestRunsAreNotImplementedYet(t *testing.T) {
+// The types a host injects are aliases for the ones in package host, not
+// copies: a sendplane.Hooks must be usable wherever a host.Hooks is, or the
+// internal packages and the host would be talking about different types.
+func TestPublicTypesAliasHost(t *testing.T) {
+	var (
+		_ host.Hooks            = sendplane.Hooks{}
+		_ sendplane.Hooks       = host.Hooks{}
+		_ host.Limits           = sendplane.Limits{}
+		_ host.Principal        = sendplane.Principal{}
+		_ host.Action           = sendplane.ActionCampaignSend
+		_ host.Resource         = sendplane.Resource{}
+		_ host.Metrics          = sendplane.NopMetrics{}
+		_ host.RecipientContext = sendplane.RecipientContext{}
+	)
+	if !errors.Is(sendplane.ErrSkip, host.ErrSkip) {
+		t.Error("sendplane.ErrSkip is not host.ErrSkip")
+	}
+	if !errors.Is(sendplane.ErrForbidden, host.ErrForbidden) {
+		t.Error("sendplane.ErrForbidden is not host.ErrForbidden")
+	}
+	if !errors.Is(sendplane.ErrUnauthenticated, host.ErrUnauthenticated) {
+		t.Error("sendplane.ErrUnauthenticated is not host.ErrUnauthenticated")
+	}
+	if sendplane.DefaultLimits != host.DefaultLimits {
+		t.Error("sendplane.DefaultLimits differs from host.DefaultLimits")
+	}
+}
+
+// RunControl and RunSender block until the context is done. A cancelled
+// context therefore has to come straight back out, which is also what a
+// graceful shutdown looks like.
+func TestRunControlStopsWithTheContext(t *testing.T) {
 	s, err := sendplane.New(sendplane.Options{Store: memstore.New(), Auth: staticAuth{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx := context.Background()
-	for name, err := range map[string]error{
-		"RunControl": s.RunControl(ctx),
-		"RunSender":  s.RunSender(ctx, sendplane.SenderConfig{}),
-		"RunBounce":  s.RunBounce(ctx),
-	} {
-		if !errors.Is(err, sendplane.ErrNotImplemented) {
-			t.Errorf("%s = %v, want ErrNotImplemented", name, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.RunControl(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunControl on a cancelled context = %v, want nil", err)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunControl did not return on a cancelled context")
+	}
+}
+
+func TestRunSenderNeedsAWorkerID(t *testing.T) {
+	s, err := sendplane.New(sendplane.Options{Store: memstore.New(), Auth: staticAuth{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = s.RunSender(context.Background(), sendplane.SenderConfig{})
+	if err == nil || !strings.Contains(err.Error(), "WorkerID") {
+		t.Fatalf("RunSender without a WorkerID = %v, want an error naming WorkerID", err)
+	}
+}
+
+func TestRunSenderStopsWithTheContext(t *testing.T) {
+	s, err := sendplane.New(sendplane.Options{Store: memstore.New(), Auth: staticAuth{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.RunSender(ctx, sendplane.SenderConfig{WorkerID: "w1"}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSender on a cancelled context = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunSender did not return on a cancelled context")
+	}
+}
+
+func TestBounceAndHandlerAreNotImplementedYet(t *testing.T) {
+	s, err := sendplane.New(sendplane.Options{Store: memstore.New(), Auth: staticAuth{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.RunBounce(context.Background()); !errors.Is(err, sendplane.ErrNotImplemented) {
+		t.Errorf("RunBounce = %v, want ErrNotImplemented", err)
 	}
 	if s.Handler() == nil {
 		t.Fatal("Handler returned nil")

@@ -17,6 +17,7 @@ import (
 	"github.com/emersion/go-msgauth/dkim"
 	gomail "github.com/wneessen/go-mail"
 
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -82,7 +83,7 @@ type dkimKey struct {
 // messageInput is everything buildMessage needs. Everything in it has already
 // been rendered and hooked.
 type messageInput struct {
-	msg       *OutboundMessage
+	msg       *host.OutboundMessage
 	messageID string
 	attemptNo int
 	date      time.Time
@@ -169,7 +170,7 @@ func buildMessage(in messageInput) ([]byte, error) {
 }
 
 // setPrecedence marks bulk mail so that auto-responders stay quiet.
-func setPrecedence(msg *gomail.Msg, m *OutboundMessage) {
+func setPrecedence(msg *gomail.Msg, m *host.OutboundMessage) {
 	if m.Lane == store.LaneBulk {
 		msg.SetBulk()
 	}
@@ -233,7 +234,7 @@ func parseDKIMKey(pemBytes []byte) (crypto.Signer, error) {
 
 // validateOutbound is the header injection check of architecture 16. It runs
 // after BeforeSend, so a hook cannot smuggle a header through either.
-func validateOutbound(m *OutboundMessage) error {
+func validateOutbound(m *host.OutboundMessage) error {
 	for _, f := range []struct{ name, value string }{
 		{"subject", m.Subject},
 		{"from name", m.FromName},

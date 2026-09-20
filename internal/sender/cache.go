@@ -108,19 +108,14 @@ func newTenantState(id string, st store.Store, ttl time.Duration) *tenantState {
 	}
 }
 
-// tenantSettings returns the tenant's settings, falling back to the defaults
-// when the row does not exist yet: the sender must not stall because the
-// control plane has not written one (ADR-0006).
+// tenantSettings returns the tenant's settings, creating the default row on
+// first access (store.LoadTenantSettings): the sender must not stall because
+// the control plane has not written one, and it must not keep sending against
+// defaults that nothing persisted either — an operator who then edits the
+// settings would be editing a row the sender invented (ADR-0006).
 func (t *tenantState) tenantSettings(ctx context.Context, now time.Time) (*store.TenantSettings, error) {
 	return t.settings.get("", now, func() (*store.TenantSettings, error) {
-		s, err := t.st.TenantSettings().Get(ctx)
-		if err != nil {
-			if isNotFound(err) {
-				return store.DefaultTenantSettings(t.id, now), nil
-			}
-			return nil, err
-		}
-		return s, nil
+		return store.LoadTenantSettings(ctx, t.st, t.id, now)
 	})
 }
 

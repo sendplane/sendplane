@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 )
 
 func TestCSVToNDJSON(t *testing.T) {
@@ -24,7 +24,7 @@ func TestCSVToNDJSON(t *testing.T) {
 	}
 
 	// The conversion feeds straight back into Ingest.
-	ing, _, c := fixture(t, sendplane.Limits{})
+	ing, _, c := fixture(t, host.Limits{})
 	res, err := ing.Ingest(context.Background(), c.ID, "", strings.NewReader(out.String()))
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestCSVEmptyEmailStaysInvalid(t *testing.T) {
 	if n := strings.Count(out.String(), "\n"); n != 3 {
 		t.Fatalf("wrote %d lines:\n%s", n, out.String())
 	}
-	ing, _, c := fixture(t, sendplane.Limits{})
+	ing, _, c := fixture(t, host.Limits{})
 	res, err := ing.Ingest(context.Background(), c.ID, "", strings.NewReader(out.String()))
 	if err != nil {
 		t.Fatal(err)

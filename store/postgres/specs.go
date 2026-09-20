@@ -20,7 +20,7 @@ var transportSpec = spec[store.Transport]{
 	cols: []string{
 		"name", "host", "port", "tls", "username", "password", "max_conns",
 		"rate_per_second", "domain_rate_per_second", "status", "status_reason",
-		"status_changed_at",
+		"status_changed_at", "status_until",
 	},
 	args: func(v *store.Transport) ([]any, error) {
 		rates, err := jsonIn(v.DomainRatePerSecond)
@@ -30,7 +30,7 @@ var transportSpec = spec[store.Transport]{
 		return []any{
 			v.Name, v.Host, v.Port, string(v.TLS), v.Username, v.Password,
 			v.MaxConns, v.RatePerSecond, rates, i16(v.Status), v.StatusReason,
-			tsIn(v.StatusChangedAt),
+			tsIn(v.StatusChangedAt), tsIn(v.StatusUntil),
 		}, nil
 	},
 	scan: func(r rowScanner) (*store.Transport, error) {
@@ -38,16 +38,17 @@ var transportSpec = spec[store.Transport]{
 		var tls string
 		var rates []byte
 		var status int16
-		var changed *time.Time
+		var changed, until *time.Time
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Host, &v.Port, &tls,
 			&v.Username, &v.Password, &v.MaxConns, &v.RatePerSecond, &rates,
-			&status, &v.StatusReason, &changed,
+			&status, &v.StatusReason, &changed, &until,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
 		v.TLS = store.TLSMode(tls)
 		v.Status = enumOut[store.TransportStatus](status)
 		v.StatusChangedAt = tsOut(changed)
+		v.StatusUntil = tsOut(until)
 		v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
 		return &v, jsonOut(rates, &v.DomainRatePerSecond)
 	},
@@ -467,4 +468,8 @@ func (r *bounceRepo) ListByDelivery(ctx context.Context, deliveryID string, p st
 	return r.listWhere(ctx, p, func(a *args) string {
 		return " AND delivery_id = " + a.add(deliveryID)
 	})
+}
+
+func (r *bounceRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return deleteBefore(ctx, r.p, "bounce_event", r.tenant, before, limit, "")
 }

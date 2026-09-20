@@ -2,14 +2,39 @@ package store
 
 import "context"
 
+// SystemTenantID is the scope for cluster-wide state that belongs to no
+// customer: the control plane's leader lock (LockRepo) lives in it.
+//
+// Store is tenant-bound on purpose (ADR-0006), so a singleton with no tenant
+// still needs a tenant ID. The name starts with an underscore, which a tenant
+// ID handed out by a host never does. A custom Provider must serve it like any
+// other tenant, and ActiveTenants never returns it: nothing is ever sent for
+// it, and a control loop that ticked it would be ticking a tenant that does
+// not exist.
+const SystemTenantID = "_system"
+
 // Provider owns the connections and hands out tenant-bound stores.
 type Provider interface {
 	// ForTenant returns a Store scoped to tenantID. It never returns
 	// ErrNotFound: sendplane does not manage tenant lifecycle.
 	ForTenant(ctx context.Context, tenantID string) (Store, error)
-	// ActiveTenants lists the tenants a sender should poll. A shared
-	// implementation derives it from the tenants that have work; a routed one
-	// from its configured mapping (ADR-0006).
+	// ActiveTenants lists the tenants that have work in progress: the ones a
+	// sender should poll and the ones a control loop should tick. A shared
+	// implementation derives it from the data; a routed one may return its
+	// configured mapping instead (ADR-0006).
+	//
+	// A tenant is active when it has either
+	//
+	//   - a delivery in a non-terminal status (pending, queued, leased or
+	//     deferred), which is what a sender claims from, or
+	//   - a campaign in status scheduled, running or paused, which is what the
+	//     scheduler, finalizer and canceller act on.
+	//
+	// The campaign half is what makes the last tick of a campaign reachable:
+	// the finalizer has to see the tenant exactly when its last delivery has
+	// gone terminal, and by then the delivery half no longer reports it.
+	//
+	// SystemTenantID is never returned.
 	ActiveTenants(ctx context.Context) ([]string, error)
 	// Migrate brings the schema (or indexes) up to date.
 	Migrate(ctx context.Context) error

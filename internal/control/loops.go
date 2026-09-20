@@ -24,21 +24,32 @@ type loopSpec struct {
 	// newTenant builds the loop for one tenant. The Store it is handed stays
 	// valid for the life of the instance.
 	newTenant func(st store.Store, tenantID string) tickLoop
+	// linger is how many extra rounds a tenant keeps being ticked after it
+	// left Provider.ActiveTenants. Zero for every loop but the outbox; see
+	// tenantSet.
+	linger int
 }
 
-// lingerTicks is how many more rounds a tenant keeps being ticked after it
-// left the active set.
+// tenantSet is one loop's state between ticks: the per-tenant loop instances,
+// plus how many more rounds a tenant that left the active set still gets.
 //
-// Provider.ActiveTenants reports the tenants that still have non-terminal
-// deliveries, which is what a sender needs. Control needs slightly more: the
-// tick that matters most for a campaign is the one right after its last
-// delivery went terminal, and by then the tenant is no longer "active". So a
-// tenant that drops out is ticked a few more times before it is forgotten.
-// See the package README: the durable fix belongs in the store contract.
-const lingerTicks = 3
-
-// tenantSet is one loop's state between ticks: the per-tenant instances and
-// how many more rounds a tenant that left the active set still gets.
+// Five of the six loops have no grace period. Provider.ActiveTenants reports a
+// tenant while it has a scheduled, running or paused campaign, not only while
+// it has claimable deliveries, so the tick that matters most — the one right
+// after a campaign's last delivery went terminal — is reached by the store
+// contract itself. This used to be a "keep ticking a few more rounds"
+// heuristic that a leader restart defeated, leaving campaigns stuck in
+// running.
+//
+// The outbox dispatcher still needs one, and for a different reason: the tick
+// that completes a campaign is also the tick that enqueues
+// campaign.completed, and it is precisely that transition which drops the
+// tenant out of the active set. Without a grace window the event would sit
+// pending until the tenant had work again. This is a window, not a guarantee:
+// an event whose dispatch fails is retried on the outbox backoff, and a tenant
+// that stays idle that long gets it on its next campaign. Draining a fully
+// idle tenant's outbox needs a queue the store can enumerate, which the
+// contract does not have.
 type tenantSet struct {
 	loops  map[string]tickLoop
 	linger map[string]int
@@ -82,12 +93,22 @@ func (l *Leader) tickTenants(ctx context.Context, spec loopSpec, set *tenantSet)
 	live := make(map[string]bool, len(tenants))
 	for _, tenantID := range tenants {
 		live[tenantID] = true
-		set.linger[tenantID] = lingerTicks
+		if spec.linger > 0 {
+			set.linger[tenantID] = spec.linger
+		}
 	}
 
-	ids := make([]string, 0, len(set.linger))
+	// A loop with no grace window ticks exactly the active tenants; one with a
+	// grace window also ticks the tenants still counting down.
+	ids := make([]string, 0, len(tenants)+len(set.linger))
+	seen := make(map[string]bool, len(ids))
+	for tenantID := range live {
+		ids, seen[tenantID] = append(ids, tenantID), true
+	}
 	for tenantID := range set.linger {
-		ids = append(ids, tenantID)
+		if !seen[tenantID] {
+			ids = append(ids, tenantID)
+		}
 	}
 	sort.Strings(ids)
 
@@ -113,18 +134,19 @@ func (l *Leader) tickTenants(ctx context.Context, spec loopSpec, set *tenantSet)
 		}
 	}
 
-	// Age out the tenants that were not active this round, so their
-	// per-tenant state does not grow without bound.
-	for tenantID, left := range set.linger {
+	// Drop the tenants that went quiet and used up their grace window, so the
+	// per-tenant state (and the stores it holds open) does not grow without
+	// bound.
+	for tenantID := range set.loops {
 		if live[tenantID] {
 			continue
 		}
-		if left <= 1 {
-			delete(set.linger, tenantID)
-			delete(set.loops, tenantID)
+		if left := set.linger[tenantID]; left > 1 {
+			set.linger[tenantID] = left - 1
 			continue
 		}
-		set.linger[tenantID] = left - 1
+		delete(set.linger, tenantID)
+		delete(set.loops, tenantID)
 	}
 }
 

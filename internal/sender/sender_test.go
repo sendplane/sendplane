@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/chaossmtp"
 	"github.com/sendplane/sendplane/store"
 )
@@ -178,9 +179,9 @@ func TestBeforeSendSkipAndRewrite(t *testing.T) {
 	})
 
 	stop := f.runSenders(1, func(c *Config) {
-		c.Hooks.BeforeSend = func(_ context.Context, m *OutboundMessage) error {
+		c.Hooks.BeforeSend = func(_ context.Context, m *host.OutboundMessage) error {
 			if m.Recipient.EmailNorm == "skip@example.org" {
-				return ErrSkip
+				return host.ErrSkip
 			}
 			m.Subject = "rewritten"
 			m.Headers["X-Test"] = "yes"
@@ -216,7 +217,7 @@ func TestBeforeSendErrorIsRetriedThenFails(t *testing.T) {
 	calls := make(chan struct{}, 64)
 
 	stop := f.runSenders(1, func(c *Config) {
-		c.Hooks.BeforeSend = func(context.Context, *OutboundMessage) error {
+		c.Hooks.BeforeSend = func(context.Context, *host.OutboundMessage) error {
 			select {
 			case calls <- struct{}{}:
 			default:
@@ -261,7 +262,7 @@ func TestHeaderInjectionIsRejected(t *testing.T) {
 	})
 
 	stop := f.runSenders(1, func(c *Config) {
-		c.Hooks.BeforeSend = func(_ context.Context, m *OutboundMessage) error {
+		c.Hooks.BeforeSend = func(_ context.Context, m *host.OutboundMessage) error {
 			if m.Recipient.EmailNorm == "hookinject@example.org" {
 				m.Headers["Bcc"] = "victim@example.org"
 			}
@@ -417,6 +418,17 @@ func TestAuthFailureKeepsDeliveryQueuedAndMarksTransport(t *testing.T) {
 	stop()
 	if !marked {
 		t.Fatal("the transport was never marked unhealthy")
+	}
+	// StatusUntil is what lets a replica that never saw this failure re-probe
+	// the transport instead of skipping it forever.
+	cur, err := f.st.Transports().Get(ctx, f.transportID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.StatusUntil.IsZero() {
+		t.Error("StatusUntil is zero: unhealthy would never expire for another replica")
+	} else if !cur.StatusUntil.After(cur.StatusChangedAt) {
+		t.Errorf("StatusUntil %v is not after StatusChangedAt %v", cur.StatusUntil, cur.StatusChangedAt)
 	}
 	d := f.get(id)
 	if d.Status != store.DeliveryQueued && d.Status != store.DeliveryLeased {

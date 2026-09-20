@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -63,6 +64,14 @@ type TenantSettings struct {
 
 	UnsubscribeMode        UnsubscribeMode
 	UnsubscribeURLTemplate string // Liquid, evaluated per recipient
+	// UnsubscribeOneClick declares that the unsubscribe destination accepts an
+	// RFC 8058 POST. It only matters in UnsubscribeHost mode, where the host
+	// owns the endpoint: sendplane adds List-Unsubscribe-Post only when the
+	// tenant has said so, because announcing one-click on an endpoint that
+	// answers a POST with a login page makes mailbox providers treat the
+	// unsubscribe as failed. In UnsubscribeSendplane mode sendplane owns the
+	// endpoint and sets the header itself (ADR-0011).
+	UnsubscribeOneClick bool
 
 	DefaultLocale string
 	Tracking      TrackingConfig
@@ -98,4 +107,30 @@ type TenantSettingsRepo interface {
 	Get(ctx context.Context) (*TenantSettings, error)
 	Create(ctx context.Context, s *TenantSettings) error
 	Update(ctx context.Context, s *TenantSettings) error
+}
+
+// LoadTenantSettings returns the tenant's settings, creating the default row
+// on first access (ADR-0006: sendplane does not manage tenant lifecycle, so
+// the row appears when something first needs it).
+//
+// A concurrent creator is not an error: ErrConflict means somebody else won
+// the race, and the row it wrote is read back instead. Callers get settings or
+// an error, never a silent fallback to defaults that nothing persisted.
+func LoadTenantSettings(ctx context.Context, st Store, tenantID string, now time.Time) (*TenantSettings, error) {
+	repo := st.TenantSettings()
+	s, err := repo.Get(ctx)
+	if err == nil {
+		return s, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	def := DefaultTenantSettings(tenantID, now)
+	if err := repo.Create(ctx, def); err != nil {
+		if !errors.Is(err, ErrConflict) {
+			return nil, err
+		}
+		return repo.Get(ctx)
+	}
+	return def, nil
 }

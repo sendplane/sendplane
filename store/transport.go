@@ -39,6 +39,15 @@ type Transport struct {
 	Status          TransportStatus
 	StatusReason    string
 	StatusChangedAt time.Time
+	// StatusUntil is when the current non-healthy status stops being trusted.
+	// A sender writes it whenever it sets cooldown or unhealthy, and treats a
+	// StatusUntil in the past as "probe this transport again" no matter what
+	// its own in-memory circuit says. Without it a replica that restarts, or
+	// one that never saw the failure, would either route through a transport
+	// the cluster knows is broken or skip one forever because a dead replica
+	// wrote unhealthy and never came back to clear it (architecture 8.3).
+	// Zero means "until something changes it".
+	StatusUntil time.Time
 
 	Version   int64
 	CreatedAt time.Time

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -21,7 +21,7 @@ const maxOutboxErrLen = 1024
 // at-least-once duplicates down to lease expiry.
 type outboxDispatcher struct {
 	st    store.Store
-	sink  sendplane.EventSink
+	sink  host.EventSink
 	log   *slog.Logger
 	cfg   *config
 	clock func() time.Time
@@ -70,7 +70,7 @@ func (d *outboxDispatcher) Tick(ctx context.Context, now time.Time) error {
 // in MarkFailed so the lease is dropped immediately instead of waiting out
 // cfg.outboxLease.
 func (d *outboxDispatcher) dispatch(ctx context.Context, ev store.OutboxEvent, now time.Time) {
-	err := d.sink.Emit(ctx, []sendplane.Event{eventFromOutbox(ev)})
+	err := d.sink.Emit(ctx, []host.Event{eventFromOutbox(ev)})
 	if err == nil {
 		if err := d.st.Outbox().MarkDelivered(ctx, ev.ID, store.TruncateTime(d.clock())); err != nil {
 			d.log.Error("control: cannot mark outbox event delivered", "event", ev.ID, "err", err)

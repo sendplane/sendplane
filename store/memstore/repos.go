@@ -232,6 +232,17 @@ func (r *bounceRepo) ListByDelivery(_ context.Context, deliveryID string, p stor
 	return r.listWhere(p, func(b *store.BounceEvent) bool { return b.DeliveryID == deliveryID })
 }
 
+func (r *bounceRepo) DeleteBefore(_ context.Context, before time.Time, limit int) (int, error) {
+	r.p.mu.Lock()
+	defer r.p.mu.Unlock()
+	if err := r.p.check(); err != nil {
+		return 0, err
+	}
+	return deleteBefore(r.rows, store.TruncateTime(before), limit,
+		func(b *store.BounceEvent) time.Time { return b.CreatedAt },
+		nil), nil
+}
+
 // --- tracking ----------------------------------------------------------
 
 type trackingRepo struct{ s *tenantStore }
@@ -323,6 +334,17 @@ func (r *trackingRepo) LinkClicks(_ context.Context, campaignID string) ([]store
 		return out[i].URL < out[j].URL
 	})
 	return out, nil
+}
+
+func (r *trackingRepo) DeleteBefore(_ context.Context, before time.Time, limit int) (int, error) {
+	r.s.p.mu.Lock()
+	defer r.s.p.mu.Unlock()
+	if err := r.s.p.check(); err != nil {
+		return 0, err
+	}
+	return deleteBefore(r.s.d.tracking, store.TruncateTime(before), limit,
+		func(e *store.TrackingEvent) time.Time { return e.CreatedAt },
+		nil), nil
 }
 
 // --- outbox ------------------------------------------------------------
@@ -435,6 +457,21 @@ func (r *outboxRepo) List(_ context.Context, status store.OutboxStatus, p store.
 	}), nil
 }
 
+// DeleteBefore only ever removes dispatched rows: a pending event is still
+// owed to the host, and a failed one is the dead letter the host replays.
+func (r *outboxRepo) DeleteBefore(_ context.Context, before time.Time, limit int) (int, error) {
+	r.s.p.mu.Lock()
+	defer r.s.p.mu.Unlock()
+	if err := r.s.p.check(); err != nil {
+		return 0, err
+	}
+	return deleteBefore(r.s.d.outbox, store.TruncateTime(before), limit,
+		func(e *store.OutboxEvent) time.Time { return e.CreatedAt },
+		func(e *store.OutboxEvent) bool {
+			return e.Status == store.OutboxDelivered || e.Status == store.OutboxFailed
+		}), nil
+}
+
 // --- locks -------------------------------------------------------------
 
 type lockRepo struct{ s *tenantStore }
@@ -545,4 +582,28 @@ func (r *workerRepo) ListActive(_ context.Context, since time.Time) ([]store.Wor
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// deleteBefore is the shared retention delete: the oldest matching rows first
+// (IDs are UUIDv7, so ID order is creation order), at most limit of them.
+func deleteBefore[T any](rows map[string]*T, before time.Time, limit int,
+	created func(*T) time.Time, keep func(*T) bool) int {
+	ids := make([]string, 0, len(rows))
+	for id, v := range rows {
+		if !created(v).Before(before) {
+			continue
+		}
+		if keep != nil && !keep(v) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if limit > 0 && len(ids) > limit {
+		ids = ids[:limit]
+	}
+	for _, id := range ids {
+		delete(rows, id)
+	}
+	return len(ids)
 }

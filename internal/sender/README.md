@@ -23,9 +23,9 @@ Run
 
 ## process(d)
 
-1. 테넌트 설정(짧은 TTL 캐시, 행이 없으면 `DefaultTenantSettings`) → 캠페인 / MessageVersion(불변, 영구 캐시) / Sender / Transport / SendingDomain
+1. 테넌트 설정(짧은 TTL 캐시, `store.LoadTenantSettings` — 행이 없으면 기본값으로 **만들고** 읽습니다) → 캠페인 / MessageVersion(불변, 영구 캐시) / Sender / Transport / SendingDomain
 2. suppression (`SuppressionEnabled` && lane ≠ probe) → `suppressed`
-3. transport가 unhealthy면 delivery는 **queued 유지**(시도 미소모)
+3. transport를 쓸 수 있는지 판정(아래 "transport 상태") — 못 쓰면 delivery는 **queued 유지**(시도 미소모)
 4. 수신거부 목적지: **수신자 변수(`Delivery.UnsubscribeURL` → `Vars["unsubscribe_url"]`) > 테넌트 Liquid 템플릿 > `Hooks.UnsubscribeURL`**
 5. 모드별 링크 결정(아래 표) → `{{ unsubscribe_url }}` 바인딩에 **렌더 전에** 주입
 6. `PrepareChain(version, recipient.locale, campaign.default_locale)` → `Render`
@@ -42,7 +42,7 @@ Run
 | `sendplane` (도메인·키 있음) | `https://{tracking_domain}/t/u/{token}` | 같은 URL | `List-Unsubscribe=One-Click` |
 | `sendplane` (도메인 또는 키 없음) | 호스트 목적지 그대로 | 같은 URL | 없음 |
 | `sendplane` (목적지 없음) | 없음 | 없음 | 없음 |
-| `host` | 호스트 목적지 | 같은 URL | 없음 (호스트가 원클릭을 받는다고 선언하지 않았으므로) |
+| `host` | 호스트 목적지 | 같은 URL | `TenantSettings.UnsubscribeOneClick` 이고 목적지가 https일 때만 |
 | `none` | 없음 | 없음 | 없음 |
 
 ## 파일
@@ -57,9 +57,9 @@ Run
 | `ratelimit.go` | 토큰 버킷 + 워커 수 분할 + AIMD |
 | `pool.go` | transport별 커넥션 풀 |
 | `results.go` | `Complete` 배치 커밋 |
-| `health.go` | transport 서킷(cooldown/unhealthy) + 상태 영속화 |
+| `health.go` | transport 서킷(cooldown/unhealthy) + `StatusUntil` 영속화/조정 |
 | `cache.go` | 테넌트별 TTL 캐시, 복호화된 비밀 캐시 |
-| `metrics.go` | `Metrics` 인터페이스 + `NopMetrics` |
+| `metrics.go` | 메트릭 이름 상수 (싱크는 `host.Metrics`) |
 
 ## 에러 분류 테이블 (§4.2)
 
@@ -95,6 +95,16 @@ Run
 - 렌더 실패·헤더 인젝션·MIME 실패 → `failed`(permanent). 같은 입력이면 재시도해도 같은 결과입니다.
 - 스토어 읽기 실패 등 **sender 자신의 문제**는 `queued` + 30초, 시도 미소모.
 
+## transport 상태 (§8.3)
+
+replica의 로컬 서킷 하나만으로는 부족합니다. 실패를 본 적 없는 replica는 클러스터가 이미 고장으로 아는 transport로
+메일을 계속 보내고, `unhealthy` 를 쓴 replica가 그대로 죽으면 아무도 그 상태를 풀어 주지 않습니다.
+그래서 `Transport.StatusUntil` 이 심판을 봅니다:
+
+- cooldown/unhealthy 를 쓸 때마다 `StatusUntil = now + TransportProbeInterval` 을 같이 씁니다. healthy 는 zero.
+- 저장된 상태가 `unhealthy` 면 로컬 서킷과 무관하게 건너뜁니다.
+- 단, `StatusUntil` 이 **이미 지났으면** 로컬 상태와 무관하게 다시 시도합니다 — 다음 delivery가 곧 프로브입니다.
+
 ## 레이트리밋 (§8.2)
 
 `share = transport.RatePerSecond / 활성 sender 레플리카 수`.
@@ -104,30 +114,23 @@ Run
 
 ## 루트 패키지와의 연결
 
-이 패키지는 `sendplane` 루트를 import하지 **않습니다**. 루트의 `RunSender` 가 여기를 호출할 예정이라
-반대 방향 의존이 순환이 되기 때문입니다. 그래서 `Hooks` / `OutboundMessage` / `RecipientContext` /
-`SecretCipher` / `ErrSkip` 을 여기에 두었고, 루트는 얇은 어댑터를 씁니다:
+이 패키지는 `sendplane` 루트를 import하지 **않습니다**(루트의 `RunSender` 가 여기를 호출하므로 사이클이 됩니다).
+전에는 그래서 `Hooks` / `OutboundMessage` / `RecipientContext` / `SecretCipher` / `ErrSkip` / `Metrics` 를
+여기에 복제해 두고 루트가 어댑터를 썼지만, 지금은 전부 leaf 패키지 [`host`](../../host)에 있습니다(architecture §2.1).
+루트가 그 타입들을 **별칭**으로 재노출하므로 어댑터가 없습니다 — 변환도, 복사도, `ErrSkip` 번역도 없습니다:
 
 ```go
-cfg := sender.Config{
+snd, err := sender.New(s.opts.Store, sender.Config{
     WorkerID: c.WorkerID,
-    Secrets:  s.opts.Secrets,           // 인터페이스가 구조적으로 동일 → 그대로 대입
-    Hooks: sender.Hooks{
-        UnsubscribeURL: func(ctx context.Context, rc sender.RecipientContext) (string, error) {
-            return s.opts.Hooks.UnsubscribeURL(ctx, sendplane.RecipientContext(rc))
-        },
-        BeforeSend: func(ctx context.Context, m *sender.OutboundMessage) error {
-            err := s.opts.Hooks.BeforeSend(ctx, (*sendplane.OutboundMessage)(m))
-            if errors.Is(err, sendplane.ErrSkip) {
-                return sender.ErrSkip
-            }
-            return err
-        },
-    },
-}
+    Hooks:    s.opts.Hooks,   // sendplane.Hooks == host.Hooks
+    Secrets:  s.opts.Secrets,
+    Metrics:  s.opts.Metrics,
+})
 ```
 
-`sendplane.RecipientContext` / `OutboundMessage` 를 `= sender.X` 타입 별칭으로 바꾸면 어댑터도 필요 없습니다.
+`metrics.go` 에는 메트릭 **이름 상수만** 남았습니다. 싱크 인터페이스(`Count`/`Observe`)는 `host.Metrics` 입니다 —
+`Config.Metrics` 가 루트의 `Options.Metrics` 로 그대로 채워지므로, 여기에 선언해 두면 루트가 타입 하나 때문에
+`internal/sender` 를 import해야 합니다.
 
 ## 라이브러리
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/osteele/liquid"
 
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/internal/tracking"
 	"github.com/sendplane/sendplane/store"
@@ -69,7 +70,7 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 		}
 	}
 
-	if transport.Status == store.TransportUnhealthy || !s.health.usable(t.id, transport.ID, started) {
+	if !s.transportUsable(t, transport, started) {
 		return store.DeliveryResult{
 			DeliveryID: d.ID, LeaseOwner: s.cfg.WorkerID,
 			NewStatus:     store.DeliveryQueued,
@@ -89,7 +90,7 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 
 	if s.cfg.Hooks.BeforeSend != nil {
 		if err := s.cfg.Hooks.BeforeSend(ctx, msg); err != nil {
-			if errors.Is(err, ErrSkip) {
+			if errors.Is(err, host.ErrSkip) {
 				return store.DeliveryResult{
 					DeliveryID: d.ID, LeaseOwner: s.cfg.WorkerID,
 					NewStatus: store.DeliverySuppressed, Error: "skipped by BeforeSend",
@@ -174,16 +175,16 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 	switch f.Class {
 	case store.ErrorClassNone:
 		if status, changed := s.health.success(t.id, transport.ID, finished); changed {
-			s.setTransportStatus(ctx, t, transport.ID, status, "delivery succeeded")
+			s.setTransportStatus(ctx, t, transport.ID, status, "delivery succeeded", s.statusUntil(status, finished))
 		}
 	case store.ErrorClassRateLimited:
 		s.limiter.Penalize(transportKey, domainKey)
 		if status, changed := s.health.fail(t.id, transport.ID, f.Class, finished); changed {
-			s.setTransportStatus(ctx, t, transport.ID, status, f.Message)
+			s.setTransportStatus(ctx, t, transport.ID, status, f.Message, s.statusUntil(status, finished))
 		}
 	case store.ErrorClassAuth:
 		if status, changed := s.health.fail(t.id, transport.ID, f.Class, finished); changed {
-			s.setTransportStatus(ctx, t, transport.ID, status, f.Message)
+			s.setTransportStatus(ctx, t, transport.ID, status, f.Message, s.statusUntil(status, finished))
 		}
 	}
 
@@ -231,8 +232,8 @@ func (s *Sender) renderMessage(
 	version *store.MessageVersion,
 	snd *store.Sender,
 	d *store.Delivery,
-) (*OutboundMessage, unsubscribeLinks, error) {
-	rc := RecipientContext{
+) (*host.OutboundMessage, unsubscribeLinks, error) {
+	rc := host.RecipientContext{
 		TenantID: t.id, CampaignID: d.CampaignID, DeliveryID: d.ID,
 		Email: d.Email, EmailNorm: d.EmailNorm, Name: d.Name,
 		Locale: d.Locale, Vars: d.Vars,
@@ -302,7 +303,7 @@ func (s *Sender) renderMessage(
 		}
 	}
 
-	return &OutboundMessage{
+	return &host.OutboundMessage{
 		TenantID: t.id, DeliveryID: d.ID, CampaignID: d.CampaignID,
 		VersionID: d.VersionID, SenderID: d.SenderID, Lane: d.Lane,
 		Recipient: rc,
@@ -340,9 +341,15 @@ func (s *Sender) unsubscribeLinks(
 		if dest == "" {
 			return unsubscribeLinks{}
 		}
-		// The host receives the click itself; sendplane does not claim
-		// one-click support on its behalf (ADR-0011).
-		return unsubscribeLinks{body: dest, header: dest}
+		// The host owns the endpoint here, so sendplane only announces
+		// one-click when the tenant has declared that it accepts an RFC 8058
+		// POST. Announcing it on an endpoint that answers a POST with a login
+		// page makes mailbox providers record the unsubscribe as failed
+		// (ADR-0011). RFC 8058 also requires https.
+		return unsubscribeLinks{
+			body: dest, header: dest,
+			oneClick: settings.UnsubscribeOneClick && strings.HasPrefix(dest, "https://"),
+		}
 
 	default: // UnsubscribeNone
 		return unsubscribeLinks{}
@@ -353,7 +360,7 @@ func (s *Sender) unsubscribeLinks(
 // architecture 9.2: recipient variable, tenant URL template, hook.
 func (s *Sender) unsubscribeDest(
 	ctx context.Context, t *tenantState, settings *store.TenantSettings,
-	d *store.Delivery, campaign *store.Campaign, rc RecipientContext,
+	d *store.Delivery, campaign *store.Campaign, rc host.RecipientContext,
 ) (string, error) {
 	if settings.UnsubscribeMode == store.UnsubscribeNone {
 		return "", nil

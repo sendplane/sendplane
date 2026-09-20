@@ -13,15 +13,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/tracking"
 	"github.com/sendplane/sendplane/store"
 )
 
-func testMessage() *OutboundMessage {
-	return &OutboundMessage{
+func testMessage() *host.OutboundMessage {
+	return &host.OutboundMessage{
 		TenantID: "t1", DeliveryID: "d1", CampaignID: "c1",
 		Lane: store.LaneBulk,
-		Recipient: RecipientContext{
+		Recipient: host.RecipientContext{
 			TenantID: "t1", DeliveryID: "d1",
 			Email: "user@example.org", EmailNorm: "user@example.org", Name: "User",
 		},
@@ -125,23 +126,29 @@ func TestUnsubscribeHeaderMatrix(t *testing.T) {
 		name       string
 		mode       store.UnsubscribeMode
 		dest       string
+		oneClick   bool // TenantSettings.UnsubscribeOneClick
 		hasKey     bool
 		domain     string
 		wantBody   string // "" = none, "token" = a signed sendplane URL, else exact
 		wantHeader string
 		wantPost   bool
 	}{
-		{"sendplane", store.UnsubscribeSendplane, dest, true, trackDomain, "token", "token", true},
-		{"sendplane without a destination", store.UnsubscribeSendplane, "", true, trackDomain, "", "", false},
-		{"sendplane without a tracking domain", store.UnsubscribeSendplane, dest, true, "", dest, dest, false},
-		{"sendplane without a key", store.UnsubscribeSendplane, dest, false, trackDomain, dest, dest, false},
-		{"host", store.UnsubscribeHost, dest, true, trackDomain, dest, dest, false},
-		{"host without a destination", store.UnsubscribeHost, "", true, trackDomain, "", "", false},
-		{"none", store.UnsubscribeNone, dest, true, trackDomain, "", "", false},
+		{"sendplane", store.UnsubscribeSendplane, dest, false, true, trackDomain, "token", "token", true},
+		{"sendplane without a destination", store.UnsubscribeSendplane, "", false, true, trackDomain, "", "", false},
+		{"sendplane without a tracking domain", store.UnsubscribeSendplane, dest, false, true, "", dest, dest, false},
+		{"sendplane without a key", store.UnsubscribeSendplane, dest, false, false, trackDomain, dest, dest, false},
+		{"host", store.UnsubscribeHost, dest, false, true, trackDomain, dest, dest, false},
+		// The host endpoint only gets List-Unsubscribe-Post once the tenant
+		// says it accepts one, and only over https (RFC 8058).
+		{"host with one-click", store.UnsubscribeHost, dest, true, true, trackDomain, dest, dest, true},
+		{"host with one-click over http", store.UnsubscribeHost, "http://host.example/u", true, true, trackDomain,
+			"http://host.example/u", "http://host.example/u", false},
+		{"host without a destination", store.UnsubscribeHost, "", true, true, trackDomain, "", "", false},
+		{"none", store.UnsubscribeNone, dest, true, true, trackDomain, "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			settings := &store.TenantSettings{UnsubscribeMode: tc.mode}
+			settings := &store.TenantSettings{UnsubscribeMode: tc.mode, UnsubscribeOneClick: tc.oneClick}
 			got := s.unsubscribeLinks(settings, "d1", tc.dest, key, tc.hasKey, tc.domain)
 
 			checkURL := func(field, want, have string) {
@@ -210,22 +217,22 @@ func TestUnsubscribeHeaderMatrix(t *testing.T) {
 func TestHeaderInjectionChecks(t *testing.T) {
 	cases := []struct {
 		name   string
-		mutate func(*OutboundMessage)
+		mutate func(*host.OutboundMessage)
 		want   error
 	}{
-		{"subject", func(m *OutboundMessage) { m.Subject = "a\r\nBcc: x@y" }, ErrHeaderInjection},
-		{"from name", func(m *OutboundMessage) { m.FromName = "a\nb" }, ErrHeaderInjection},
-		{"recipient name", func(m *OutboundMessage) { m.Recipient.Name = "a\r\nb" }, ErrHeaderInjection},
-		{"from address", func(m *OutboundMessage) { m.From = "a@b\r\nc@d" }, ErrHeaderInjection},
-		{"reply-to", func(m *OutboundMessage) { m.ReplyTo = "not an address" }, ErrHeaderInjection},
-		{"empty from", func(m *OutboundMessage) { m.From = "" }, ErrHeaderInjection},
-		{"empty to", func(m *OutboundMessage) { m.Recipient.Email = "" }, ErrHeaderInjection},
-		{"unsubscribe url", func(m *OutboundMessage) { m.UnsubscribeURL = "https://x\r\n" }, ErrHeaderInjection},
-		{"header value", func(m *OutboundMessage) { m.Headers["X-A"] = "b\r\nBcc: x@y" }, ErrHeaderInjection},
-		{"header name", func(m *OutboundMessage) { m.Headers["X-A: b\r\nBcc"] = "c" }, ErrHeaderInjection},
-		{"bcc", func(m *OutboundMessage) { m.Headers["Bcc"] = "x@y" }, ErrHeaderNotAllowed},
-		{"message-id override", func(m *OutboundMessage) { m.Headers["Message-ID"] = "<x@y>" }, ErrHeaderNotAllowed},
-		{"unknown header", func(m *OutboundMessage) { m.Headers["Organization"] = "x" }, ErrHeaderNotAllowed},
+		{"subject", func(m *host.OutboundMessage) { m.Subject = "a\r\nBcc: x@y" }, ErrHeaderInjection},
+		{"from name", func(m *host.OutboundMessage) { m.FromName = "a\nb" }, ErrHeaderInjection},
+		{"recipient name", func(m *host.OutboundMessage) { m.Recipient.Name = "a\r\nb" }, ErrHeaderInjection},
+		{"from address", func(m *host.OutboundMessage) { m.From = "a@b\r\nc@d" }, ErrHeaderInjection},
+		{"reply-to", func(m *host.OutboundMessage) { m.ReplyTo = "not an address" }, ErrHeaderInjection},
+		{"empty from", func(m *host.OutboundMessage) { m.From = "" }, ErrHeaderInjection},
+		{"empty to", func(m *host.OutboundMessage) { m.Recipient.Email = "" }, ErrHeaderInjection},
+		{"unsubscribe url", func(m *host.OutboundMessage) { m.UnsubscribeURL = "https://x\r\n" }, ErrHeaderInjection},
+		{"header value", func(m *host.OutboundMessage) { m.Headers["X-A"] = "b\r\nBcc: x@y" }, ErrHeaderInjection},
+		{"header name", func(m *host.OutboundMessage) { m.Headers["X-A: b\r\nBcc"] = "c" }, ErrHeaderInjection},
+		{"bcc", func(m *host.OutboundMessage) { m.Headers["Bcc"] = "x@y" }, ErrHeaderNotAllowed},
+		{"message-id override", func(m *host.OutboundMessage) { m.Headers["Message-ID"] = "<x@y>" }, ErrHeaderNotAllowed},
+		{"unknown header", func(m *host.OutboundMessage) { m.Headers["Organization"] = "x" }, ErrHeaderNotAllowed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

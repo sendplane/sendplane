@@ -66,9 +66,11 @@ POST /campaigns/{id}/recipients  (application/x-ndjson, Idempotency-Key: chunk-0
 
 ## 한도
 
-`sendplane.Limits`의 필드를 그대로 씁니다. 0인 필드는 `sendplane.DefaultLimits`로 채웁니다.
+`host.Limits`(= `sendplane.Limits`, 같은 타입)의 필드를 그대로 씁니다. 0인 필드는 `Limits.WithDefaults()`가 `host.DefaultLimits`로 채웁니다.
+`host`는 루트 `sendplane` 대신 import하는 leaf 패키지입니다 — 루트가 `Handler`를 구현하려고 `internal/api`를
+import하는 순간 반대 방향이 사이클이 되기 때문입니다(architecture §2.1).
 
-> 주의: `MaxRecipientsPerCampaign`의 기본값은 `options.go`의 **10,000,000**입니다.
+> 주의: `MaxRecipientsPerCampaign`의 기본값은 `host/limits.go`의 **10,000,000**입니다.
 > 한도에 정확히 도달한 캠페인에서는 이어지는 줄이 중복이더라도 `ErrTooManyRecipients`가 됩니다.
 > 중복 여부를 가리려면 줄마다 스토어 왕복이 필요한데, 한도에 딱 걸터앉은 캠페인에서만 생기는 경우라 그 비용을 치르지 않습니다.
 
@@ -82,7 +84,7 @@ POST /campaigns/{id}/recipients  (application/x-ndjson, Idempotency-Key: chunk-0
 ## 공개 API
 
 ```go
-New(st store.Store, limits sendplane.Limits, clock func() time.Time, ...Option) *Ingester
+New(st store.Store, limits host.Limits, clock func() time.Time, ...Option) *Ingester
 WithBatchSize(n int) Option      // 기본 2000
 WithMaxLineErrors(n int) Option  // 기본 100
 

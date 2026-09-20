@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -87,10 +87,10 @@ func (s countingStore) Deliveries() store.DeliveryRepo { return s.d }
 
 // countingFixture is fixture with the delivery repo swapped for a counter.
 func countingFixture(t testing.TB) (*Ingester, *countingDeliveries, *store.Campaign) {
-	_, st, c := fixture(t, sendplane.Limits{})
+	_, st, c := fixture(t, host.Limits{})
 	d := &countingDeliveries{DeliveryRepo: st.Deliveries()}
 	cs := countingStore{Store: st, d: d}
-	return New(cs, sendplane.Limits{}, func() time.Time { return testNow }), d, c
+	return New(cs, host.Limits{}, func() time.Time { return testNow }), d, c
 }
 
 // maxHeapDuring samples the live heap while fn runs and returns the peak. It
@@ -178,7 +178,7 @@ func TestIngestStoresEveryRow(t *testing.T) {
 	}
 	ctx := context.Background()
 	const n = 20_000
-	ing, st, c := fixture(t, sendplane.Limits{})
+	ing, st, c := fixture(t, host.Limits{})
 
 	pr, pw := io.Pipe()
 	go func() {

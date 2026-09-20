@@ -120,26 +120,66 @@ func (h *healthTracker) due(now time.Time) []probeTarget {
 
 // recover marks a transport healthy after a successful probe.
 func (h *healthTracker) recover(ctx context.Context, t *tenantState, tr *store.Transport, s *Sender) {
-	if status, changed := h.success(t.id, tr.ID, s.cfg.Clock()); changed {
-		s.setTransportStatus(ctx, t, tr.ID, status, "probe succeeded")
+	now := s.cfg.Clock()
+	if status, changed := h.success(t.id, tr.ID, now); changed {
+		s.setTransportStatus(ctx, t, tr.ID, status, "probe succeeded", s.statusUntil(status, now))
 	}
+}
+
+// transportUsable decides whether this replica may route a delivery through a
+// transport right now. It combines the persisted status with this replica's
+// own circuit, and the persisted StatusUntil breaks the tie.
+//
+// Neither half is enough on its own. A replica that never saw the failure
+// would route through a transport the rest of the cluster knows is broken, so
+// the stored unhealthy status has to block it. But a replica that wrote
+// unhealthy and then died never comes back to clear it, so an expired
+// StatusUntil has to make the transport eligible again whatever this replica's
+// own circuit says — the next delivery is the probe (architecture 8.3).
+func (s *Sender) transportUsable(t *tenantState, tr *store.Transport, now time.Time) bool {
+	// An elapsed window only overrides a status that has one. A healthy row
+	// carries no window, so a stale StatusUntil left on one by an API edit
+	// must not smuggle a locally failing transport back into rotation.
+	if tr.Status != store.TransportHealthy && !tr.StatusUntil.IsZero() && now.After(tr.StatusUntil) {
+		return true
+	}
+	if tr.Status == store.TransportUnhealthy {
+		return false
+	}
+	return s.health.usable(t.id, tr.ID, now)
+}
+
+// statusUntil is how long a non-healthy transport status is trusted before any
+// replica may try the transport again. Healthy has no expiry: there is nothing
+// to recover from.
+func (s *Sender) statusUntil(status store.TransportStatus, now time.Time) time.Time {
+	if status == store.TransportHealthy {
+		return time.Time{}
+	}
+	return now.Add(s.cfg.TransportProbeInterval)
 }
 
 // setTransportStatus persists a transport status transition. It re-reads the
 // row first: the cached copy may be stale, and Update is optimistic on
 // Version, so writing the cached row would fight the API.
-func (s *Sender) setTransportStatus(ctx context.Context, t *tenantState, transportID string, status store.TransportStatus, reason string) {
+func (s *Sender) setTransportStatus(ctx context.Context, t *tenantState, transportID string, status store.TransportStatus, reason string, until time.Time) {
 	for attempt := 0; attempt < 2; attempt++ {
 		tr, err := t.st.Transports().Get(ctx, transportID)
 		if err != nil {
 			return
 		}
-		if tr.Status == status {
+		// Re-asserting a non-healthy status is not a no-op: it pushes the
+		// window out, which is what keeps a transport that is still failing
+		// out of rotation. Only an identical row is skipped, and the stored
+		// instant is compared at the resolution the store keeps (store/doc.go).
+		until = store.TruncateTime(until)
+		if tr.Status == status && tr.StatusUntil.Equal(until) {
 			return
 		}
 		tr.Status = status
 		tr.StatusReason = reason
 		tr.StatusChangedAt = s.cfg.Clock()
+		tr.StatusUntil = until
 		if err := t.st.Transports().Update(ctx, tr); err == nil {
 			t.transports.invalidate(transportID)
 			s.cfg.Metrics.Count(MetricTransport, 1, "transport", transportID, "status", status.String())

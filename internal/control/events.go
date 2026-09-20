@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -62,8 +62,8 @@ func enqueueCampaignEvent(ctx context.Context, st store.Store, c *store.Campaign
 // eventFromOutbox adapts a stored outbox row to the host-facing event. The
 // outbox row's CreatedAt is the moment the transition happened, which is what
 // the host wants as OccurredAt, not the moment dispatch got around to it.
-func eventFromOutbox(ev store.OutboxEvent) sendplane.Event {
-	return sendplane.Event{
+func eventFromOutbox(ev store.OutboxEvent) host.Event {
+	return host.Event{
 		ID:         ev.ID,
 		TenantID:   ev.TenantID,
 		Type:       ev.Type,

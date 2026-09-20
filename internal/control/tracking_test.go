@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -20,7 +20,7 @@ func trackingEvent(tenantID, deliveryID, campaignID string, kind store.TrackingK
 }
 
 func TestTrackingBufferFlushDerivesFirstInteractions(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{})
+	_, st, _, c := newFixture(t, host.Hooks{})
 	ctx := context.Background()
 
 	cam := seedCampaign(t, st, store.CampaignRunning)
@@ -85,7 +85,7 @@ func TestTrackingBufferFlushDerivesFirstInteractions(t *testing.T) {
 }
 
 func TestTrackingBufferIgnoresSuspectedBots(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{})
+	_, st, _, c := newFixture(t, host.Hooks{})
 	ctx := context.Background()
 
 	cam := seedCampaign(t, st, store.CampaignRunning)
@@ -113,7 +113,7 @@ func TestTrackingBufferIgnoresSuspectedBots(t *testing.T) {
 }
 
 func TestTrackingBufferDropsOldestWhenFull(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{},
+	_, st, _, c := newFixture(t, host.Hooks{},
 		WithTracking(time.Hour, 1_000_000, 3))
 	ctx := context.Background()
 
@@ -144,7 +144,7 @@ func TestTrackingBufferDropsOldestWhenFull(t *testing.T) {
 }
 
 func TestTrackingBufferFlushesOnSizeThreshold(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{},
+	_, st, _, c := newFixture(t, host.Hooks{},
 		// An hour-long interval: only the size threshold can flush this.
 		WithTracking(time.Hour, 3, 1000))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -167,7 +167,7 @@ func TestTrackingBufferFlushesOnSizeThreshold(t *testing.T) {
 }
 
 func TestTrackingBufferFlushesOnInterval(t *testing.T) {
-	_, st, _, c := newFixture(t, sendplane.Hooks{},
+	_, st, _, c := newFixture(t, host.Hooks{},
 		WithTracking(5*time.Millisecond, 1_000_000, 1000))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -184,7 +184,7 @@ func TestTrackingBufferFlushesOnInterval(t *testing.T) {
 }
 
 func TestTrackingBufferGroupsTenants(t *testing.T) {
-	p, st, _, c := newFixture(t, sendplane.Hooks{})
+	p, st, _, c := newFixture(t, host.Hooks{})
 	ctx := context.Background()
 
 	other, err := p.ForTenant(ctx, "t2")
@@ -218,7 +218,7 @@ func TestTrackingBufferGroupsTenants(t *testing.T) {
 }
 
 func TestTrackingBufferCloseIsIdempotent(t *testing.T) {
-	_, _, _, c := newFixture(t, sendplane.Hooks{})
+	_, _, _, c := newFixture(t, host.Hooks{})
 	b := c.Tracking()
 	if err := b.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

@@ -127,8 +127,8 @@ func (p *Provider) ForTenant(_ context.Context, tenantID string) (store.Store, e
 	return newTenantStore(p, tenantID, d), nil
 }
 
-// ActiveTenants lists tenants that have at least one delivery which is not in
-// a terminal state, i.e. the tenants a sender still has work for.
+// ActiveTenants lists the tenants with a non-terminal delivery or an unfinished
+// campaign (store.Provider).
 func (p *Provider) ActiveTenants(_ context.Context) ([]string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -137,15 +137,32 @@ func (p *Provider) ActiveTenants(_ context.Context) ([]string, error) {
 	}
 	var out []string
 	for id, d := range p.tenants {
-		for _, dl := range d.deliveries {
-			if !dl.Status.Terminal() {
-				out = append(out, id)
-				break
-			}
+		if id == store.SystemTenantID {
+			continue
+		}
+		if hasOpenWork(d) {
+			out = append(out, id)
 		}
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// hasOpenWork is the ActiveTenants predicate: a delivery a sender could still
+// claim or complete, or a campaign a control loop still has to move.
+func hasOpenWork(d *tenantData) bool {
+	for _, dl := range d.deliveries {
+		if !dl.Status.Terminal() {
+			return true
+		}
+	}
+	for _, c := range d.campaigns {
+		switch c.Status {
+		case store.CampaignScheduled, store.CampaignRunning, store.CampaignPaused:
+			return true
+		}
+	}
+	return false
 }
 
 // Migrate is a no-op: there is no schema.

@@ -92,6 +92,27 @@ func testBounces(t *testing.T, p store.Provider) {
 	list, err = r.ListByDelivery(ctx, deliveryID, store.Page{Limit: 100})
 	must(t, "ListByDelivery", err)
 	eq(t, "by delivery", len(list.Items), 1)
+
+	// Retention (architecture 16). CreatedAt is stamped by the store, so the
+	// cutoff is relative to "now": nothing is old enough yet, then everything
+	// is, one chunk at a time.
+	n, err := r.DeleteBefore(ctx, now.Add(-time.Hour), 10)
+	must(t, "DeleteBefore cutoff in the past", err)
+	eq(t, "nothing that old", n, 0)
+
+	n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 1)
+	must(t, "DeleteBefore chunk", err)
+	eq(t, "one chunk", n, 1)
+	list, err = r.List(ctx, store.Page{Limit: 100})
+	must(t, "List after chunk", err)
+	eq(t, "one left", len(list.Items), 1)
+
+	n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 10)
+	must(t, "DeleteBefore rest", err)
+	eq(t, "the rest", n, 1)
+	n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 10)
+	must(t, "DeleteBefore empty", err)
+	eq(t, "nothing left", n, 0)
 }
 
 func testTracking(t *testing.T, p store.Provider) {
@@ -146,6 +167,30 @@ func testTracking(t *testing.T, p store.Provider) {
 	empty, err := r.CountUnique(ctx, store.NewID())
 	must(t, "CountUnique unknown", err)
 	eq(t, "unknown campaign opens", empty.UniqueOpens, int64(0))
+
+	// Retention: tracking events live as long as the deliveries they describe
+	// (architecture 9.4), so the whole tenant is walked, not one campaign.
+	n, err := r.DeleteBefore(ctx, now.Add(-time.Hour), 100)
+	must(t, "DeleteBefore cutoff in the past", err)
+	eq(t, "nothing that old", n, 0)
+
+	n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 4)
+	must(t, "DeleteBefore chunk", err)
+	eq(t, "one chunk", n, 4)
+
+	total := 4
+	for {
+		n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 4)
+		must(t, "DeleteBefore rest", err)
+		total += n
+		if n < 4 {
+			break
+		}
+	}
+	eq(t, "every event deleted", total, 11)
+	counts, err = r.CountUnique(ctx, campaignID)
+	must(t, "CountUnique after retention", err)
+	eq(t, "counts cleared", counts.UniqueOpens, int64(0))
 }
 
 func testOutbox(t *testing.T, p store.Provider) {
@@ -193,6 +238,38 @@ func testOutbox(t *testing.T, p store.Provider) {
 
 	mustBe(t, "MarkDelivered unknown", r.MarkDelivered(ctx, store.NewID(), now), store.ErrNotFound)
 	mustBe(t, "MarkFailed unknown", r.MarkFailed(ctx, store.NewID(), now, "x"), store.ErrNotFound)
+
+	// Retention only ever removes dispatched rows: a pending event is still
+	// owed to the host however old it is.
+	must(t, "Enqueue pending", r.Enqueue(ctx, []store.OutboxEvent{
+		{ID: store.NewID(), Type: "delivery.sent", Payload: []byte(`{"id":"3"}`), CreatedAt: now, NextAttemptAt: now},
+	}))
+
+	n, err := r.DeleteBefore(ctx, now.Add(-time.Hour), 10)
+	must(t, "DeleteBefore cutoff in the past", err)
+	eq(t, "nothing that old", n, 0)
+
+	n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 1)
+	must(t, "DeleteBefore chunk", err)
+	eq(t, "one chunk", n, 1)
+
+	n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 10)
+	must(t, "DeleteBefore rest", err)
+	eq(t, "the other dispatched row", n, 1)
+
+	n, err = r.DeleteBefore(ctx, now.Add(time.Hour), 10)
+	must(t, "DeleteBefore again", err)
+	eq(t, "pending rows are never deleted", n, 0)
+
+	pending, err := r.List(ctx, store.OutboxPending, store.Page{Limit: 10})
+	must(t, "List pending", err)
+	eq(t, "pending survived", len(pending.Items), 1)
+	gone, err := r.List(ctx, store.OutboxDelivered, store.Page{Limit: 10})
+	must(t, "List delivered", err)
+	eq(t, "delivered gone", len(gone.Items), 0)
+	gone, err = r.List(ctx, store.OutboxFailed, store.Page{Limit: 10})
+	must(t, "List failed", err)
+	eq(t, "dead letters gone", len(gone.Items), 0)
 }
 
 func testLocks(t *testing.T, p store.Provider) {
@@ -258,11 +335,11 @@ func testWorkers(t *testing.T, p store.Provider) {
 	now := time.Now().UTC()
 
 	must(t, "Heartbeat w1", r.Heartbeat(ctx, store.Worker{
-		ID: "w1", Role: "sender", Lanes: []store.Lane{store.LaneBulk, store.LaneTransactional},
+		ID: "w1", Role: store.WorkerRoleSender, Lanes: []store.Lane{store.LaneBulk, store.LaneTransactional},
 		Concurrency: 64, StartedAt: now, LastSeenAt: now,
 	}))
 	must(t, "Heartbeat w2", r.Heartbeat(ctx, store.Worker{
-		ID: "w2", Role: "sender", Concurrency: 32, StartedAt: now, LastSeenAt: now.Add(5 * time.Minute),
+		ID: "w2", Role: store.WorkerRoleSender, Concurrency: 32, StartedAt: now, LastSeenAt: now.Add(5 * time.Minute),
 	}))
 
 	active, err := r.ListActive(ctx, now)
@@ -278,13 +355,15 @@ func testWorkers(t *testing.T, p store.Provider) {
 
 	// A heartbeat refreshes rather than duplicating.
 	must(t, "Heartbeat w1 again", r.Heartbeat(ctx, store.Worker{
-		ID: "w1", Role: "sender", Concurrency: 64, LastSeenAt: now.Add(10 * time.Minute),
+		ID: "w1", Role: store.WorkerRoleSender, Concurrency: 64, LastSeenAt: now.Add(10 * time.Minute),
 	}))
 	active, err = r.ListActive(ctx, now.Add(6*time.Minute))
 	must(t, "ListActive after refresh", err)
 	eq(t, "one active", len(active), 1)
 	eq(t, "refreshed worker", active[0].ID, "w1")
 
-	mustBe(t, "Heartbeat without ID", r.Heartbeat(ctx, store.Worker{Role: "sender"}), store.ErrInvalid)
+	eq(t, "role", active[0].Role, store.WorkerRoleSender)
+
+	mustBe(t, "Heartbeat without ID", r.Heartbeat(ctx, store.Worker{Role: store.WorkerRoleSender}), store.ErrInvalid)
 
 }

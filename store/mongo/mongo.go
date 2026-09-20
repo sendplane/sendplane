@@ -139,21 +139,52 @@ func (p *Provider) ForTenant(_ context.Context, tenantID string) (store.Store, e
 	return newTenantStore(p, tenantID), nil
 }
 
-// ActiveTenants lists tenants that have at least one delivery which is not in
-// a terminal state, i.e. the tenants a sender still has work for.
+// unfinishedCampaigns are the campaign states a control loop still has to act
+// on, and the second half of the ActiveTenants predicate.
+var unfinishedCampaigns = []store.CampaignStatus{
+	store.CampaignScheduled, store.CampaignRunning, store.CampaignPaused,
+}
+
+// ActiveTenants lists the tenants with a non-terminal delivery or an unfinished
+// campaign (store.Provider). Two distincts, one per collection, because each
+// has its own status index and no join would be cheaper.
 func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
-	open := statusInts(openStatuses)
-	res := p.db.Collection(collDelivery).Distinct(ctx,
-		"tenant_id", bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: open}}}})
-	if err := res.Err(); err != nil {
-		return nil, fmt.Errorf("mongo: active tenants: %w", err)
+	seen := map[string]bool{}
+	err := p.distinctTenants(ctx, seen, collDelivery,
+		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(openStatuses)}}}})
+	if err != nil {
+		return nil, err
 	}
-	var out []string
-	if err := res.Decode(&out); err != nil {
-		return nil, fmt.Errorf("mongo: active tenants: %w", err)
+	err = p.distinctTenants(ctx, seen, collCampaign,
+		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: campaignStatusInts(unfinishedCampaigns)}}}})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// distinctTenants adds the tenants matching filter in one collection to seen,
+// skipping the system scope: it holds the leader lock, never work.
+func (p *Provider) distinctTenants(ctx context.Context, seen map[string]bool, coll string, filter bson.D) error {
+	res := p.db.Collection(coll).Distinct(ctx, "tenant_id", filter)
+	if err := res.Err(); err != nil {
+		return fmt.Errorf("mongo: active tenants: %w", err)
+	}
+	var ids []string
+	if err := res.Decode(&ids); err != nil {
+		return fmt.Errorf("mongo: active tenants: %w", err)
+	}
+	for _, id := range ids {
+		if id != store.SystemTenantID {
+			seen[id] = true
+		}
+	}
+	return nil
 }
 
 // Close releases the connection when this Provider owns it.

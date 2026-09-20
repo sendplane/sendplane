@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 	"github.com/sendplane/sendplane/store/memstore"
 )
@@ -46,7 +46,7 @@ const testTenant = "t1"
 
 // newFixture builds a memstore provider on a fake clock plus a Control bound
 // to it, and returns the tenant store the tests work on.
-func newFixture(t *testing.T, hooks sendplane.Hooks, opts ...Option) (*memstore.Provider, store.Store, *fakeClock, *Control) {
+func newFixture(t *testing.T, hooks host.Hooks, opts ...Option) (*memstore.Provider, store.Store, *fakeClock, *Control) {
 	t.Helper()
 	clk := newClock()
 	p := memstore.New(memstore.WithClock(clk.Now))
@@ -146,11 +146,11 @@ func listOutbox(t *testing.T, st store.Store, status store.OutboxStatus) []store
 // told to fail.
 type recordingSink struct {
 	mu     sync.Mutex
-	events []sendplane.Event
+	events []host.Event
 	err    error
 }
 
-func (s *recordingSink) Emit(_ context.Context, evs []sendplane.Event) error {
+func (s *recordingSink) Emit(_ context.Context, evs []host.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
@@ -166,8 +166,8 @@ func (s *recordingSink) setErr(err error) {
 	s.err = err
 }
 
-func (s *recordingSink) got() []sendplane.Event {
+func (s *recordingSink) got() []host.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]sendplane.Event(nil), s.events...)
+	return append([]host.Event(nil), s.events...)
 }

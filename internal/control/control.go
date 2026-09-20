@@ -24,14 +24,14 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
 // Control is the control plane. Build it once per process and call Run.
 type Control struct {
 	provider store.Provider
-	hooks    sendplane.Hooks
+	hooks    host.Hooks
 	log      *slog.Logger
 	clock    func() time.Time
 	cfg      config
@@ -42,7 +42,7 @@ type Control struct {
 
 // New builds the control plane. provider is required; logger and clock fall
 // back to slog.Default and time.Now.
-func New(provider store.Provider, hooks sendplane.Hooks, logger *slog.Logger, clock func() time.Time, opts ...Option) (*Control, error) {
+func New(provider store.Provider, hooks host.Hooks, logger *slog.Logger, clock func() time.Time, opts ...Option) (*Control, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("control: store provider is required")
 	}
@@ -80,6 +80,11 @@ func (c *Control) Run(ctx context.Context) error {
 	c.log.Info("control: starting", "owner", c.cfg.owner)
 	return c.leader.Run(ctx)
 }
+
+// outboxLingerTicks is how many rounds the outbox dispatcher keeps ticking a
+// tenant that just went idle, so the events that idling produced are still
+// dispatched promptly.
+const outboxLingerTicks = 3
 
 // loopSpecs is the registered loop list. The outbox dispatcher is only
 // registered when the host actually wants events: claiming rows nobody
@@ -119,7 +124,7 @@ func (c *Control) loopSpecs() []loopSpec {
 			name:     "retention",
 			interval: c.cfg.intervals.Retention,
 			newTenant: func(st store.Store, tenantID string) tickLoop {
-				return &retention{st: st, log: c.tenantLog("retention", tenantID), cfg: &c.cfg}
+				return &retention{st: st, tenant: tenantID, log: c.tenantLog("retention", tenantID), cfg: &c.cfg}
 			},
 		},
 	}
@@ -127,6 +132,10 @@ func (c *Control) loopSpecs() []loopSpec {
 		specs = append(specs, loopSpec{
 			name:     "outbox",
 			interval: c.cfg.intervals.Outbox,
+			// The only loop with a grace window: the transition that enqueues
+			// campaign.completed is the same one that takes the tenant out of
+			// ActiveTenants (see tenantSet).
+			linger: outboxLingerTicks,
 			newTenant: func(st store.Store, tenantID string) tickLoop {
 				return &outboxDispatcher{st: st, sink: c.hooks.Events,
 					log: c.tenantLog("outbox", tenantID), cfg: &c.cfg, clock: c.clock}

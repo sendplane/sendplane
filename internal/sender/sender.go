@@ -1,3 +1,19 @@
+// Package sender is the claim → render → SMTP loop of architecture 8.
+//
+// One Sender is one replica. It polls the delivery queue per tenant and lane
+// (ADR-0002), renders each delivery for its recipient (internal/render),
+// applies the tracking and unsubscribe transforms of architecture 9.2, builds
+// the MIME message of architecture 10, and hands it to a pooled SMTP
+// connection. SMTP results are normalized into the five error classes of
+// architecture 4.2 and committed in batches, with an immediate MarkSent right
+// after 250 so that a crash before the batch commits costs a duplicate at
+// most, never a lost send.
+//
+// The package does not import the root sendplane package: the root package is
+// what calls Run. The types the host injects (Hooks, OutboundMessage,
+// SecretCipher, Metrics) come from the leaf package host instead, which the
+// root re-exports as aliases, so Config is filled straight from Options with
+// no adapter. See README.
 package sender
 
 import (
@@ -9,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/internal/tracking"
 	"github.com/sendplane/sendplane/store"
@@ -74,10 +91,10 @@ type Config struct {
 	RateLimitCap   time.Duration
 	AuthRetryAfter time.Duration
 
-	Hooks    Hooks
-	Secrets  SecretCipher
+	Hooks    host.Hooks
+	Secrets  host.SecretCipher
 	Renderer *render.Renderer
-	Metrics  Metrics
+	Metrics  host.Metrics
 	Logger   *slog.Logger
 	Clock    func() time.Time
 	// Rand is the jitter source; nil uses math/rand/v2.
@@ -145,7 +162,7 @@ func (c Config) withDefaults() Config {
 		c.TransportProbeInterval = DefaultTransportProbeInterval
 	}
 	if c.Metrics == nil {
-		c.Metrics = NopMetrics{}
+		c.Metrics = host.NopMetrics{}
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
@@ -531,7 +548,7 @@ func (s *Sender) heartbeat(ctx context.Context) {
 	maxWorkers := int64(1)
 	for _, t := range tenants {
 		w := store.Worker{
-			ID: s.cfg.WorkerID, Role: "sender", Lanes: lanes,
+			ID: s.cfg.WorkerID, Role: store.WorkerRoleSender, Lanes: lanes,
 			Concurrency: concurrency, LastSeenAt: now,
 		}
 		if err := t.st.Workers().Heartbeat(ctx, w); err != nil {
@@ -545,7 +562,7 @@ func (s *Sender) heartbeat(ctx context.Context) {
 		}
 		n := int64(0)
 		for _, w := range active {
-			if w.Role == "sender" {
+			if w.Role == store.WorkerRoleSender {
 				n++
 			}
 		}

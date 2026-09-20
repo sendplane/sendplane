@@ -47,6 +47,30 @@ func (r *bounceRepo) ListByDelivery(ctx context.Context, deliveryID string, p st
 	return r.listWhere(ctx, bson.D{{Key: "delivery_id", Value: deliveryID}}, p)
 }
 
+func (r *bounceRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return deleteBefore(ctx, r.s, r.coll(), before, limit)
+}
+
+// deleteBefore is the shared retention delete: the oldest matching ids first
+// (_id is UUIDv7, so id order is creation order), at most limit of them, then
+// one DeleteMany on those ids. Selecting the ids first is what bounds a chunk;
+// DeleteMany alone has no limit.
+func deleteBefore(ctx context.Context, s *tenantStore, coll *mongo.Collection,
+	before time.Time, limit int, extra ...bson.E) (int, error) {
+	filter := s.scope(append([]bson.E{
+		{Key: "created_at", Value: bson.D{{Key: "$lt", Value: ts(before)}}},
+	}, extra...)...)
+	ids, err := findIDs(ctx, coll, filter, idSort, limit)
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	res, err := coll.DeleteMany(ctx, s.scope(inIDs(ids)))
+	if err != nil {
+		return 0, wrap("delete "+coll.Name(), err)
+	}
+	return int(res.DeletedCount), nil
+}
+
 // --- campaigns ---------------------------------------------------------
 
 type campaignRepo struct {
@@ -381,6 +405,12 @@ func (r *trackingRepo) LinkClicks(ctx context.Context, campaignID string) ([]sto
 	return out, nil
 }
 
+// DeleteBefore enforces retention on tracking events in chunks
+// (architecture 9.4).
+func (r *trackingRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return deleteBefore(ctx, r.s, r.coll(), before, limit)
+}
+
 // --- outbox ------------------------------------------------------------
 
 type outboxRepo struct{ s *tenantStore }
@@ -512,6 +542,16 @@ func (r *outboxRepo) List(ctx context.Context, status store.OutboxStatus, p stor
 		filter = append(filter, bson.E{Key: "status", Value: string(status)})
 	}
 	return listPage[store.OutboxEvent, outboxDoc](ctx, r.coll(), filter, p, decOutbox)
+}
+
+// DeleteBefore removes dispatched events only: a pending row is still owed to
+// the host, whatever its age.
+func (r *outboxRepo) DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error) {
+	return deleteBefore(ctx, r.s, r.coll(), before, limit, bson.E{
+		Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{
+			string(store.OutboxDelivered), string(store.OutboxFailed),
+		}}},
+	})
 }
 
 // --- locks -------------------------------------------------------------

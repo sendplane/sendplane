@@ -34,7 +34,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -165,21 +165,21 @@ func WithMaxLineErrors(n int) Option {
 // between calls and is safe for concurrent use.
 type Ingester struct {
 	st            store.Store
-	limits        sendplane.Limits
+	limits        host.Limits
 	clock         func() time.Time
 	batchSize     int
 	maxLineErrors int
 }
 
 // New returns an Ingester bound to a tenant store. Zero fields of limits fall
-// back to sendplane.DefaultLimits; a nil clock is time.Now.
-func New(st store.Store, limits sendplane.Limits, clock func() time.Time, opts ...Option) *Ingester {
+// back to host.DefaultLimits; a nil clock is time.Now.
+func New(st store.Store, limits host.Limits, clock func() time.Time, opts ...Option) *Ingester {
 	if clock == nil {
 		clock = time.Now
 	}
 	i := &Ingester{
 		st:            st,
-		limits:        withDefaults(limits),
+		limits:        limits.WithDefaults(),
 		clock:         clock,
 		batchSize:     DefaultBatchSize,
 		maxLineErrors: DefaultMaxLineErrors,
@@ -188,24 +188,6 @@ func New(st store.Store, limits sendplane.Limits, clock func() time.Time, opts .
 		o(i)
 	}
 	return i
-}
-
-// withDefaults mirrors sendplane.Limits.withDefaults, which is unexported.
-func withDefaults(l sendplane.Limits) sendplane.Limits {
-	d := sendplane.DefaultLimits
-	if l.MaxRecipientsPerCampaign == 0 {
-		l.MaxRecipientsPerCampaign = d.MaxRecipientsPerCampaign
-	}
-	if l.MaxVarsBytes == 0 {
-		l.MaxVarsBytes = d.MaxVarsBytes
-	}
-	if l.MaxBodyBytes == 0 {
-		l.MaxBodyBytes = d.MaxBodyBytes
-	}
-	if l.MaxRecipientLineBytes == 0 {
-		l.MaxRecipientLineBytes = d.MaxRecipientLineBytes
-	}
-	return l
 }
 
 // Ingest streams an NDJSON body into the campaign's deliveries.

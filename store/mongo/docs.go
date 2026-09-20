@@ -56,6 +56,7 @@ type transportDoc struct {
 	Status              int32              `bson:"status"`
 	StatusReason        string             `bson:"status_reason"`
 	StatusChangedAt     *time.Time         `bson:"status_changed_at"`
+	StatusUntil         *time.Time         `bson:"status_until"`
 }
 
 func transportMeta() meta[store.Transport, transportDoc] {
@@ -75,7 +76,7 @@ func transportMeta() meta[store.Transport, transportDoc] {
 				MaxConns: int32(v.MaxConns), RatePerSecond: v.RatePerSecond,
 				DomainRatePerSecond: v.DomainRatePerSecond,
 				Status:              int32(v.Status), StatusReason: v.StatusReason,
-				StatusChangedAt: encTime(v.StatusChangedAt),
+				StatusChangedAt: encTime(v.StatusChangedAt), StatusUntil: encTime(v.StatusUntil),
 			}
 		},
 		dec: func(d *transportDoc) *store.Transport {
@@ -86,8 +87,8 @@ func transportMeta() meta[store.Transport, transportDoc] {
 				MaxConns: int(d.MaxConns), RatePerSecond: d.RatePerSecond,
 				DomainRatePerSecond: d.DomainRatePerSecond,
 				Status:              store.TransportStatus(d.Status), StatusReason: d.StatusReason,
-				StatusChangedAt: decTime(d.StatusChangedAt),
-				Version:         d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
+				StatusChangedAt: decTime(d.StatusChangedAt), StatusUntil: decTime(d.StatusUntil),
+				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
 		},
 	}
@@ -563,6 +564,7 @@ type settingsDoc struct {
 	SuppressionEnabled     bool              `bson:"suppression_enabled"`
 	UnsubscribeMode        string            `bson:"unsubscribe_mode"`
 	UnsubscribeURLTemplate string            `bson:"unsubscribe_url_template"`
+	UnsubscribeOneClick    bool              `bson:"unsubscribe_one_click"`
 	DefaultLocale          string            `bson:"default_locale"`
 	Tracking               trackingConfigDoc `bson:"tracking"`
 }
@@ -583,6 +585,7 @@ func encSettings(v *store.TenantSettings) *settingsDoc {
 		RetentionDays: int32(v.RetentionDays), SuppressionEnabled: v.SuppressionEnabled,
 		UnsubscribeMode:        string(v.UnsubscribeMode),
 		UnsubscribeURLTemplate: v.UnsubscribeURLTemplate,
+		UnsubscribeOneClick:    v.UnsubscribeOneClick,
 		DefaultLocale:          v.DefaultLocale,
 		Tracking: trackingConfigDoc{
 			Domain: v.Tracking.Domain, Opens: v.Tracking.Opens,
@@ -607,6 +610,7 @@ func decSettings(d *settingsDoc) *store.TenantSettings {
 		SuppressionEnabled:     d.SuppressionEnabled,
 		UnsubscribeMode:        store.UnsubscribeMode(d.UnsubscribeMode),
 		UnsubscribeURLTemplate: d.UnsubscribeURLTemplate,
+		UnsubscribeOneClick:    d.UnsubscribeOneClick,
 		DefaultLocale:          d.DefaultLocale,
 		Tracking: store.TrackingConfig{
 			Domain: d.Tracking.Domain, Opens: d.Tracking.Opens,

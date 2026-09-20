@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 	"github.com/sendplane/sendplane/store/memstore"
 )
 
 func TestNewRequiresProvider(t *testing.T) {
-	if _, err := New(nil, sendplane.Hooks{}, nil, nil); err == nil {
+	if _, err := New(nil, host.Hooks{}, nil, nil); err == nil {
 		t.Fatal("New(nil provider) = nil error")
 	}
 }
@@ -20,9 +20,10 @@ func TestNewRequiresProvider(t *testing.T) {
 // election, the finalizer detecting completion, and the outbox dispatcher
 // handing the event to the host's sink.
 //
-// It also covers the linger window: the campaign only completes after its last
-// delivery goes terminal, which is the moment the tenant drops out of
-// Provider.ActiveTenants.
+// It also covers the two halves of Provider.ActiveTenants: the finalizer sees
+// the tenant after its last delivery went terminal because the campaign is
+// still running, and the outbox dispatcher still sees it one round after
+// completing the campaign took it out of the active set.
 func TestControlRunCompletesCampaignEndToEnd(t *testing.T) {
 	p := memstore.New()
 	t.Cleanup(func() { _ = p.Close() })
@@ -38,7 +39,7 @@ func TestControlRunCompletesCampaignEndToEnd(t *testing.T) {
 
 	sink := &recordingSink{}
 	fast := 5 * time.Millisecond
-	c, err := New(p, sendplane.Hooks{Events: sink}, discardLogger(), time.Now,
+	c, err := New(p, host.Hooks{Events: sink}, discardLogger(), time.Now,
 		WithOwner("test"),
 		WithLeaderTTL(testTTL),
 		WithLeaderRetry(testRetry),
@@ -114,7 +115,7 @@ func TestControlRunFlushesTracking(t *testing.T) {
 		t.Fatalf("Acquire = %v, %v", ok, err)
 	}
 
-	c, err := New(p, sendplane.Hooks{}, discardLogger(), time.Now,
+	c, err := New(p, host.Hooks{}, discardLogger(), time.Now,
 		WithOwner("follower"),
 		WithLeaderRetry(10*time.Millisecond),
 		WithTracking(5*time.Millisecond, 1_000_000, 1000),

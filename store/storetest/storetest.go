@@ -70,6 +70,8 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 	t.Run("Locks", func(t *testing.T) { testLocks(t, p) })
 	t.Run("Workers", func(t *testing.T) { testWorkers(t, p) })
 	t.Run("ActiveTenants", func(t *testing.T) { testActiveTenants(t, p) })
+	t.Run("ActiveTenantsCampaignOnly", func(t *testing.T) { testActiveTenantsCampaignOnly(t, p) })
+	t.Run("LoadTenantSettings", func(t *testing.T) { testLoadTenantSettings(t, p) })
 }
 
 // --- helpers -----------------------------------------------------------
@@ -252,8 +254,12 @@ func testTenantSettings(t *testing.T, p store.Provider) {
 	eq(t, "unsubscribe mode default", got.UnsubscribeMode, store.UnsubscribeSendplane)
 	eq(t, "backoff length", len(got.Retry.Backoff), 6)
 
+	eq(t, "one-click default", got.UnsubscribeOneClick, false)
+
 	stale := *got
 	got.RetentionDays = 30
+	got.UnsubscribeMode = store.UnsubscribeHost
+	got.UnsubscribeOneClick = true
 	got.Tracking.Domain = "t.example.com"
 	got.Tracking.SigningKeys = []store.SigningKey{{KID: "k1", Secret: []byte("s"), CreatedAt: time.Now().UTC()}}
 	must(t, "Update", r.Update(ctx, got))
@@ -265,8 +271,32 @@ func testTenantSettings(t *testing.T, p store.Provider) {
 	after, err := r.Get(ctx)
 	must(t, "Get after Update", err)
 	eq(t, "retention", after.RetentionDays, 30)
+	eq(t, "unsubscribe mode", after.UnsubscribeMode, store.UnsubscribeHost)
+	eq(t, "one-click", after.UnsubscribeOneClick, true)
 	eq(t, "tracking domain", after.Tracking.Domain, "t.example.com")
 	eq(t, "signing keys", len(after.Tracking.SigningKeys), 1)
+}
+
+// LoadTenantSettings creates the default row on first access and is a plain
+// read afterwards (ADR-0006).
+func testLoadTenantSettings(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, tenantID := fresh(t, p)
+	now := time.Now().UTC()
+
+	first, err := store.LoadTenantSettings(ctx, s, tenantID, now)
+	must(t, "LoadTenantSettings on an empty tenant", err)
+	eq(t, "tenant", first.TenantID, tenantID)
+	eq(t, "version", first.Version, int64(1))
+	eq(t, "defaults applied", first.UnsubscribeMode, store.UnsubscribeSendplane)
+
+	first.RetentionDays = 7
+	must(t, "Update", s.TenantSettings().Update(ctx, first))
+
+	again, err := store.LoadTenantSettings(ctx, s, tenantID, now)
+	must(t, "LoadTenantSettings on an existing row", err)
+	eq(t, "no second create", again.Version, int64(2))
+	eq(t, "reads the stored row", again.RetentionDays, 7)
 }
 
 func testTransports(t *testing.T, p store.Provider) {
@@ -285,8 +315,17 @@ func testTransports(t *testing.T, p store.Provider) {
 		id:     func(v *store.Transport) string { return v.ID },
 		tenant: func(v *store.Transport) string { return v.TenantID },
 		ver:    func(v *store.Transport) int64 { return v.Version },
-		mutate: func(v *store.Transport) { v.Status = store.TransportUnhealthy; v.StatusReason = "auth" },
-		label:  func(v *store.Transport) string { return v.Status.String() + "/" + v.StatusReason },
+		mutate: func(v *store.Transport) {
+			v.Status = store.TransportUnhealthy
+			v.StatusReason = "auth"
+			// StatusUntil is what lets another replica re-probe a transport it
+			// never saw fail, so it has to survive a round trip.
+			v.StatusUntil = time.Now().UTC().Add(time.Minute)
+		},
+		label: func(v *store.Transport) string {
+			return v.Status.String() + "/" + v.StatusReason + "/" +
+				store.TruncateTime(v.StatusUntil).Format(time.RFC3339Nano)
+		},
 	})
 }
 
@@ -635,4 +674,28 @@ func testActiveTenants(t *testing.T, p store.Provider) {
 		}
 	}
 	t.Fatalf("ActiveTenants %v does not contain %s, which has queued work", tenants, tenantID)
+}
+
+// A tenant whose campaign is running but whose deliveries have all gone
+// terminal must still be listed: that is the exact moment the finalizer has to
+// tick it to move the campaign to completed (store.Provider.ActiveTenants).
+func testActiveTenantsCampaignOnly(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, tenantID := fresh(t, p)
+
+	c := &store.Campaign{Name: "running, no deliveries", Status: store.CampaignRunning}
+	must(t, "Create campaign", s.Campaigns().Create(ctx, c))
+
+	counts, err := s.Deliveries().CountByStatus(ctx, c.ID)
+	must(t, "CountByStatus", err)
+	eq(t, "no deliveries", len(counts), 0)
+
+	tenants, err := p.ActiveTenants(ctx)
+	must(t, "ActiveTenants", err)
+	for _, id := range tenants {
+		if id == tenantID {
+			return
+		}
+	}
+	t.Fatalf("ActiveTenants %v does not contain %s, which has a running campaign", tenants, tenantID)
 }

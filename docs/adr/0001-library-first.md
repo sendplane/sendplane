@@ -10,7 +10,10 @@ sendplane은 다른 사이트/프로젝트에 통합되어야 하고, 계정·�
 - 루트 패키지 `sendplane`이 `New(Options)`로 `Authenticator`, `Authorizer`, `TenantResolver`, `Hooks`를 받는 **라이브러리**가 1급 산출물이다.
 - `cmd/sendplane`은 이 라이브러리를 설정 파일 기반 구현체(API Key/JWT 인증, webhook 이벤트, URL 템플릿 수신거부)로 감싼 **참조 바이너리**이며, Go 없이 통합하려는 호스트와 helm 배포가 쓴다.
 - control / sender / bounce 역할은 같은 바이너리의 `--roles` 플래그. 호스트가 Go 훅을 쓰면 호스트가 자기 `cmd/`에서 세 역할을 링크한다(훅은 sender에서도 실행되므로).
-- 공개 패키지는 `sendplane`과 `store`만. 나머지는 `internal/`.
+- 공개 패키지는 `sendplane`, `host`, `store` 셋. 나머지는 `internal/`.
+  (`host`는 나중에 추가됐다: 루트가 `internal/{api,control,sender}`를 import해 `Handler`/`RunControl`/`RunSender`를
+  구현해야 하므로, 호스트가 주입하는 타입은 `store`만 import하는 leaf 패키지에 두고 루트가 타입 별칭으로 재노출한다.
+  공개 표면은 `sendplane.X` 그대로다. architecture §2.1 참조.)
 
 ## 기각한 대안
 - **바이너리 전용 + 모든 확장을 webhook으로**: 비-Go 호스트에는 충분하지만, Go 호스트가 인증을 in-process로 하고 싶을 때 네트워크 홉과 지연이 생긴다. 참조 바이너리가 이 모델을 그대로 제공하므로 잃는 것이 없다.

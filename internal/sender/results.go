@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -23,7 +24,7 @@ type batcher struct {
 	size     int
 	interval time.Duration
 	log      *slog.Logger
-	metrics  Metrics
+	metrics  host.Metrics
 
 	mu  sync.Mutex
 	buf []store.DeliveryResult
@@ -34,7 +35,7 @@ type batcher struct {
 	once   sync.Once
 }
 
-func newBatcher(st store.Store, size int, interval time.Duration, log *slog.Logger, m Metrics) *batcher {
+func newBatcher(st store.Store, size int, interval time.Duration, log *slog.Logger, m host.Metrics) *batcher {
 	b := &batcher{
 		st: st, size: size, interval: interval, log: log, metrics: m,
 		wake:   make(chan struct{}, 1),

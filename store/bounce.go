@@ -49,4 +49,9 @@ type BounceRepo interface {
 	Get(ctx context.Context, id string) (*BounceEvent, error)
 	List(ctx context.Context, p Page) (Result[BounceEvent], error)
 	ListByDelivery(ctx context.Context, deliveryID string, p Page) (Result[BounceEvent], error)
+	// DeleteBefore removes events created before the cutoff, at most limit of
+	// them, and returns how many it deleted. Bounce events fall under the
+	// tenant's retention period like every other per-recipient row
+	// (architecture 16). A limit <= 0 means "every match".
+	DeleteBefore(ctx context.Context, before time.Time, limit int) (int, error)
 }

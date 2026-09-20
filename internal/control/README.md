@@ -26,7 +26,7 @@ lease를 잃은 리플리카가 쓰기를 계속하는 구간을 없애기 위�
 | `finalizer` | 10s | `running`마다 `CountByStatus` → `UpdateStats`. `pending/queued/leased/deferred`가 0이면 `completed` + `campaign.completed` |
 | `canceller` | 2s | `cancelled` 캠페인의 `pending/queued/deferred`를 틱당 10k씩 `cancelled`로. `leased`는 sender가 끝내도록 둠 |
 | `leaseReaper` | 30s | `ReleaseExpiredLeases(now, 5000)` — ADR-0002의 at-least-once 복구 경로 |
-| `retention` | 1h | `RetentionDays` 지난 완료/취소 캠페인의 delivery를 5k 청크로 삭제 |
+| `retention` | 1h | `RetentionDays` 지난 완료/취소 캠페인의 delivery + 테넌트의 tracking/bounce/디스패치된 outbox 행을 5k 청크로 삭제 |
 | `outboxDispatcher` | 1s | `ClaimPending` → `EventSink.Emit` → `MarkDelivered` / `MarkFailed`. 워커 풀 기본 8 |
 
 ### finalizer의 적응형 주기
@@ -81,27 +81,37 @@ go test -race ./internal/control/...
 
 memstore + 고정 시계를 씁니다. 리더 테스트만 실제 시간을 씁니다(lease TTL이 곧 잠드는 시간이라 가짜 시계로는 티커가 안 돌아갑니다).
 
+## 테넌트 집합과 linger
+
+`Provider.ActiveTenants()`는 "비종료 delivery가 있는 테넌트 **또는** `scheduled|running|paused` 캠페인이 있는 테넌트"입니다.
+뒤쪽 절이 control을 위한 것입니다 — 캠페인에 가장 중요한 틱은 *마지막 delivery가 종료된 직후*인데, delivery 쪽만 보면
+그 순간 테넌트는 이미 active가 아닙니다. 캠페인이 `running`인 동안 계속 보이므로 finalizer가 그 틱을 놓치지 않습니다.
+`_system`(`store.SystemTenantID`)은 절대 반환되지 않습니다.
+
+그래서 여섯 루프 중 **다섯은 유예 기간이 없습니다.** active 집합에서 빠지면 그 자리에서 상태를 버립니다.
+`outbox`만 `linger`(3틱)를 씁니다: 캠페인을 `completed`로 옮기는 그 전이가 `campaign.completed`를 enqueue하면서
+동시에 테넌트를 active 집합에서 빼기 때문에, 유예가 없으면 그 이벤트가 다음 캠페인 때까지 pending으로 남습니다.
+이건 창(window)이지 보장이 아닙니다 — dispatch가 실패한 이벤트는 outbox 백오프를 타고, 그 사이 테넌트가 계속
+idle이면 다음 캠페인 때 나갑니다. 완전히 idle한 테넌트의 outbox까지 비우려면 스토어가 "pending 이벤트가 있는 테넌트"를
+열거할 수 있어야 하는데, 계약에 그런 것은 없습니다.
+
+## retention이 지우는 것
+
+`RetentionDays`가 지난 완료/취소 캠페인의 delivery(캠페인별 청크) + 테넌트 전체의 TrackingEvent(§9.4),
+BounceEvent(§16), 그리고 **이미 디스패치된** outbox 행. pending outbox 행은 아무리 오래돼도 지우지 않습니다 —
+아직 호스트에게 줄 빚이고, `failed`는 호스트가 조회·재전송하는 dead letter입니다.
+테넌트 설정은 `store.LoadTenantSettings`로 읽습니다(행이 없으면 기본값으로 만들고 읽습니다).
+
 ## store 계약에 없어서 못 한 것
 
-1. **`Provider`에 전체 테넌트 열거가 없습니다.** `ActiveTenants()`는 "비종료 delivery가 있는 테넌트",
-   즉 sender용 목록입니다. control에 정말 필요한 틱은 *마지막 delivery가 종료된 직후* — 그 순간 테넌트는
-   이미 active가 아닙니다. 지금은 active 집합에서 빠진 테넌트를 `lingerTicks`(3) 동안 더 틱해서 막고 있지만,
-   그 사이에 리더가 재시작하면 캠페인이 `running`에 남습니다. `Provider.Tenants()` 또는
-   `ActiveTenants`가 "미완료 캠페인이 있는 테넌트"까지 포함하는 쪽이 옳습니다.
-2. **`SystemTenantID`가 `store`에 없습니다.** 리더 lock은 테넌트가 없는 클러스터 싱글턴인데 `Store`는
-   테넌트 바인딩이라, 이 패키지에서 `"_system"`을 정의해 씁니다. `store.DefaultTenantID` 옆에 있어야
-   커스텀 `Provider`가 이 스코프를 실제 고객 테넌트로 오해하지 않습니다.
-3. **`TrackingEvent`에 `Unique` 필드가 없습니다.** `SetFirst*`의 `changed`를 이벤트 행에 기록할 곳이 없어서
+1. **`TrackingEvent`에 `Unique` 필드가 없습니다.** `SetFirst*`의 `changed`를 이벤트 행에 기록할 곳이 없어서
    유니크 판정은 `CountUnique`(distinct delivery)에만 의존합니다.
-4. **`TrackingRepo` / `BounceRepo` / `OutboxRepo`에 `DeleteBefore`가 없습니다.** 그래서 `retention`은
-   delivery만 지웁니다. §9.4는 TrackingEvent가 Delivery와 같은 보존기간을 따른다고, §16은 BounceEvent도
-   대상이라고 적고 있으므로 세 리포지터리 모두 `DeleteBefore(before, limit)`가 필요합니다.
-5. **캠페인 없는(transactional) delivery의 보존기간 경로가 없습니다.** `DeleteBefore("")`로 지울 수는 있지만
+2. **캠페인 없는(transactional) delivery의 보존기간 경로가 없습니다.** `DeleteBefore("")`로 지울 수는 있지만
    "언제 끝났는지"의 기준이 될 캠페인이 없어 지금은 건드리지 않습니다.
+3. **"pending 이벤트가 있는 테넌트"를 열거할 수 없습니다.** 위의 outbox linger가 그 대용입니다.
 
-## 알려진 구조 문제: import 사이클
+## 루트 패키지와의 연결
 
-이 패키지는 `Hooks`/`Event`/`EventSink` 때문에 루트 `sendplane` 패키지를 import합니다.
-루트가 `Sendplane.RunControl`을 구현하려면 `internal/control`을 import해야 하므로 **그 시점에 사이클이 됩니다.**
-`internal/api`도 같은 문제를 갖게 됩니다. 해법은 `Event`/`EventSink`를 `store`(또는 별도 leaf 패키지)로 옮기는 것입니다.
-옮기면 이 패키지에서 바뀌는 곳은 `New`의 시그니처와 `events.go`의 `eventFromOutbox` 두 군데뿐입니다.
+`Hooks`/`Event`/`EventSink`는 leaf 패키지 `host`에서 옵니다(architecture §2.1). 루트가 `RunControl`을 구현하려고
+이 패키지를 import해도 사이클이 생기지 않고, 루트가 `host` 타입들을 별칭으로 재노출하므로 호스트 쪽 표면은 그대로입니다.
+`New(provider, host.Hooks, logger, clock, ...)`에 `sendplane.Hooks`를 그대로 넘길 수 있습니다 — 같은 타입입니다.

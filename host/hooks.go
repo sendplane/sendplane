@@ -1,4 +1,4 @@
-package sendplane
+package host
 
 import (
 	"context"
@@ -48,6 +48,8 @@ type RecipientContext struct {
 }
 
 // OutboundMessage is the rendered message BeforeSend may inspect or modify.
+// Changing Headers, Subject, From, ReplyTo or UnsubscribeURL is allowed;
+// values containing CR or LF are rejected afterwards (architecture 16).
 type OutboundMessage struct {
 	TenantID   string
 	DeliveryID string
@@ -66,6 +68,8 @@ type OutboundMessage struct {
 	HTML    string
 	Text    string
 
+	// Headers are extra headers to add. Names are checked against the
+	// allowlist of architecture 16 unless they start with X-.
 	Headers        map[string]string
 	UnsubscribeURL string
 }

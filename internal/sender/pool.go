@@ -12,6 +12,7 @@ import (
 
 	"github.com/wneessen/go-mail/smtp"
 
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -39,7 +40,7 @@ type PoolConfig struct {
 	Dialer DialFunc
 	Now    func() time.Time
 	// Metrics is never nil after withDefaults.
-	Metrics Metrics
+	Metrics host.Metrics
 }
 
 // ErrPoolClosed is returned by Get after Close.
@@ -74,7 +75,7 @@ func NewPool(cfg PoolConfig) *Pool {
 		cfg.Now = time.Now
 	}
 	if cfg.Metrics == nil {
-		cfg.Metrics = NopMetrics{}
+		cfg.Metrics = host.NopMetrics{}
 	}
 	if cfg.Dialer == nil {
 		d := &net.Dialer{Timeout: cfg.DialTimeout}

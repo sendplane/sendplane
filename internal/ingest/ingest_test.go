@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sendplane/sendplane"
+	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/store"
 	"github.com/sendplane/sendplane/store/memstore"
 )
@@ -18,7 +18,7 @@ var testNow = time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC)
 
 // fixture returns an ingester bound to a fresh memstore holding one draft
 // campaign.
-func fixture(t testing.TB, limits sendplane.Limits, opts ...Option) (*Ingester, store.Store, *store.Campaign) {
+func fixture(t testing.TB, limits host.Limits, opts ...Option) (*Ingester, store.Store, *store.Campaign) {
 	t.Helper()
 	ctx := context.Background()
 	p := memstore.New(memstore.WithClock(func() time.Time { return testNow }))
@@ -44,7 +44,7 @@ func ndjson(lines ...string) io.Reader { return strings.NewReader(strings.Join(l
 
 func TestIngestHappyPath(t *testing.T) {
 	ctx := context.Background()
-	ing, st, c := fixture(t, sendplane.Limits{})
+	ing, st, c := fixture(t, host.Limits{})
 
 	res, err := ing.Ingest(ctx, c.ID, "", ndjson(
 		`{"email":"A@Example.COM","name":" Ada ","locale":"ko-KR","vars":{"plan":"pro"},"unsubscribe_url":"https://host.example/u/1"}`,
@@ -101,7 +101,7 @@ func TestIngestHappyPath(t *testing.T) {
 
 func TestIngestAppendsAcrossCalls(t *testing.T) {
 	ctx := context.Background()
-	ing, _, c := fixture(t, sendplane.Limits{})
+	ing, _, c := fixture(t, host.Limits{})
 
 	if _, err := ing.Ingest(ctx, c.ID, "", ndjson(`{"email":"a@example.com"}`)); err != nil {
 		t.Fatal(err)
@@ -117,7 +117,7 @@ func TestIngestAppendsAcrossCalls(t *testing.T) {
 
 func TestIngestScheduledCampaignAccepted(t *testing.T) {
 	ctx := context.Background()
-	ing, st, c := fixture(t, sendplane.Limits{})
+	ing, st, c := fixture(t, host.Limits{})
 	c.Status = store.CampaignScheduled
 	if err := st.Campaigns().Update(ctx, c); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestIngestNotEditable(t *testing.T) {
 	for _, s := range []store.CampaignStatus{
 		store.CampaignRunning, store.CampaignPaused, store.CampaignCompleted, store.CampaignCancelled,
 	} {
-		ing, st, c := fixture(t, sendplane.Limits{})
+		ing, st, c := fixture(t, host.Limits{})
 		c.Status = s
 		if err := st.Campaigns().Update(ctx, c); err != nil {
 			t.Fatal(err)
@@ -145,7 +145,7 @@ func TestIngestNotEditable(t *testing.T) {
 }
 
 func TestIngestUnknownCampaign(t *testing.T) {
-	ing, _, _ := fixture(t, sendplane.Limits{})
+	ing, _, _ := fixture(t, host.Limits{})
 	_, err := ing.Ingest(context.Background(), "nope", "", failingReader{t})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
@@ -164,7 +164,7 @@ func (r failingReader) Read([]byte) (int, error) {
 
 func TestChunkIdempotency(t *testing.T) {
 	ctx := context.Background()
-	ing, st, c := fixture(t, sendplane.Limits{})
+	ing, st, c := fixture(t, host.Limits{})
 
 	first, err := ing.Ingest(ctx, c.ID, "chunk-0007", ndjson(
 		`{"email":"a@example.com"}`,
@@ -202,7 +202,7 @@ func TestChunkIdempotency(t *testing.T) {
 
 func TestChunkLeftInProgressOnError(t *testing.T) {
 	ctx := context.Background()
-	ing, st, c := fixture(t, sendplane.Limits{}, WithBatchSize(2))
+	ing, st, c := fixture(t, host.Limits{}, WithBatchSize(2))
 
 	_, err := ing.Ingest(ctx, c.ID, "chunk-1", io.MultiReader(
 		ndjson(`{"email":"a@example.com"}`, `{"email":"b@example.com"}`),
@@ -231,7 +231,7 @@ func TestChunkLeftInProgressOnError(t *testing.T) {
 
 func TestNoChunkKeyRecordsNothing(t *testing.T) {
 	ctx := context.Background()
-	ing, st, c := fixture(t, sendplane.Limits{})
+	ing, st, c := fixture(t, host.Limits{})
 	if _, err := ing.Ingest(ctx, c.ID, "", ndjson(`{"email":"a@example.com"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func (r errReader) Read([]byte) (int, error) { return 0, r.err }
 
 func TestDuplicatesWithinAndAcrossBatches(t *testing.T) {
 	ctx := context.Background()
-	ing, _, c := fixture(t, sendplane.Limits{}, WithBatchSize(2))
+	ing, _, c := fixture(t, host.Limits{}, WithBatchSize(2))
 
 	// a, a  -> in-batch duplicate (never reaches the store)
 	// b, a  -> a again, now in a later batch: the unique key catches it
@@ -266,7 +266,7 @@ func TestDuplicatesWithinAndAcrossBatches(t *testing.T) {
 
 func TestInvalidLines(t *testing.T) {
 	ctx := context.Background()
-	ing, _, c := fixture(t, sendplane.Limits{MaxVarsBytes: 32, MaxRecipientLineBytes: 200})
+	ing, _, c := fixture(t, host.Limits{MaxVarsBytes: 32, MaxRecipientLineBytes: 200})
 
 	big := `{"email":"big@example.com","vars":{"blob":"` + strings.Repeat("x", 64) + `"}}`
 	long := `{"email":"long@example.com","name":"` + strings.Repeat("y", 400) + `"}`
@@ -317,7 +317,7 @@ func TestInvalidLines(t *testing.T) {
 func TestLocaleAccepted(t *testing.T) {
 	ctx := context.Background()
 	for _, loc := range []string{"ko", "en", "ko-KR", "zh-Hans-CN", "", "es-419"} {
-		ing, _, c := fixture(t, sendplane.Limits{})
+		ing, _, c := fixture(t, host.Limits{})
 		res, err := ing.Ingest(ctx, c.ID, "", strings.NewReader(
 			fmt.Sprintf(`{"email":"a@example.com","locale":%q}`+"\n", loc)))
 		if err != nil {
@@ -331,7 +331,7 @@ func TestLocaleAccepted(t *testing.T) {
 
 func TestLineErrorsCapped(t *testing.T) {
 	ctx := context.Background()
-	ing, _, c := fixture(t, sendplane.Limits{}, WithMaxLineErrors(3))
+	ing, _, c := fixture(t, host.Limits{}, WithMaxLineErrors(3))
 	var b strings.Builder
 	for i := 0; i < 20; i++ {
 		b.WriteString("{\n")
@@ -347,7 +347,7 @@ func TestLineErrorsCapped(t *testing.T) {
 
 func TestNoTrailingNewline(t *testing.T) {
 	ctx := context.Background()
-	ing, _, c := fixture(t, sendplane.Limits{})
+	ing, _, c := fixture(t, host.Limits{})
 	res, err := ing.Ingest(ctx, c.ID, "", strings.NewReader(
 		`{"email":"a@example.com"}`+"\n"+`{"email":"b@example.com"}`))
 	if err != nil {
@@ -360,7 +360,7 @@ func TestNoTrailingNewline(t *testing.T) {
 
 func TestCRLFBody(t *testing.T) {
 	ctx := context.Background()
-	ing, _, c := fixture(t, sendplane.Limits{})
+	ing, _, c := fixture(t, host.Limits{})
 	res, err := ing.Ingest(ctx, c.ID, "", strings.NewReader(
 		`{"email":"a@example.com"}`+"\r\n"+`{"email":"b@example.com"}`+"\r\n"))
 	if err != nil {
@@ -373,7 +373,7 @@ func TestCRLFBody(t *testing.T) {
 
 func TestTooManyRecipients(t *testing.T) {
 	ctx := context.Background()
-	limits := sendplane.Limits{MaxRecipientsPerCampaign: 5}
+	limits := host.Limits{MaxRecipientsPerCampaign: 5}
 
 	// Exactly at the limit is fine.
 	ing, _, c := fixture(t, limits, WithBatchSize(2))
@@ -424,7 +424,7 @@ func lines(n int) []string {
 
 func TestIngestContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	ing, _, c := fixture(t, sendplane.Limits{})
+	ing, _, c := fixture(t, host.Limits{})
 	cancel()
 	if _, err := ing.Ingest(ctx, c.ID, "", ndjson(lines(3)...)); !errors.Is(err, context.Canceled) {
 		// Get may fail first; either way the call must not report success.

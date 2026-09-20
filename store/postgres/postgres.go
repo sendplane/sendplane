@@ -113,15 +113,20 @@ func (p *Provider) ForTenant(_ context.Context, tenantID string) (store.Store, e
 	return newTenantStore(p, tenantID), nil
 }
 
-// ActiveTenants lists tenants that have at least one delivery which is not in
-// a terminal state, i.e. the tenants a sender still has work for.
+// ActiveTenants lists the tenants with a non-terminal delivery or an unfinished
+// campaign (store.Provider). The two halves are separate index scans unioned
+// afterwards, rather than one OR across two tables: delivery_claim /
+// delivery_campaign_status and campaign_by_status each serve their own branch.
 func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
 	if err := p.check(); err != nil {
 		return nil, err
 	}
-	const q = `SELECT DISTINCT tenant_id FROM delivery
-	            WHERE status IN (0, 1, 2, 3) ORDER BY tenant_id`
-	rows, err := p.pool.Query(ctx, q)
+	const q = `SELECT tenant_id FROM (
+	              SELECT DISTINCT tenant_id FROM delivery WHERE status IN (0, 1, 2, 3)
+	              UNION
+	              SELECT DISTINCT tenant_id FROM campaign WHERE status IN (1, 2, 3)
+	           ) t WHERE tenant_id <> $1 ORDER BY tenant_id`
+	rows, err := p.pool.Query(ctx, q, store.SystemTenantID)
 	if err != nil {
 		return nil, mapErr(err)
 	}
