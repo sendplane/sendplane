@@ -1,0 +1,88 @@
+# The end-to-end test of docs/architecture.md 15: the whole compose stack
+# (control + two senders + bounce + chaos-smtp + postgres + a test IMAP server)
+# driven through the public API by test/e2e.
+#
+# Postgres runs on every pull request and every push to main. Mongo is added
+# nightly, which is what architecture 15 asks for ("mongo는 nightly"): the two
+# stores are held to the same behaviour by store/storetest in ci.yml, and this
+# run is the cross-check that the whole product still works on the other one.
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # 02:40 UTC, off the hour so it does not queue behind everyone else's cron
+    # and well before load-1m.yml at 03:40.
+    - cron: "40 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # GitHub Actions has no `if:` on a matrix entry, so the matrix itself is the
+  # thing that changes with the event. One job definition, two schedules.
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      dbs: ${{ steps.pick.outputs.dbs }}
+    steps:
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "schedule" ]; then
+            echo 'dbs=["postgres","mongo"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'dbs=["postgres"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  e2e:
+    needs: matrix
+    name: e2e (${{ matrix.db }})
+    runs-on: ubuntu-latest
+    # The harness's own --budget fails earlier and more informatively; this is
+    # the backstop for a stack that never comes up at all.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        db: ${{ fromJSON(needs.matrix.outputs.dbs) }}
+    env:
+      # test/e2e/docker-compose.mongo.yml is an overlay: it adds the mongo
+      # service and repoints the store DSN, leaving everything else alone.
+      COMPOSE_FILES: >-
+        ${{ matrix.db == 'mongo'
+          && '-f test/e2e/docker-compose.yml -f test/e2e/docker-compose.mongo.yml'
+          || '-f test/e2e/docker-compose.yml' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the sendplane image
+        run: docker build -f deploy/dev/Dockerfile -t sendplane:dev .
+
+      - name: Start the e2e stack
+        run: docker compose $COMPOSE_FILES up -d
+
+      - name: Run the end-to-end scenarios
+        run: go run ./test/e2e --kill-sender
+
+      - name: Container logs
+        if: always()
+        run: docker compose $COMPOSE_FILES logs --tail 400
+
+      - name: Stop the e2e stack
+        if: always()
+        run: docker compose $COMPOSE_FILES down -v

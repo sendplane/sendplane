@@ -1,0 +1,89 @@
+# Configuration shared by the control, sender and bounce containers of the
+# end-to-end test (docs/architecture.md 15). All three roles read the same
+# file; --roles decides what actually runs. ${VAR} is expanded from the process
+# environment by cmd/sendplane before the YAML is parsed, which is how the DSN,
+# the AES-GCM key, the probe HMAC key and the webhook URL come in from
+# docker-compose.yml.
+#
+# This file is for a throwaway test stack only: auth is disabled, the webhook
+# SSRF guard is switched off and every interval is far below its production
+# default so one run fits in ten minutes.
+
+store:
+  # postgres by default; test/e2e/docker-compose.mongo.yml overlays "mongo"
+  # for the nightly run (docs/architecture.md 15: "mongo는 nightly").
+  driver: ${SENDPLANE_STORE_DRIVER}
+  dsn: ${SENDPLANE_STORE_DSN}
+  mongo_db: sendplane
+
+secrets:
+  # Fixed, public, test-only key. The stack is torn down after every run.
+  key: ${SENDPLANE_SECRETS_KEY}
+
+auth:
+  # The harness talks to control without credentials; every request is tenant
+  # "default", roles [admin]. Never outside a test stack.
+  mode: none
+
+authz:
+  mode: allow_all
+
+events:
+  webhook:
+    # The harness's own receiver, reached through host.docker.internal.
+    url: ${SENDPLANE_WEBHOOK_URL}
+    secret: ${SENDPLANE_WEBHOOK_SECRET}
+    timeout: 10s
+    # The receiver is on the host gateway, i.e. an RFC 1918 address. The guard
+    # that normally refuses that (cmd/sendplane/events.go) has to be off here;
+    # scenario 7 is exactly the test that the sink reaches the host at all.
+    allow_private_networks: true
+
+sender:
+  lanes:
+    transactional: 8
+    bulk: 32
+    # The loopback probe goes through the normal sender path, so this lane
+    # needs at least one worker or every probe delivery sits queued and every
+    # run times out (docs/architecture.md 11.2, internal/probe/README.md).
+    probe: 1
+  claim_batch: 200
+  # Well below the 5m default: the optional --kill-sender step waits for the
+  # control lease reaper (30s tick) to hand the dead replica's rows back, and a
+  # 5m lease would put that recovery outside the run budget.
+  lease_for: 60s
+  ehlo_name: e2e.sendplane.test
+
+bounce:
+  # A DSN injected by the harness has to show up in seconds, not in the
+  # production minute. IDLE is off so the timing is the poll interval and
+  # nothing else.
+  poll_interval: 5s
+  refresh_interval: 10s
+  use_idle: false
+
+probe:
+  enabled: true
+  hmac_key: ${SENDPLANE_PROBE_HMAC_KEY}
+  # Empty uses the container's resolver, which answers NXDOMAIN for the
+  # .test domains this stack uses. The DNS layer is diagnostic only and never
+  # turns a loopback verdict red (ADR-0012), so that is the correct outcome
+  # here rather than a reason to skip it.
+  nameservers: []
+  # Long enough that the periodic trigger does not fire a second probe in the
+  # middle of a run; scenario 6 triggers explicitly.
+  interval: 6h
+  # The collect loop ticks once a minute, so a probe that really arrives is
+  # judged inside ~65s. Two minutes is "it is not coming", not "wait longer".
+  timeout: 2m
+
+limits:
+  max_recipients_per_campaign: 100000
+
+log:
+  level: info
+  format: text
+
+console:
+  # Nothing in this stack serves the ops console.
+  enabled: false

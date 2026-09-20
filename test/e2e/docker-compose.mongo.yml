@@ -1,0 +1,58 @@
+# Overlay that runs the same e2e stack against MongoDB instead of Postgres,
+# which is the nightly half of docs/architecture.md 15 ("mongo는 nightly").
+# It only adds the mongo service and repoints the store; every other service,
+# port and setting comes from docker-compose.yml.
+#
+#   docker compose -f test/e2e/docker-compose.yml -f test/e2e/docker-compose.mongo.yml up -d
+#
+# postgres still starts, because a Compose overlay can add services but not
+# remove them. It sits idle and costs a few seconds of startup.
+services:
+  mongo:
+    image: mongo:7
+    command: ["mongod", "--bind_ip_all"]
+    ports:
+      - "${E2E_MONGO_PORT:-37017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    environment: &mongo_env
+      SENDPLANE_STORE_DRIVER: mongo
+      SENDPLANE_STORE_DSN: mongodb://mongo:27017
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  control:
+    environment: *mongo_env
+    depends_on:
+      mongo:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  sender:
+    environment: *mongo_env
+    depends_on:
+      mongo:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      chaos-smtp:
+        condition: service_started
+      greenmail:
+        condition: service_started
+
+  bounce:
+    environment: *mongo_env
+    depends_on:
+      mongo:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      greenmail:
+        condition: service_started

@@ -1,0 +1,172 @@
+# The end-to-end stack of docs/architecture.md 15: postgres, one control, two
+# senders (lanes include probe: 1), one bounce poller, chaos-smtp and a
+# GreenMail test IMAP/SMTP server. Everything sendplane runs comes from the
+# single sendplane:dev image (deploy/dev/Dockerfile, `make docker`).
+#
+#   docker build -f deploy/dev/Dockerfile -t sendplane:dev .
+#   docker compose -f test/e2e/docker-compose.yml up -d
+#   go run ./test/e2e
+#   docker compose -f test/e2e/docker-compose.yml down -v
+#
+# The published ports deliberately avoid deploy/dev/docker-compose.yml
+# (55441/55442) and test/load/docker-compose.yml (15432/18080/19090): all three
+# stacks have to be able to run at the same time. They are still overridable,
+# because "a free port" is a property of the machine:
+#
+#   E2E_PG_PORT=15540 docker compose -f test/e2e/docker-compose.yml up -d
+name: sendplane-e2e
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - synchronous_commit=off
+      - -c
+      - fsync=off
+    environment:
+      POSTGRES_USER: sendplane
+      POSTGRES_PASSWORD: sendplane
+      POSTGRES_DB: sendplane
+      # The database is recreated for every run; skip the fsync-heavy initdb.
+      POSTGRES_INITDB_ARGS: --nosync
+    ports:
+      - "${E2E_PG_PORT:-15532}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sendplane -d sendplane"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # The test IMAP/SMTP server of architecture 15's e2e row. Users are created
+  # automatically, both on delivery and on login, with the login equal to the
+  # full address — which is why -Dgreenmail.users is deliberately NOT set:
+  # pre-creating `bounce:pw@sendplane.test` would give that account the login
+  # `bounce`, and a later IMAP login as `bounce@sendplane.test` is then
+  # refused because the address is taken. Auth is disabled, so any password
+  # works and sendplane's stored mailbox password is irrelevant.
+  #
+  # Port 8080 is GreenMail's own REST API (/api/service/readiness,
+  # /api/user/{address}/messages, /api/mail/purge). The harness reads
+  # delivered mail through it; sendplane itself reads the same mailboxes over
+  # real IMAP, which is the path under test.
+  greenmail:
+    image: greenmail/standalone:2.1.14
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.auth.disabled
+        -Dgreenmail.verbose
+    ports:
+      - "${E2E_GREENMAIL_SMTP_PORT:-13325}:3025"
+      - "${E2E_GREENMAIL_IMAP_PORT:-13443}:3143"
+      - "${E2E_GREENMAIL_API_PORT:-18581}:8080"
+
+  # Port 2525 rather than 25: the image runs as nonroot and cannot bind a
+  # privileged port. --keep-messages=-1 keeps every accepted message, which is
+  # what architecture 15 asks for; see test/e2e/README.md for why the harness
+  # still reads rendered mail out of GreenMail instead.
+  chaos-smtp:
+    image: sendplane:dev
+    entrypoint: ["/usr/local/bin/chaos-smtp"]
+    command:
+      - --listen=:2525
+      - --stats-listen=:9090
+      - --tempfail=0.05
+      - --permfail=0.01
+      - --drop=0.005
+      - --seed=42
+      - --latency=2ms
+      - --keep-messages=-1
+    ports:
+      - "${E2E_CHAOS_PORT:-19190}:9090"
+
+  # A one-shot migrate role, so the senders cannot lose a race against
+  # control's own --migrate-on-start.
+  migrate:
+    image: sendplane:dev
+    command: ["--config=/etc/sendplane/config.yaml", "--migrate"]
+    environment: &sendplane_env
+      SENDPLANE_STORE_DRIVER: postgres
+      SENDPLANE_STORE_DSN: postgres://sendplane:sendplane@postgres:5432/sendplane?sslmode=disable&pool_max_conns=20
+      # Test-only, public by design: base64("sendplane-e2e-test-key-012345678").
+      SENDPLANE_SECRETS_KEY: c2VuZHBsYW5lLWUyZS10ZXN0LWtleS0wMTIzNDU2Nzg=
+      # Test-only, public by design: base64("sendplane-e2e-probe-key-01234567").
+      SENDPLANE_PROBE_HMAC_KEY: c2VuZHBsYW5lLWUyZS1wcm9iZS1rZXktMDEyMzQ1Njc=
+      # Must match the constant in test/e2e/webhook.go.
+      SENDPLANE_WEBHOOK_SECRET: sendplane-e2e-webhook-secret
+      # The harness runs on the host and listens for events itself, so the
+      # control container reaches it through the host gateway (extra_hosts
+      # below). Override both together when the default port is taken.
+      SENDPLANE_WEBHOOK_URL: ${E2E_WEBHOOK_URL:-http://host.docker.internal:18585/hooks}
+    volumes:
+      - ./config.yaml:/etc/sendplane/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  control:
+    image: sendplane:dev
+    command:
+      - --config=/etc/sendplane/config.yaml
+      - --roles=control
+      - --migrate-on-start
+      - --listen=:8080
+    environment: *sendplane_env
+    volumes:
+      - ./config.yaml:/etc/sendplane/config.yaml:ro
+    ports:
+      - "${E2E_API_PORT:-18180}:8080"
+    # The event sink POSTs to the harness, which runs on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  sender:
+    image: sendplane:dev
+    command:
+      - --config=/etc/sendplane/config.yaml
+      - --roles=sender
+      - --listen=:8080
+    environment: *sendplane_env
+    volumes:
+      - ./config.yaml:/etc/sendplane/config.yaml:ro
+    deploy:
+      replicas: 2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      chaos-smtp:
+        condition: service_started
+      greenmail:
+        condition: service_started
+    # --kill-sender SIGKILLs one replica on purpose; letting compose restart it
+    # by itself would hide whether the lease recovery path works, so the
+    # harness brings it back explicitly.
+    restart: "no"
+
+  bounce:
+    image: sendplane:dev
+    command:
+      - --config=/etc/sendplane/config.yaml
+      - --roles=bounce
+      - --listen=:8080
+    environment: *sendplane_env
+    volumes:
+      - ./config.yaml:/etc/sendplane/config.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      greenmail:
+        condition: service_started

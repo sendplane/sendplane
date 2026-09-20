@@ -98,3 +98,23 @@ load-test:
 		$(COMPOSE) -f test/load/docker-compose.yml logs --tail 50; \
 		$(COMPOSE) -f test/load/docker-compose.yml down -v; \
 		exit $$status
+
+# End-to-end test (docs/architecture.md 15). Builds the image, brings up the
+# stack in test/e2e/docker-compose.yml, runs the scenario harness, dumps the
+# container logs either way and tears the stack down.
+#
+#   make e2e
+#   make e2e E2E_FLAGS=--kill-sender          # + the lease recovery scenario
+#   make e2e E2E_FLAGS="--only=4,5 --strict"  # a couple of scenarios, strictly
+#
+# On a machine with only the standalone Compose binary:
+#   make e2e COMPOSE=docker-compose E2E_FLAGS=--compose-cmd=docker-compose
+.PHONY: e2e
+e2e:
+	docker build -f deploy/dev/Dockerfile -t sendplane:dev .
+	$(COMPOSE) -f test/e2e/docker-compose.yml up -d
+	go run ./test/e2e $(E2E_FLAGS); \
+		status=$$?; \
+		$(COMPOSE) -f test/e2e/docker-compose.yml logs --tail 200; \
+		$(COMPOSE) -f test/e2e/docker-compose.yml down -v; \
+		exit $$status
