@@ -181,6 +181,24 @@ type DeliveryRepo interface {
 	// a row that is already sent.
 	MarkSent(ctx context.Context, id, owner, messageID string, at time.Time) error
 
+	// MarkBounced moves a delivery that is still in status sent to bounced,
+	// and MarkComplained moves it to complained. They are the asynchronous
+	// half of the state machine (architecture 4.1): a DSN or feedback report
+	// arrives minutes to days after the send, with no lease to authorize the
+	// write, so the CAS is on the status alone.
+	//
+	// Both report changed=false instead of an error when the delivery is not
+	// in status sent — it already bounced, it never got that far, or retention
+	// removed it. That is what makes a redelivered DSN idempotent: only the
+	// first one transitions, and the bounce processor uses the flag to decide
+	// whether to suppress the address and emit an event.
+	//
+	// Only hard bounces transition. A soft bounce is recorded as a BounceEvent
+	// and leaves the delivery alone, which is why neither method takes a
+	// BounceType: the classification lives on the event, not on the delivery.
+	MarkBounced(ctx context.Context, id string, at time.Time) (changed bool, err error)
+	MarkComplained(ctx context.Context, id string, at time.Time) (changed bool, err error)
+
 	// ReleaseExpiredLeases returns leased deliveries whose lease has expired to
 	// deferred (or queued, when nothing was attempted), keeping AttemptCount.
 	ReleaseExpiredLeases(ctx context.Context, now time.Time, limit int) (int, error)

@@ -1,0 +1,35 @@
+Return-Path: <postmaster@outlook.com>
+Received: from NAM10-BN7-obe.outbound.protection.outlook.com (52.100.0.1)
+	by mx.example.com; Fri, 19 Sep 2025 12:00:01 +0000
+From: postmaster@outlook.com
+To: bounce+0191f2c3-4d5e-7a8b-9c0d-000000000002.a319eac3@bounce.example.com
+Subject: Undeliverable: Your September update
+Date: Fri, 19 Sep 2025 12:00:01 +0000
+Message-ID: <MN2PR12MB1234567890@MN2PR12MB1234.namprd12.prod.outlook.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="_000_MN2PR12MB1234_"
+
+--_000_MN2PR12MB1234_
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Delivery has failed to these recipients or groups:
+
+former.employee@contoso.com
+Your message couldn't be delivered because the recipient's email address wa=
+s wrong or doesn't exist. Check the address and try resending the message.
+
+Diagnostic information for administrators:
+
+Generating server: MN2PR12MB1234.namprd12.prod.outlook.com
+former.employee@contoso.com
+Remote Server returned '550 5.1.1 RESOLVER.ADR.RecipNotFound; not found'
+
+--_000_MN2PR12MB1234_
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<html><body><p>Delivery has failed to these recipients or groups.</p></body=
+></html>
+
+--_000_MN2PR12MB1234_--

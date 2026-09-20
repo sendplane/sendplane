@@ -434,6 +434,68 @@ func testMarkSent(t *testing.T, p store.Provider) {
 	eq(t, "still sent", got.Status, store.DeliverySent)
 }
 
+// testMarkBounced covers the asynchronous half of the state machine: a DSN
+// transitions a sent delivery once and only once, and never touches a row in
+// any other status.
+func testMarkBounced(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, _ := fresh(t, p)
+	r := s.Deliveries()
+	now := time.Now().UTC()
+
+	sent := store.Delivery{
+		ID: store.NewID(), CampaignID: store.NewID(), Lane: store.LaneBulk,
+		Status: store.DeliverySent, Email: "a@example.com", EmailNorm: "a@example.com",
+		NextAttemptAt: now,
+	}
+	complained := sent
+	complained.ID, complained.EmailNorm, complained.Email = store.NewID(), "b@example.com", "b@example.com"
+	queued := sent
+	queued.ID, queued.EmailNorm, queued.Email = store.NewID(), "c@example.com", "c@example.com"
+	queued.Status = store.DeliveryQueued
+	seed(t, s, []store.Delivery{sent, complained, queued})
+
+	at := now.Add(time.Hour)
+	changed, err := r.MarkBounced(ctx, sent.ID, at)
+	must(t, "MarkBounced", err)
+	eq(t, "first DSN transitions", changed, true)
+	got, err := r.Get(ctx, sent.ID)
+	must(t, "Get after MarkBounced", err)
+	eq(t, "status", got.Status, store.DeliveryBounced)
+	eqTime(t, "finished_at", got.FinishedAt, at)
+
+	// A redelivered DSN is a no-op, not an error.
+	changed, err = r.MarkBounced(ctx, sent.ID, at.Add(time.Minute))
+	must(t, "MarkBounced again", err)
+	eq(t, "second DSN changed", changed, false)
+	got, err = r.Get(ctx, sent.ID)
+	must(t, "Get after second MarkBounced", err)
+	eqTime(t, "finished_at kept", got.FinishedAt, at)
+
+	changed, err = r.MarkComplained(ctx, complained.ID, at)
+	must(t, "MarkComplained", err)
+	eq(t, "complaint transitions", changed, true)
+	got, err = r.Get(ctx, complained.ID)
+	must(t, "Get after MarkComplained", err)
+	eq(t, "status", got.Status, store.DeliveryComplained)
+
+	// A delivery that never reached sent is left alone.
+	changed, err = r.MarkBounced(ctx, queued.ID, at)
+	must(t, "MarkBounced queued", err)
+	eq(t, "queued changed", changed, false)
+	got, err = r.Get(ctx, queued.ID)
+	must(t, "Get queued", err)
+	eq(t, "queued untouched", got.Status, store.DeliveryQueued)
+
+	// A delivery retention already removed is dropped, not an error.
+	changed, err = r.MarkBounced(ctx, store.NewID(), at)
+	must(t, "MarkBounced unknown", err)
+	eq(t, "unknown changed", changed, false)
+	changed, err = r.MarkComplained(ctx, store.NewID(), at)
+	must(t, "MarkComplained unknown", err)
+	eq(t, "unknown complaint changed", changed, false)
+}
+
 func testReleaseExpiredLeases(t *testing.T, p store.Provider) {
 	ctx := context.Background()
 	s, _ := fresh(t, p)

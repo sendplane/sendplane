@@ -54,6 +54,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 		t.Run("ClaimConcurrent", func(t *testing.T) { testClaimConcurrent(t, p) })
 		t.Run("CompleteCAS", func(t *testing.T) { testCompleteCAS(t, p) })
 		t.Run("MarkSent", func(t *testing.T) { testMarkSent(t, p) })
+		t.Run("MarkBounced", func(t *testing.T) { testMarkBounced(t, p) })
 		t.Run("ReleaseExpiredLeases", func(t *testing.T) { testReleaseExpiredLeases(t, p) })
 		t.Run("Requeue", func(t *testing.T) { testRequeue(t, p) })
 		t.Run("CountByStatus", func(t *testing.T) { testCountByStatus(t, p) })

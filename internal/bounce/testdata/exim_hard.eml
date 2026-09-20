@@ -1,0 +1,53 @@
+Return-Path: <>
+Received: from relay.example.net ([198.51.100.7])
+	by mx.example.com with esmtps; Fri, 19 Sep 2025 11:02:00 +0000
+From: Mail Delivery System <Mailer-Daemon@relay.example.net>
+To: bounces@relay.example.net
+Subject: Mail delivery failed: returning message to sender
+Date: Fri, 19 Sep 2025 11:02:00 +0000
+Message-Id: <E1abcde-0001Xy-2Z@relay.example.net>
+Auto-Submitted: auto-replied
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=delivery-status; boundary=1758277320-eximdsn-1234567890
+
+--1758277320-eximdsn-1234567890
+Content-type: text/plain; charset=us-ascii
+
+This message was created automatically by mail delivery software.
+
+A message that you sent could not be delivered to one or more of its
+recipients. This is a permanent error. The following address(es) failed:
+
+  gone@example.org
+    host mx.example.org [203.0.113.9]
+    SMTP error from remote mail server after RCPT TO:<gone@example.org>:
+    550 5.1.1 No such user here
+
+--1758277320-eximdsn-1234567890
+Content-type: message/delivery-status
+
+Reporting-MTA: dns; relay.example.net
+
+Action: failed
+Final-Recipient: rfc822;gone@example.org
+Status: 5.1.1
+Remote-MTA: dns; mx.example.org
+Diagnostic-Code: smtp; 550 5.1.1 No such user here
+
+--1758277320-eximdsn-1234567890
+Content-type: message/rfc822
+
+Return-path: <newsletter@relay.example.net>
+Received: from sendplane-sender by relay.example.net with esmtpa
+From: Acme News <news@example.com>
+To: gone@example.org
+Subject: September newsletter
+Date: Fri, 19 Sep 2025 11:01:55 +0000
+Message-ID: <somethingelse@relay.example.net>
+X-Sendplane-ID: acme/0191f2c3-4d5e-7a8b-9c0d-1e2f3a4b5c6d
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hello, here is our September newsletter.
+
+--1758277320-eximdsn-1234567890--

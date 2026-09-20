@@ -497,6 +497,35 @@ func (r *deliveryRepo) MarkSent(ctx context.Context, id, owner, messageID string
 	return fmt.Errorf("%w: delivery %s", store.ErrLeaseLost, id)
 }
 
+// markTerminal is the asynchronous bounce/complaint transition. There is no
+// lease to authorize it (the DSN arrives long after the send), so the CAS is
+// on status = sent alone. It also clears the lease MarkSent left in place, so
+// that a Complete still in flight cannot move the row back to sent.
+func (r *deliveryRepo) markTerminal(ctx context.Context, id string, to store.DeliveryStatus, at time.Time) (bool, error) {
+	if err := r.p.check(); err != nil {
+		return false, err
+	}
+	const q = `UPDATE delivery SET status = $3, finished_at = $4, updated_at = $4,
+	    lease_owner = '', lease_until = NULL
+	  WHERE id = $1 AND tenant_id = $2 AND status = 4`
+	tag, err := r.p.pool.Exec(ctx, q, id, r.tenant, i16(to), tsInNN(at))
+	if err != nil {
+		return false, mapErr(err)
+	}
+	// Not in status sent (already bounced, never sent, removed by retention)
+	// is changed=false, not an error: that is what makes a redelivered DSN
+	// idempotent.
+	return tag.RowsAffected() > 0, nil
+}
+
+func (r *deliveryRepo) MarkBounced(ctx context.Context, id string, at time.Time) (bool, error) {
+	return r.markTerminal(ctx, id, store.DeliveryBounced, at)
+}
+
+func (r *deliveryRepo) MarkComplained(ctx context.Context, id string, at time.Time) (bool, error) {
+	return r.markTerminal(ctx, id, store.DeliveryComplained, at)
+}
+
 // ReleaseExpiredLeases returns leased deliveries whose lease has expired to
 // deferred, or to queued when nothing was attempted. A row that MarkSent
 // already moved to sent is not leased any more and is never touched.

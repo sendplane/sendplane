@@ -1,0 +1,45 @@
+Return-Path: <complaints@feedback.example.net>
+Received: from feedback.example.net (198.51.100.44)
+	by mx.bounce.example.com; Fri, 19 Sep 2025 13:20:00 +0000
+From: complaints@feedback.example.net
+To: bounce+0191f2c3-4d5e-7a8b-9c0d-1e2f3a4b5c6d.65ed198e@bounce.example.com
+Subject: FW: September newsletter
+Date: Fri, 19 Sep 2025 13:20:00 +0000
+Message-ID: <arf-20250919132000@feedback.example.net>
+MIME-Version: 1.0
+Content-Type: multipart/report; report-type=feedback-report; boundary="FBLBOUNDARY"
+
+--FBLBOUNDARY
+Content-Type: text/plain; charset="US-ASCII"
+
+This is an email abuse report for an email message received from
+IP 198.51.100.10 on Fri, 19 Sep 2025 13:11:00 +0000.
+
+--FBLBOUNDARY
+Content-Type: message/feedback-report
+
+Feedback-Type: abuse
+User-Agent: SomeGenerator/1.0
+Version: 1
+Original-Mail-From: <bounce+0191f2c3-4d5e-7a8b-9c0d-1e2f3a4b5c6d.65ed198e@bounce.example.com>
+Original-Rcpt-To: <reader@example.org>
+Arrival-Date: Fri, 19 Sep 2025 13:11:00 +0000
+Reported-Domain: example.com
+Source-IP: 198.51.100.10
+
+--FBLBOUNDARY
+Content-Type: message/rfc822
+
+Return-Path: <bounce+0191f2c3-4d5e-7a8b-9c0d-1e2f3a4b5c6d.65ed198e@bounce.example.com>
+From: Acme News <news@example.com>
+To: reader@example.org
+Subject: September newsletter
+Date: Fri, 19 Sep 2025 13:10:55 +0000
+Message-ID: <0191f2c3-4d5e-7a8b-9c0d-1e2f3a4b5c6d@example.com>
+X-Sendplane-ID: acme/0191f2c3-4d5e-7a8b-9c0d-1e2f3a4b5c6d
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hello, here is our September newsletter.
+
+--FBLBOUNDARY--

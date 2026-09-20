@@ -248,6 +248,42 @@ func (r *deliveryRepo) MarkSent(_ context.Context, id, owner, messageID string, 
 	return nil
 }
 
+// markTerminal is the asynchronous bounce/complaint transition: CAS on
+// status sent, with no lease to check (store/delivery.go).
+//
+// It clears the lease MarkSent left in place. A DSN that arrives inside the
+// sender's result-flush window would otherwise race with a Complete whose
+// NewStatus is sent, and that would move a bounced row back to sent. Dropping
+// the stale Complete costs at most an attempt history row; resurrecting a
+// terminal status would cost a resend.
+func (r *deliveryRepo) markTerminal(id string, to store.DeliveryStatus, at time.Time) (bool, error) {
+	r.s.p.mu.Lock()
+	defer r.s.p.mu.Unlock()
+	if err := r.s.p.check(); err != nil {
+		return false, err
+	}
+	d, ok := r.s.d.deliveries[id]
+	if !ok || d.Status != store.DeliverySent {
+		// Already bounced, never sent, or removed by retention: not an error,
+		// which is what makes a redelivered DSN idempotent.
+		return false, nil
+	}
+	d.Status = to
+	d.FinishedAt = at
+	d.UpdatedAt = at
+	d.LeaseOwner, d.LeaseUntil = "", time.Time{}
+	truncateDelivery(d)
+	return true, nil
+}
+
+func (r *deliveryRepo) MarkBounced(_ context.Context, id string, at time.Time) (bool, error) {
+	return r.markTerminal(id, store.DeliveryBounced, at)
+}
+
+func (r *deliveryRepo) MarkComplained(_ context.Context, id string, at time.Time) (bool, error) {
+	return r.markTerminal(id, store.DeliveryComplained, at)
+}
+
 func (r *deliveryRepo) ReleaseExpiredLeases(_ context.Context, now time.Time, limit int) (int, error) {
 	r.s.p.mu.Lock()
 	defer r.s.p.mu.Unlock()
