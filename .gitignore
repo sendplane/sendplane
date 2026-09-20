@@ -17,6 +17,10 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# Build output
+/dist/
+/bin/
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
@@ -24,9 +28,19 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
-.env
+# Node / pnpm (web/ workspace)
+node_modules/
+web/**/dist/
+.pnpm-store/
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Env files (keep the example)
+.env*
+!.env.example
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

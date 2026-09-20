@@ -1,0 +1,29 @@
+# Local dev/test dependencies for sendplane.
+#
+# Ports are deliberately non-default (55441/55442) because port 55432 is
+# already used by another project on this machine. See ../../.env.example
+# for the matching SENDPLANE_TEST_* DSNs used by `make test-store`.
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "55441:5432"
+    environment:
+      POSTGRES_USER: sendplane
+      POSTGRES_PASSWORD: sendplane
+      POSTGRES_DB: sendplane
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sendplane -d sendplane"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "55442:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

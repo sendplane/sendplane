@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt needs to be run on:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [postgres, mongo]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sendplane
+          POSTGRES_PASSWORD: sendplane
+          POSTGRES_DB: sendplane
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sendplane -d sendplane"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SENDPLANE_TEST_POSTGRES_DSN: ${{ matrix.db == 'postgres' && 'postgres://sendplane:sendplane@localhost:5432/sendplane?sslmode=disable' || '' }}
+      SENDPLANE_TEST_MONGO_URI: ${{ matrix.db == 'mongo' && 'mongodb://localhost:27017' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test
+        run: go test -race -count=1 ./...
