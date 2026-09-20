@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    // Type-checking resolves @sendplane/api to its source for fast feedback;
+    // the declaration build must resolve it through node_modules to its own
+    // .d.ts instead, or tsc would try to emit the dependency's sources too.
+    "paths": {}
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue", "src/**/*.json"]
+}

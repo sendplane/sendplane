@@ -81,3 +81,44 @@ jobs:
 
       - name: go test
         run: go test -race -count=1 ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: install
+        run: pnpm install --frozen-lockfile
+
+      # The client types are generated from api/openapi.yaml and committed, so a
+      # spec change that nobody regenerated has to fail here rather than drift
+      # silently (ADR-0010).
+      - name: openapi client drift
+        run: |
+          pnpm gen
+          git diff --exit-code packages/api/src/schema.d.ts
+
+      - name: lint
+        run: pnpm lint
+
+      - name: typecheck
+        run: pnpm typecheck
+
+      - name: test
+        run: pnpm test
+
+      - name: build
+        run: pnpm build

@@ -1,5 +1,6 @@
 COMPOSE ?= docker compose
-.PHONY: build gen gen-check test test-store lint vet fmt-check dev-up dev-down ci docker
+.PHONY: build gen gen-check test test-store lint vet fmt-check dev-up dev-down ci docker \
+	web-install web-gen web-lint web-test web-build web-ci
 
 build:
 	go build ./...
@@ -46,3 +47,28 @@ docker:
 	docker build -f deploy/dev/Dockerfile -t sendplane:dev .
 
 ci: gen-check fmt-check vet lint test
+
+# --- web/ (pnpm workspace: @sendplane/api, @sendplane/ui, @sendplane/console) --
+
+PNPM ?= pnpm
+
+web-install:
+	cd web && $(PNPM) install
+
+# Regenerates web/packages/api/src/schema.d.ts from api/openapi.yaml, the same
+# source of truth the Go server code is generated from. The output is committed
+# and CI fails on drift (ADR-0010).
+web-gen:
+	cd web && $(PNPM) gen
+
+web-lint:
+	cd web && $(PNPM) lint && $(PNPM) typecheck
+
+web-test:
+	cd web && $(PNPM) test
+
+# Produces web/apps/console/dist, which the reference binary embeds.
+web-build:
+	cd web && $(PNPM) build
+
+web-ci: web-install web-gen web-lint web-test web-build

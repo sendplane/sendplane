@@ -1,0 +1,55 @@
+{
+  "name": "@sendplane/ui",
+  "version": "0.1.0",
+  "description": "Vue 3 component and page library for the sendplane ops console. Router-agnostic.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/sendplane-ui.js",
+      "default": "./dist/sendplane-ui.js"
+    },
+    "./style.css": "./dist/sendplane-ui.css",
+    "./theme.css": "./src/theme.css",
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/sendplane-ui.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "vite build && vue-tsc -p tsconfig.build.json",
+    "typecheck": "vue-tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "vue": "^3.5.0",
+    "vue-i18n": "^11.0.0"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.9.0",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-xml": "^6.1.0",
+    "@codemirror/language": "^6.11.0",
+    "@codemirror/state": "^6.7.0",
+    "@codemirror/view": "^6.43.0",
+    "@sendplane/api": "workspace:*"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^20.14.5",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.7",
+    "vue": "^3.5.43",
+    "vue-i18n": "^11.4.12",
+    "vue-tsc": "^3.3.11"
+  }
+}

@@ -1,0 +1,294 @@
+/*
+ * sendplane design tokens.
+ *
+ * Everything the components paint with goes through a `--sp-*` custom property,
+ * so a host restyles the console by redefining these on any ancestor rather
+ * than by overriding component selectors.
+ *
+ * Dark mode follows the OS by default; `data-theme="light"` or
+ * `data-theme="dark"` on <html> (or any ancestor) pins it.
+ */
+
+:root {
+  /* Surfaces */
+  --sp-bg: #f7f8fa;
+  --sp-surface: #ffffff;
+  --sp-surface-alt: #f1f3f6;
+  --sp-surface-hover: #eaeef3;
+  --sp-border: #d8dee6;
+  --sp-border-strong: #b6c0cc;
+  --sp-overlay: rgb(15 23 42 / 45%);
+
+  /* Text */
+  --sp-text: #10151c;
+  --sp-text-muted: #5b6673;
+  --sp-text-inverse: #ffffff;
+
+  /* Accents */
+  --sp-accent: #2563eb;
+  --sp-accent-hover: #1d4ed8;
+  --sp-accent-soft: #dbe6ff;
+  --sp-focus: #2563eb;
+
+  /* Semantic */
+  --sp-ok: #0f7b4f;
+  --sp-ok-soft: #d8f2e4;
+  --sp-warn: #9a6100;
+  --sp-warn-soft: #fdeecd;
+  --sp-danger: #b3261e;
+  --sp-danger-soft: #fbdedc;
+  --sp-danger-hover: #8f1e18;
+  --sp-info: #1d4ed8;
+  --sp-info-soft: #dce6ff;
+  --sp-neutral: #4a5561;
+  --sp-neutral-soft: #e4e8ed;
+
+  /* Type */
+  --sp-font:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Apple SD Gothic Neo',
+    'Noto Sans KR', 'Malgun Gothic', sans-serif;
+  --sp-font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --sp-font-size: 14px;
+  --sp-font-size-sm: 12px;
+  --sp-font-size-lg: 16px;
+  --sp-line-height: 1.45;
+
+  /* Metrics: an ops console is dense on purpose. */
+  --sp-space-1: 4px;
+  --sp-space-2: 8px;
+  --sp-space-3: 12px;
+  --sp-space-4: 16px;
+  --sp-space-5: 24px;
+  --sp-space-6: 32px;
+  --sp-radius: 6px;
+  --sp-radius-sm: 4px;
+  --sp-row-height: 34px;
+  --sp-control-height: 32px;
+  --sp-shadow: 0 1px 2px rgb(16 21 28 / 8%);
+  --sp-shadow-lg: 0 8px 28px rgb(16 21 28 / 18%);
+  --sp-max-width: 1280px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --sp-bg: #0d1117;
+    --sp-surface: #151b23;
+    --sp-surface-alt: #1b232d;
+    --sp-surface-hover: #232d39;
+    --sp-border: #2c3642;
+    --sp-border-strong: #44515f;
+    --sp-overlay: rgb(2 6 12 / 62%);
+
+    --sp-text: #e6edf3;
+    --sp-text-muted: #9aa7b4;
+    --sp-text-inverse: #0d1117;
+
+    --sp-accent: #4f8cff;
+    --sp-accent-hover: #6ea1ff;
+    --sp-accent-soft: #1b2b48;
+    --sp-focus: #6ea1ff;
+
+    --sp-ok: #56d39a;
+    --sp-ok-soft: #10301f;
+    --sp-warn: #e8b055;
+    --sp-warn-soft: #362810;
+    --sp-danger: #ff8078;
+    --sp-danger-soft: #3b1917;
+    --sp-danger-hover: #ff9b95;
+    --sp-info: #7aa5ff;
+    --sp-info-soft: #16233d;
+    --sp-neutral: #a5b1bd;
+    --sp-neutral-soft: #222c37;
+
+    --sp-shadow: 0 1px 2px rgb(0 0 0 / 40%);
+    --sp-shadow-lg: 0 10px 30px rgb(0 0 0 / 55%);
+  }
+}
+
+:root[data-theme='dark'] {
+  --sp-bg: #0d1117;
+  --sp-surface: #151b23;
+  --sp-surface-alt: #1b232d;
+  --sp-surface-hover: #232d39;
+  --sp-border: #2c3642;
+  --sp-border-strong: #44515f;
+  --sp-overlay: rgb(2 6 12 / 62%);
+
+  --sp-text: #e6edf3;
+  --sp-text-muted: #9aa7b4;
+  --sp-text-inverse: #0d1117;
+
+  --sp-accent: #4f8cff;
+  --sp-accent-hover: #6ea1ff;
+  --sp-accent-soft: #1b2b48;
+  --sp-focus: #6ea1ff;
+
+  --sp-ok: #56d39a;
+  --sp-ok-soft: #10301f;
+  --sp-warn: #e8b055;
+  --sp-warn-soft: #362810;
+  --sp-danger: #ff8078;
+  --sp-danger-soft: #3b1917;
+  --sp-danger-hover: #ff9b95;
+  --sp-info: #7aa5ff;
+  --sp-info-soft: #16233d;
+  --sp-neutral: #a5b1bd;
+  --sp-neutral-soft: #222c37;
+
+  --sp-shadow: 0 1px 2px rgb(0 0 0 / 40%);
+  --sp-shadow-lg: 0 10px 30px rgb(0 0 0 / 55%);
+}
+
+.sp-root {
+  color: var(--sp-text);
+  font-family: var(--sp-font);
+  font-size: var(--sp-font-size);
+  line-height: var(--sp-line-height);
+}
+
+.sp-root *,
+.sp-root *::before,
+.sp-root *::after {
+  box-sizing: border-box;
+}
+
+.sp-root :focus-visible {
+  outline: 2px solid var(--sp-focus);
+  outline-offset: 2px;
+}
+
+/* Reachable by keyboard, invisible until focused. */
+.sp-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.sp-mono {
+  font-family: var(--sp-font-mono);
+  font-size: var(--sp-font-size-sm);
+}
+
+.sp-muted {
+  color: var(--sp-text-muted);
+}
+
+/* ---------------------------------------------------------------------------
+ * Page scaffolding shared by the page components. Global rather than scoped so
+ * a host can restyle the layout without fighting Vue's scope attributes.
+ * ------------------------------------------------------------------------ */
+
+.sp-page {
+  max-width: var(--sp-max-width);
+  margin: 0 auto;
+  padding: var(--sp-space-4);
+}
+
+.sp-page__block + .sp-page__block,
+.sp-page__block {
+  margin-bottom: var(--sp-space-4);
+}
+
+.sp-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-space-3);
+  align-items: flex-end;
+  margin-bottom: var(--sp-space-4);
+}
+
+.sp-toolbar > * {
+  min-width: 0;
+}
+
+.sp-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--sp-space-3);
+}
+
+.sp-form-grid--wide {
+  grid-template-columns: 1fr;
+}
+
+.sp-form-grid__actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: var(--sp-space-2);
+  justify-content: flex-end;
+}
+
+.sp-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-space-3);
+}
+
+.sp-detail-list {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: var(--sp-space-2) var(--sp-space-4);
+  margin: 0;
+}
+
+.sp-detail-list dt {
+  color: var(--sp-text-muted);
+  font-size: var(--sp-font-size-sm);
+  font-weight: 600;
+}
+
+.sp-detail-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.sp-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-space-4);
+}
+
+@media (width >= 1000px) {
+  .sp-split--editor {
+    grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr);
+  }
+
+  .sp-split--halves {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+.sp-note {
+  padding: var(--sp-space-2) var(--sp-space-3);
+  color: var(--sp-text-muted);
+  font-size: var(--sp-font-size-sm);
+  background: var(--sp-surface-alt);
+  border-left: 3px solid var(--sp-border-strong);
+  border-radius: var(--sp-radius-sm);
+}
+
+.sp-note--warn {
+  color: var(--sp-warn);
+  background: var(--sp-warn-soft);
+  border-left-color: var(--sp-warn);
+}
+
+.sp-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-space-2);
+}
+
+.sp-preview-frame {
+  width: 100%;
+  height: 520px;
+  background: #fff;
+  border: 1px solid var(--sp-border-strong);
+  border-radius: var(--sp-radius-sm);
+}

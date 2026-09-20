@@ -1,0 +1,8 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# esbuild verifies its platform binary in a postinstall; without this pnpm 10
+# blocks the script and `vite build` fails.
+onlyBuiltDependencies:
+  - esbuild

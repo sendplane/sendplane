@@ -1,0 +1,23 @@
+/*
+ * Page chrome only. The design tokens and every component style arrive with
+ * `@sendplane/ui/style.css`, which main.ts imports.
+ */
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--sp-text);
+  font-family: var(--sp-font);
+  font-size: var(--sp-font-size);
+  line-height: var(--sp-line-height);
+  background: var(--sp-bg);
+}
+
+* {
+  box-sizing: border-box;
+}
