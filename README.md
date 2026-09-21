@@ -47,6 +47,28 @@ cp .env.example .env     # SENDPLANE_TEST_* DSN 설정
 make test
 ```
 
+### 개발 환경 한 번에 띄우기
+
+```sh
+make dev
+```
+
+명령 하나로 다음을 모두 띄웁니다:
+
+- `make dev-up`으로 postgres/mongo 기동 후 postgres가 healthy해질 때까지 대기, `make dev-migrate`로 스키마 마이그레이션
+- **`cmd/sendplane`** 서버(`deploy/dev/config.yaml`, 세 역할(`control,sender,bounce`) 모두, `:8080`) —
+  **인증이 꺼져 있습니다**(`auth.mode: none` + `authz.mode: allow_all`): 모든 요청이 고정된 로컬 사용자로
+  통과되므로 로컬 개발 전용입니다
+- **`cmd/chaos-smtp`**를 실패율 0인 로컬 메일 싱크로(`127.0.0.1:12525`, 통계는
+  `http://localhost:12590/stats`) — dev 서버에서 만든 transport를 여기로 향하게 하면 발송이 실제로
+  `sent` 상태까지 끝나고, 받은 메일을 `GET /messages?body=1`로 확인할 수 있습니다
+- **`web/apps/console`** Vite 개발 서버(`http://localhost:5173`, 핫 리로드, `/api`·`/t`를 `:8080`으로 프록시)
+
+`Ctrl-C`로 세 프로세스(chaos-smtp/서버/콘솔)만 멈추고 DB 컨테이너는 계속 떠 있습니다 — 정리하려면
+`make dev-down`(볼륨까지 지우려면 `make dev-reset`). 세 프로세스는 `make dev-smtp` / `make dev-server` /
+`make dev-web`로 각자 다른 터미널에서 따로 띄울 수도 있습니다(`make dev-up dev-wait-db dev-migrate`를
+먼저 한 번 실행했다면).
+
 `make dev-down` 으로 로컬 의존성을 정리합니다. `make ci` 는 CI와 동일한 gen-check/fmt/vet/lint/test 체크를 로컬에서 실행합니다.
 
 종단 간 테스트와 1M 부하 테스트도 로컬에서 그대로 돌릴 수 있습니다(둘 다 이미지를 빌드하고 자체 compose 스택을 띄운 뒤 정리까지 합니다):

@@ -1,0 +1,62 @@
+# Local development configuration for cmd/sendplane (`make dev`). Committed
+# on purpose so `make dev` needs no setup step — see cmd/sendplane/README.md
+# and config.example.yaml for the full schema this is a cut-down instance of.
+#
+# NOT FOR PRODUCTION. This file turns off authentication for every request
+# and ships a secret key in git; both are fine on a laptop and dangerous
+# anywhere else. See auth.mode and secrets.key below.
+
+store:
+  driver: postgres
+  # config.go's LoadConfig runs os.ExpandEnv on this file before parsing, and
+  # Go's os.Expand replaces an unset ${VAR} with the empty string (not the
+  # literal text) - so "${SENDPLANE_STORE_DSN}" with the var unset would
+  # unmarshal as store.dsn: "" and fail Validate. To keep `make dev` working
+  # with zero environment setup, the DSN is hardcoded to match
+  # deploy/dev/docker-compose.yml's postgres service (host port 55441,
+  # user/password/db all "sendplane"). Point SENDPLANE_CONFIG at your own
+  # file if you need a different DSN.
+  dsn: postgres://sendplane:sendplane@localhost:55441/sendplane?sslmode=disable
+
+secrets:
+  # 32 raw bytes, base64 (AES-256-GCM), generated once with `openssl rand
+  # -base64 32` and committed on purpose: transport passwords and other
+  # secrets encrypted with it need to survive a `make dev` restart, and
+  # nothing this key protects ever leaves your machine. Production MUST
+  # supply its own key (e.g. via SENDPLANE_SECRETS_KEY in config.example.yaml)
+  # - never reuse this one outside local dev.
+  key: CvFnN8Ifr0S7OCG7L2kgX2sB3APEHBQK+9JEHC2fuNU=
+
+# auth.mode: none authenticates EVERY request as a fixed local principal (no
+# API key, no bearer token, nothing checked) and authz.mode: allow_all grants
+# it every action. This combination must never be used outside local
+# development - it is the entire point of `make dev` being one command, and
+# the reason this file must never be reused as a starting point for a real
+# deployment.
+auth:
+  mode: none
+
+authz:
+  mode: allow_all
+
+# No events.webhook section: dev has nothing listening for it, and it's
+# optional (config.go only requires events.webhook.secret when
+# events.webhook.url is set).
+
+sender:
+  lanes:
+    transactional: 4
+    bulk: 8
+    probe: 1
+  ehlo_name: localhost
+
+probe:
+  enabled: false
+
+log:
+  level: debug
+  format: text
+
+console:
+  enabled: true
+  path: /console

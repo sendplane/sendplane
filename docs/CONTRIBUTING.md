@@ -13,6 +13,12 @@
 | `make vet` | `go vet ./...` |
 | `make fmt-check` | `gofmt -l .`이 비어 있는지 확인 |
 | `make dev-up` / `make dev-down` | `deploy/dev/docker-compose.yml`(postgres:55441, mongo:55442) 기동/정리 |
+| `make dev-reset` | `dev-down`에 볼륨 삭제까지(`-v`) — 깨끗한 DB로 다시 시작 |
+| `make dev` | 원커맨드 로컬 개발 환경: DB 기동+healthy 대기+마이그레이션 후 chaos-smtp(로컬 메일 싱크)/`cmd/sendplane`(인증 꺼짐)/콘솔 dev 서버를 포그라운드로 함께 실행. `Ctrl-C`로 세 프로세스만 정리(DB는 유지). 자세한 내용: README.md의 "개발 환경 한 번에 띄우기" |
+| `make dev-migrate` | `go run ./cmd/sendplane --config deploy/dev/config.yaml --migrate` |
+| `make dev-server` | `deploy/dev/config.yaml`로 `cmd/sendplane` 단독 실행(`:8080`, 인증 꺼짐) |
+| `make dev-web` | 콘솔 Vite dev 서버 단독 실행(`:5173`, `/api`·`/t`를 `:8080`으로 프록시) |
+| `make dev-smtp` | `cmd/chaos-smtp` 단독 실행, 실패율 0인 로컬 메일 싱크(`127.0.0.1:12525`, 통계 `:12590`) |
 | `make docker` | 참조 이미지(`cmd/sendplane` + `cmd/chaos-smtp`, 웹 콘솔 포함) 빌드 |
 | `make ci` | `gen-check fmt-check vet lint test` — 푸시 전 로컬 체크 |
 | `make e2e` | 이미지 빌드 → `test/e2e/docker-compose.yml` 기동 → `go run ./test/e2e` → 로그 덤프 → 정리. `E2E_FLAGS`로 하니스 플래그 전달(`make e2e E2E_FLAGS=--kill-sender`) |
