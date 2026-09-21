@@ -14,6 +14,11 @@ const (
 	FolderInbox = "inbox"
 	FolderSpam  = "spam"
 	FolderOther = "other"
+	// FolderUnknown is what a channel that cannot see a folder reports. An
+	// inbound webhook is told about a delivery, not about where the message
+	// was filed, so "unknown" is the honest answer and it must not be read as
+	// "not the inbox" (ADR-0016).
+	FolderUnknown = "unknown"
 )
 
 // Observation is what one probe mail told us, after the headers were parsed.
@@ -55,6 +60,11 @@ type Observation struct {
 //
 // The reason is the first thing that was wrong, worst first, because that is
 // what an operator acts on. The rest stays on the ProbeRun.
+//
+// FolderUnknown is neutral, not a downgrade: an inbound webhook cannot see the
+// folder (ADR-0016), and "we could not look" is not evidence of a spam
+// verdict. Only FolderOther — a folder the mailbox was configured with and the
+// mail was not expected in — is yellow.
 func Verdict(o Observation) (store.HealthStatus, string) {
 	if !o.Delivered {
 		return store.HealthRed, "메일이 도착하지 않았습니다"
@@ -99,10 +109,13 @@ func Verdict(o Observation) (store.HealthStatus, string) {
 	if o.PTRChecked && !o.PTRMatch {
 		return store.HealthYellow, "PTR가 정방향 조회와 일치하지 않습니다(FCrDNS)"
 	}
-	if o.Folder != FolderInbox {
+	if o.Folder == FolderOther {
 		return store.HealthYellow, "받은편지함이 아닌 폴더로 분류되었습니다"
 	}
-	return store.HealthGreen, "spf/dkim/dmarc pass, 받은편지함, TLS"
+	if o.Folder == FolderInbox {
+		return store.HealthGreen, "spf/dkim/dmarc pass, 받은편지함, TLS"
+	}
+	return store.HealthGreen, "spf/dkim/dmarc pass, TLS (도착 폴더는 확인할 수 없음)"
 }
 
 func normalizeAuthResult(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
@@ -118,10 +131,13 @@ func worst(a, b store.HealthStatus) store.HealthStatus {
 }
 
 // folderKind maps a mailbox's own folder name onto inbox/spam/other.
+//
+// An empty folder name means the channel has no folder to report — a webhook
+// delivery — and maps to FolderUnknown, which the verdict treats as neutral.
 func folderKind(m *store.ProbeMailbox, folder string) string {
 	switch {
 	case folder == "":
-		return ""
+		return FolderUnknown
 	case m != nil && m.SpamFolder != "" && strings.EqualFold(folder, m.SpamFolder):
 		return FolderSpam
 	case m != nil && m.InboxFolder != "" && strings.EqualFold(folder, m.InboxFolder):

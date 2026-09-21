@@ -345,16 +345,16 @@ func (e Lane) Valid() bool {
 
 // Defines values for MailboxProtocol.
 const (
-	Imap MailboxProtocol = "imap"
-	Pop3 MailboxProtocol = "pop3"
+	MailboxProtocolImap MailboxProtocol = "imap"
+	MailboxProtocolPop3 MailboxProtocol = "pop3"
 )
 
 // Valid indicates whether the value is a known member of the MailboxProtocol enum.
 func (e MailboxProtocol) Valid() bool {
 	switch e {
-	case Imap:
+	case MailboxProtocolImap:
 		return true
-	case Pop3:
+	case MailboxProtocolPop3:
 		return true
 	default:
 		return false
@@ -363,12 +363,13 @@ func (e MailboxProtocol) Valid() bool {
 
 // Defines values for MailboxStage.
 const (
-	MailboxStageAuth   MailboxStage = "auth"
-	MailboxStageConfig MailboxStage = "config"
-	MailboxStageDial   MailboxStage = "dial"
-	MailboxStageFolder MailboxStage = "folder"
-	MailboxStageOk     MailboxStage = "ok"
-	MailboxStageTls    MailboxStage = "tls"
+	MailboxStageAuth    MailboxStage = "auth"
+	MailboxStageConfig  MailboxStage = "config"
+	MailboxStageDial    MailboxStage = "dial"
+	MailboxStageFolder  MailboxStage = "folder"
+	MailboxStageOk      MailboxStage = "ok"
+	MailboxStageTls     MailboxStage = "tls"
+	MailboxStageWebhook MailboxStage = "webhook"
 )
 
 // Valid indicates whether the value is a known member of the MailboxStage enum.
@@ -385,6 +386,8 @@ func (e MailboxStage) Valid() bool {
 	case MailboxStageOk:
 		return true
 	case MailboxStageTls:
+		return true
+	case MailboxStageWebhook:
 		return true
 	default:
 		return false
@@ -427,6 +430,48 @@ func (e OutboxStatus) Valid() bool {
 	case OutboxStatusFailed:
 		return true
 	case OutboxStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProbeMailboxKind.
+const (
+	ProbeMailboxKindImap    ProbeMailboxKind = "imap"
+	ProbeMailboxKindWebhook ProbeMailboxKind = "webhook"
+)
+
+// Valid indicates whether the value is a known member of the ProbeMailboxKind enum.
+func (e ProbeMailboxKind) Valid() bool {
+	switch e {
+	case ProbeMailboxKindImap:
+		return true
+	case ProbeMailboxKindWebhook:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ProbeRunFolder.
+const (
+	ProbeRunFolderInbox   ProbeRunFolder = "inbox"
+	ProbeRunFolderOther   ProbeRunFolder = "other"
+	ProbeRunFolderSpam    ProbeRunFolder = "spam"
+	ProbeRunFolderUnknown ProbeRunFolder = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the ProbeRunFolder enum.
+func (e ProbeRunFolder) Valid() bool {
+	switch e {
+	case ProbeRunFolderInbox:
+		return true
+	case ProbeRunFolderOther:
+		return true
+	case ProbeRunFolderSpam:
+		return true
+	case ProbeRunFolderUnknown:
 		return true
 	default:
 		return false
@@ -1195,6 +1240,10 @@ type MailboxHealth struct {
 	// unusable row, a password that would not decrypt), and the rest are the
 	// steps in order. The stage is what separates "the server is down" from
 	// "the password is wrong".
+	//
+	// `webhook` belongs to a probe mailbox of `kind: webhook`, which has no
+	// login to check: the only observation there is whether probe mail is
+	// still being forwarded (ADR-0016).
 	Stage *MailboxStage `json:"stage,omitempty"`
 
 	// Status Whether sendplane can still reach a mailbox account. It is deliberately
@@ -1213,6 +1262,10 @@ type MailboxProtocol string
 // unusable row, a password that would not decrypt), and the rest are the
 // steps in order. The stage is what separates "the server is down" from
 // "the password is wrong".
+//
+// `webhook` belongs to a probe mailbox of `kind: webhook`, which has no
+// login to check: the only observation there is whether probe mail is
+// still being forwarded (ADR-0016).
 type MailboxStage string
 
 // MailboxStatus Whether sendplane can still reach a mailbox account. It is deliberately
@@ -1260,6 +1313,10 @@ type MailboxTestResult struct {
 	// unusable row, a password that would not decrypt), and the rest are the
 	// steps in order. The stage is what separates "the server is down" from
 	// "the password is wrong".
+	//
+	// `webhook` belongs to a probe mailbox of `kind: webhook`, which has no
+	// login to check: the only observation there is whether probe mail is
+	// still being forwarded (ADR-0016).
 	Stage MailboxStage `json:"stage"`
 }
 
@@ -1440,9 +1497,11 @@ type PreviewResult struct {
 	Warnings    *[]string       `json:"warnings,omitempty"`
 }
 
-// ProbeMailbox IMAP account a loopback probe mail is recovered from. Registering several
-// (Gmail, Outlook, an own MTA) is recommended: the verdict depends on the
-// headers the receiving MTA adds (ADR-0012).
+// ProbeMailbox Mailbox a loopback probe mail is recovered from, over IMAP or over an
+// inbound webhook (`kind`). Registering several (Gmail, Outlook, an own
+// MTA) is recommended: the verdict depends on the headers the receiving
+// MTA adds (ADR-0012). `host` and `port` are reported as `""`/`0` for a
+// webhook-kind mailbox, which has neither.
 type ProbeMailbox struct {
 	// Address Where probe mail is sent.
 	Address openapi_types.Email `json:"address"`
@@ -1461,35 +1520,70 @@ type ProbeMailbox struct {
 	Host        string              `json:"host"`
 	Id          *openapi_types.UUID `json:"id,omitempty"`
 	InboxFolder *string             `json:"inbox_folder,omitempty"`
-	Name        string              `json:"name"`
-	Port        int32               `json:"port"`
-	SpamFolder  *string             `json:"spam_folder,omitempty"`
-	Tls         *TLSMode            `json:"tls,omitempty"`
-	UpdatedAt   *time.Time          `json:"updated_at,omitempty"`
-	Username    *string             `json:"username,omitempty"`
-	Version     *int64              `json:"version,omitempty"`
+
+	// Kind How a probe mail gets back to sendplane. `imap` is an account sendplane
+	// polls and is the only kind that can tell the inbox from the spam
+	// folder. `webhook` is an address whose delivered mail is posted to
+	// sendplane's global inbound endpoint (ADR-0016); such a mailbox has
+	// no host, port or credentials, and its `folder` on a run is `unknown`,
+	// which does not downgrade the verdict.
+	//
+	// Omitted means `imap`, which is also what rows written before this field
+	// existed read back as.
+	Kind       *ProbeMailboxKind `json:"kind,omitempty"`
+	Name       string            `json:"name"`
+	Port       int32             `json:"port"`
+	SpamFolder *string           `json:"spam_folder,omitempty"`
+	Tls        *TLSMode          `json:"tls,omitempty"`
+	UpdatedAt  *time.Time        `json:"updated_at,omitempty"`
+	Username   *string           `json:"username,omitempty"`
+	Version    *int64            `json:"version,omitempty"`
 }
 
-// ProbeMailboxInput defines model for ProbeMailboxInput.
+// ProbeMailboxInput `host` and `port` are required for `kind: imap` (the default) and must
+// be absent for `kind: webhook`, along with the rest of the IMAP block;
+// sending them anyway is a `422`.
 type ProbeMailboxInput struct {
 	Address    openapi_types.Email `json:"address"`
 	AuthservId *string             `json:"authserv_id,omitempty"`
 
 	// Enabled Omitted means `true`; a disabled mailbox takes no part in probe runs.
-	Enabled *bool  `json:"enabled,omitempty"`
-	Host    string `json:"host"`
+	Enabled *bool   `json:"enabled,omitempty"`
+	Host    *string `json:"host,omitempty"`
 
 	// InboxFolder IMAP mailbox the probe mail is expected in; empty or omitted means `INBOX`.
 	InboxFolder *string `json:"inbox_folder,omitempty"`
-	Name        string  `json:"name"`
+
+	// Kind How a probe mail gets back to sendplane. `imap` is an account sendplane
+	// polls and is the only kind that can tell the inbox from the spam
+	// folder. `webhook` is an address whose delivered mail is posted to
+	// sendplane's global inbound endpoint (ADR-0016); such a mailbox has
+	// no host, port or credentials, and its `folder` on a run is `unknown`,
+	// which does not downgrade the verdict.
+	//
+	// Omitted means `imap`, which is also what rows written before this field
+	// existed read back as.
+	Kind *ProbeMailboxKind `json:"kind,omitempty"`
+	Name string            `json:"name"`
 
 	// Password Encrypted at rest. Omit on update to keep the stored one.
 	Password   *string  `json:"password,omitempty"`
-	Port       int32    `json:"port"`
+	Port       *int32   `json:"port,omitempty"`
 	SpamFolder *string  `json:"spam_folder,omitempty"`
 	Tls        *TLSMode `json:"tls,omitempty"`
 	Username   *string  `json:"username,omitempty"`
 }
+
+// ProbeMailboxKind How a probe mail gets back to sendplane. `imap` is an account sendplane
+// polls and is the only kind that can tell the inbox from the spam
+// folder. `webhook` is an address whose delivered mail is posted to
+// sendplane's global inbound endpoint (ADR-0016); such a mailbox has
+// no host, port or credentials, and its `folder` on a run is `unknown`,
+// which does not downgrade the verdict.
+//
+// Omitted means `imap`, which is also what rows written before this field
+// existed read back as.
+type ProbeMailboxKind string
 
 // ProbeMailboxList defines model for ProbeMailboxList.
 type ProbeMailboxList struct {
@@ -1505,16 +1599,27 @@ type ProbeMailboxUpdate struct {
 	AuthservId *string             `json:"authserv_id,omitempty"`
 
 	// Enabled Omitted means `true`; a disabled mailbox takes no part in probe runs.
-	Enabled *bool  `json:"enabled,omitempty"`
-	Host    string `json:"host"`
+	Enabled *bool   `json:"enabled,omitempty"`
+	Host    *string `json:"host,omitempty"`
 
 	// InboxFolder IMAP mailbox the probe mail is expected in; empty or omitted means `INBOX`.
 	InboxFolder *string `json:"inbox_folder,omitempty"`
-	Name        string  `json:"name"`
+
+	// Kind How a probe mail gets back to sendplane. `imap` is an account sendplane
+	// polls and is the only kind that can tell the inbox from the spam
+	// folder. `webhook` is an address whose delivered mail is posted to
+	// sendplane's global inbound endpoint (ADR-0016); such a mailbox has
+	// no host, port or credentials, and its `folder` on a run is `unknown`,
+	// which does not downgrade the verdict.
+	//
+	// Omitted means `imap`, which is also what rows written before this field
+	// existed read back as.
+	Kind *ProbeMailboxKind `json:"kind,omitempty"`
+	Name string            `json:"name"`
 
 	// Password Encrypted at rest. Omit on update to keep the stored one.
 	Password   *string  `json:"password,omitempty"`
-	Port       int32    `json:"port"`
+	Port       *int32   `json:"port,omitempty"`
 	SpamFolder *string  `json:"spam_folder,omitempty"`
 	Tls        *TLSMode `json:"tls,omitempty"`
 	Username   *string  `json:"username,omitempty"`
@@ -1542,8 +1647,9 @@ type ProbeRun struct {
 	// Dns Static SPF/DKIM/DMARC/MX/PTR check results (architecture 11.3).
 	Dns *map[string]interface{} `json:"dns,omitempty"`
 
-	// Folder Where the mail landed: `inbox` or `spam`.
-	Folder *string `json:"folder,omitempty"`
+	// Folder Where the mail landed: `inbox`, `spam`, `other`, or `unknown` for a
+	// webhook-kind mailbox, where nothing reports a folder.
+	Folder *ProbeRunFolder `json:"folder,omitempty"`
 
 	// GroupId Ties together the runs one trigger created, one per probe mailbox.
 	GroupId *openapi_types.UUID `json:"group_id,omitempty"`
@@ -1585,6 +1691,10 @@ type ProbeRun struct {
 	// Tls Derived from the `Received` chain.
 	Tls *bool `json:"tls,omitempty"`
 }
+
+// ProbeRunFolder Where the mail landed: `inbox`, `spam`, `other`, or `unknown` for a
+// webhook-kind mailbox, where nothing reports a folder.
+type ProbeRunFolder string
 
 // ProbeRunList defines model for ProbeRunList.
 type ProbeRunList struct {
@@ -1834,6 +1944,36 @@ type SendingDomainUpdate struct {
 
 	// Version The `version` last read. A mismatch answers 409 `version_conflict`.
 	Version int64 `json:"version"`
+}
+
+// SendplaneInboundMessage The body of the `sendplane` inbound webhook format (ADR-0016) — the
+// smallest payload that carries what a probe verdict reads. Anything that
+// can POST JSON can produce it: a mail-receiving service's webhook, an
+// email worker, a script on an MX.
+//
+// Only `from` and `headers` decide anything. Unknown fields are ignored,
+// so the format can grow; a body over 1 MiB is refused.
+type SendplaneInboundMessage struct {
+	// From Envelope sender. Required - a delivery without one is not a mail.
+	From string `json:"from"`
+
+	// Headers The message's header block, `{"Header-Name": ["value", ...]}`. Names
+	// are matched case-insensitively; the **order of the values within one
+	// name** is the contract, because the `Received` chain is read
+	// bottom-up and the *first* `Authentication-Results` is a trust
+	// decision.
+	//
+	// `Authentication-Results`, `Received` and `X-Sendplane-Probe` must
+	// all survive the forward. Without the first two there is no evidence
+	// to judge; without the third the delivery cannot be attributed to a
+	// tenant and is answered `200 ignored`.
+	Headers *map[string][]string `json:"headers,omitempty"`
+
+	// Text Plain-text body. Optional; the verdict is made of headers.
+	Text *string `json:"text,omitempty"`
+
+	// To Envelope recipients. Recorded, not read by the verdict.
+	To *[]string `json:"to,omitempty"`
 }
 
 // ServiceHealth defines model for ServiceHealth.

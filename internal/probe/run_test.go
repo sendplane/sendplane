@@ -44,6 +44,10 @@ var fixtureRunID = regexp.MustCompile(`0199aaaa-bbbb-7ccc-8ddd-[0-9a-f]{12}`)
 
 var probeHeaderLine = regexp.MustCompile(`(?m)^X-Sendplane-Probe: .*$`)
 
+// testTenantID is the tenant every env runs in. The probe token carries it
+// (Runner.Token), so the fixtures have to be stamped with the same one.
+const testTenantID = "tenant-1"
+
 type env struct {
 	st     store.Store
 	runner *Runner
@@ -59,7 +63,7 @@ func newEnv(t *testing.T, opts Options, mailboxes ...string) *env {
 
 	p := memstore.New(memstore.WithClock(func() time.Time { return e.now }))
 	t.Cleanup(func() { _ = p.Close() })
-	st, err := p.ForTenant(ctx, "tenant-1")
+	st, err := p.ForTenant(ctx, testTenantID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +155,7 @@ func mailFor(t *testing.T, r *Runner, file, runID, folder string) RawMessage {
 		t.Fatal(err)
 	}
 	s := fixtureRunID.ReplaceAllString(string(raw), runID)
-	s = probeHeaderLine.ReplaceAllString(s, "X-Sendplane-Probe: "+r.Token(runID))
+	s = probeHeaderLine.ReplaceAllString(s, "X-Sendplane-Probe: "+r.Token(testTenantID, runID))
 	// The mailbox holds the mail 30s after the fixture's own Date, whatever
 	// that date is, so latency is the same assertion for every fixture.
 	sent, err := parseDate(ParseHeaders([]byte(s)).Get("Date"))
@@ -915,5 +919,204 @@ func TestCollectRecordsMailboxRecovery(t *testing.T) {
 	}
 	if box.Health.LastOKAt.IsZero() {
 		t.Error("LastOKAt was not stamped")
+	}
+}
+
+// --- webhook-kind mailboxes (ADR-0016) ----------------------------------
+
+// webhookBox registers a kind=webhook probe mailbox on an env.
+func webhookBox(t *testing.T, e *env, id string) *store.ProbeMailbox {
+	t.Helper()
+	box := &store.ProbeMailbox{
+		ID: id, Name: id, Kind: store.ProbeMailboxWebhook,
+		Address: id + "@probe.example", AuthServID: "mx.example.net", Enabled: true,
+	}
+	if err := e.st.ProbeMailboxes().Create(context.Background(), box); err != nil {
+		t.Fatal(err)
+	}
+	e.boxes = append(e.boxes, box)
+	return box
+}
+
+// A webhook mailbox takes part in a trigger like any other one: the mail is
+// sent to its address and the provider forwards it. Only the collecting half
+// differs.
+func TestTriggerIncludesWebhookMailboxes(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e := newEnv(t, Options{}, "gmail")
+	box := webhookBox(t, e, "hook")
+
+	if _, err := e.runner.Trigger(ctx, e.st, e.sender.ID); err != nil {
+		t.Fatal(err)
+	}
+	runs := e.runs(t)
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs, want one per enabled mailbox", len(runs))
+	}
+	found := false
+	for i := range runs {
+		if runs[i].MailboxID == box.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no run for the webhook mailbox: %+v", runs)
+	}
+	ds := e.deliveries(t)
+	for _, d := range ds {
+		if d.Email == box.Address {
+			return
+		}
+	}
+	t.Fatalf("no probe delivery addressed to %s: %+v", box.Address, ds)
+}
+
+// CollectWith never opens a webhook mailbox - there is nothing to log in to -
+// but it still has to close out a run whose probe never arrived, because a
+// forward somebody switched off is otherwise invisible forever.
+func TestCollectWebhookMailboxTimesOut(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e := newEnv(t, Options{Timeout: 15 * time.Minute})
+	box := webhookBox(t, e, "hook")
+
+	runID, err := e.runner.Trigger(ctx, e.st, e.sender.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener := perMailbox{}
+
+	e.now = baseTime.Add(10 * time.Minute)
+	if err := e.runner.CollectWith(ctx, e.st, opener, e.now); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := e.st.ProbeRuns().Get(ctx, runID)
+	if !run.Pending {
+		t.Fatalf("run finished inside the timeout window: %s (%s)", run.Status, run.Reason)
+	}
+
+	e.now = baseTime.Add(16 * time.Minute)
+	if err := e.runner.CollectWith(ctx, e.st, opener, e.now); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = e.st.ProbeRuns().Get(ctx, runID)
+	if run.Pending || run.Status != store.HealthYellow {
+		t.Fatalf("status = %s (%s) pending=%v, want yellow on the first miss",
+			run.Status, run.Reason, run.Pending)
+	}
+	if !strings.Contains(run.Reason, "웹훅") {
+		t.Errorf("reason = %q, want it to name the webhook rather than a mailbox nobody polls",
+			run.Reason)
+	}
+
+	// The mailbox itself is marked broken, so a dead forward shows up next to
+	// a rotated IMAP password in the console and not only inside a verdict.
+	got, err := e.st.ProbeMailboxes().Get(ctx, box.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Health.Status != store.MailboxError || got.Health.Stage != store.MailboxStageWebhook {
+		t.Fatalf("mailbox health = %s/%s (%s), want error/webhook",
+			got.Health.Status, got.Health.Stage, got.Health.Reason)
+	}
+	if got.Health.Reason != "no probe received within timeout" {
+		t.Errorf("health reason = %q", got.Health.Reason)
+	}
+}
+
+// The inbound webhook completes the run; the collect loop that runs afterwards
+// must leave it alone and must not report the mailbox broken.
+func TestCollectLeavesACompletedWebhookRunAlone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e := newEnv(t, Options{Timeout: 15 * time.Minute})
+	box := webhookBox(t, e, "hook")
+
+	runID, err := e.runner.Trigger(ctx, e.st, e.sender.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _ := e.st.ProbeRuns().Get(ctx, runID)
+
+	raw, err := os.ReadFile(filepath.Join("testdata", "gmail_pass.eml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := ParseHeaders(raw)
+	byName := map[string][]string{}
+	for _, f := range h {
+		byName[f.Name] = append(byName[f.Name], f.Value)
+	}
+	// The fixture's authserv-id is Gmail's; the mailbox is configured with
+	// the forwarder's, so the header would not be trusted. Line them up.
+	box.AuthServID = "mx.google.com"
+
+	e.now = baseTime.Add(time.Minute)
+	ev := Evidence{Mailbox: box, Headers: HeadersFromMap(byName)}
+	if err := e.runner.CompleteRun(ctx, e.st, run, ev, e.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.runner.RefreshSenderHealth(ctx, e.st, run.SenderID, e.now); err != nil {
+		t.Fatal(err)
+	}
+	if run.Folder != FolderUnknown {
+		t.Fatalf("folder = %q, want %q", run.Folder, FolderUnknown)
+	}
+	if run.Status != store.HealthGreen {
+		t.Fatalf("status = %s (%s), want green: an unknown folder must not downgrade a verdict "+
+			"every other signal passed", run.Status, run.Reason)
+	}
+	snd, _ := e.st.Senders().Get(ctx, e.sender.ID)
+	if snd.Health != store.HealthGreen {
+		t.Fatalf("sender health = %s, want green", snd.Health)
+	}
+
+	// Well past the timeout: the run is finished, so nothing happens.
+	e.now = baseTime.Add(time.Hour)
+	if err := e.runner.CollectWith(ctx, e.st, perMailbox{}, e.now); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := e.st.ProbeRuns().Get(ctx, runID)
+	if after.Status != store.HealthGreen || after.Pending {
+		t.Fatalf("the collect loop reopened a finished webhook run: %s pending=%v",
+			after.Status, after.Pending)
+	}
+	gotBox, _ := e.st.ProbeMailboxes().Get(ctx, box.ID)
+	if gotBox.Health.Status == store.MailboxError {
+		t.Fatalf("the collect loop marked a healthy webhook mailbox broken: %+v", gotBox.Health)
+	}
+}
+
+func TestTokenCarriesTheTenant(t *testing.T) {
+	t.Parallel()
+	r := New(Options{HMACKey: []byte("k")})
+	tok := r.Token("acme", "run-1")
+
+	tenantID, runID, ok := ParseToken(tok)
+	if !ok || tenantID != "acme" || runID != "run-1" {
+		t.Fatalf("ParseToken(%q) = %q, %q, %v", tok, tenantID, runID, ok)
+	}
+	if !r.VerifyToken("acme", "run-1", tok) {
+		t.Fatal("a token this runner made did not verify")
+	}
+	// The MAC covers both halves: a token for one tenant may not be replayed
+	// as another tenant's, which is the whole reason the endpoint can be
+	// global (ADR-0016).
+	if r.VerifyToken("other", "run-1", tok) || r.VerifyToken("acme", "run-2", tok) {
+		t.Fatal("the MAC does not cover the tenant and the run")
+	}
+	if r.VerifyToken("acme", "run-1", "acme/run-1/deadbeefdeadbeef") {
+		t.Fatal("a made-up MAC verified")
+	}
+
+	// Unsigned deployments still parse.
+	plain := New(Options{}).Token("acme", "run-1")
+	tenantID, runID, ok = ParseToken(plain)
+	if !ok || tenantID != "acme" || runID != "run-1" {
+		t.Fatalf("ParseToken(%q) = %q, %q, %v", plain, tenantID, runID, ok)
+	}
+	if _, _, ok := ParseToken("no-slash"); ok {
+		t.Fatal("a token with no tenant parsed")
 	}
 }

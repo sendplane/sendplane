@@ -588,8 +588,22 @@ DNS 레코드만 보는 검사는 "레코드가 있다"까지만 말해 줍니�
 
 ### 11.1 프로브 메일박스
 
-- `ProbeMailbox`: IMAP 계정(호스트, 포트, 인증, 폴더 매핑 inbox/spam, `authserv-id`). 테넌트별 또는 전역. **여러 개 등록 권장**(Gmail 계정, Outlook 계정, 자체 Postfix+OpenDKIM/OpenDMARC 등). 판정은 수신 측 MTA가 붙인 헤더에 의존하므로 실제 대상 프로바이더의 메일박스가 가장 정확합니다.
+- `ProbeMailbox`: 테넌트별 또는 전역. **여러 개 등록 권장**(Gmail 계정, Outlook 계정, 자체 Postfix+OpenDKIM/OpenDMARC 등). 판정은 수신 측 MTA가 붙인 헤더에 의존하므로 실제 대상 프로바이더의 메일박스가 가장 정확합니다.
 - 바운스 메일박스는 그 MTA가 `Authentication-Results`를 붙이는 경우에 한해 프로브 메일박스로 겸용할 수 있습니다.
+
+**수신 채널은 둘입니다**(`ProbeMailbox.Kind`, ADR-0016).
+
+| kind | 회수 방법 | 설정 | 폴더 |
+|---|---|---|---|
+| `imap`(기본) | control 리더의 `probe-collect` 루프가 로그인해 `X-Sendplane-Probe` 로 검색 | 메일박스 행(호스트·포트·인증·폴더 매핑·`authserv-id`) | inbox / spam 구분 가능 |
+| `webhook` | 그 메일을 받은 쪽이 sendplane의 inbound 엔드포인트로 POST | 메일박스 행은 주소와 `authserv-id` 뿐 + **프로세스 전역** `probe.webhooks` | `unknown` (아무도 알려주지 않음) |
+
+- inbound 엔드포인트(`POST /probe/inbound/{provider}`)는 **전역**입니다: 웹훅 URL은 프로바이더 쪽 설정에 적히는 URL이고 테넌트마다 다른 URL을 주려면 테넌트마다 호스트네임이 필요합니다. 테넌트는 `X-Sendplane-Probe` 토큰(`<tenant>/<run>/<mac>`)에서 해석하고, MAC 검증은 그 테넌트의 run을 읽은 뒤에 합니다. 트래킹 라우트와 같은 방식으로 마운트됩니다 — 인증 없음, IP당 레이트 리밋, 1 MiB 바디 상한, 프로바이더 서명 검증.
+- 포맷은 `internal/probe/inbound.Provider` 인터페이스입니다(`Name`/`Verify(r, body, secrets)`/`Parse(body)`). HTTP 상태 코드는 인터페이스에 없고 핸들러 한 곳이 매핑합니다(200 accepted·200 ignored·400 malformed·401 bad signature·503 → 재전송).
+- **기본 제공 포맷은 `sendplane`**(`internal/probe/inbound/sendplanehook`)입니다. 바디는 `{"from","to","headers","text"}` 로, JSON을 POST할 수 있는 것이면 무엇이든 만들 수 있습니다(수신 서비스 웹훅, Cloudflare Email Worker, MX 위 스크립트). **포워더는 `Authentication-Results`·`Received`·`X-Sendplane-Probe` 를 보존해야 합니다** — 앞의 둘이 없으면 판정 근거가 0이고, 셋째가 없으면 테넌트에 붙일 수 없습니다.
+- 서명은 `X-Sendplane-Signature: t=<unix>,v1=<hex>[,v1=...]`, `v1 = hex(HMAC-SHA256(secret, "<t>.<raw body>"))` 입니다(`inbound/sigv1`, 같은 스킴을 쓰는 다른 포맷이 재사용). 어느 `v1`·어느 시크릿이든 하나만 맞으면 통과(양방향 무중단 로테이션), `|now - t| > tolerance`(기본 300s)는 리플레이로 401. 멱등성 키는 원본 바디의 sha256입니다.
+- 포맷 추가는 인터페이스 구현 + `init()` 등록 + 루트 `probe.go` 의 import 한 줄입니다(`internal/probe/README.md`에 레시피).
+- 판정 코드는 두 채널이 공유합니다: `probe.Evidence` → `Runner.CompleteRun`. 웹훅은 폴더를 모르므로 `unknown` 이고, **`unknown` 은 판정을 내리지 않습니다** — 모르는 것을 "스팸함"으로 읽으면 멀쩡한 sender가 영원히 yellow가 됩니다. 스팸 분류를 보려면 IMAP 메일박스를 하나는 함께 등록해야 합니다.
 
 ### 11.2 실행 흐름 (control 리더 루프, Sender 단위)
 
@@ -614,7 +628,8 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
 - 프로브 delivery는 `lane=probe`로 캠페인 통계·트래킹(오픈 픽셀·링크 재작성·수신거부)·suppression에서 제외됩니다. `X-Sendplane-Probe`는 `Delivery.Vars["probe_token"]`에서 나옵니다.
 - 두 루프(트리거 5분, 회수 1분)는 control 리더에만 등록됩니다(`control.WithLoop`). 메일박스 접속은 루트가 `internal/mailbox`를 `probe.MailboxOpener`로 감싸고, 받은편지함과 스팸함에 각각 커넥션을 엽니다.
 - 두 루프 모두 `control.Loop.AllTenants` 입니다. 프로브 delivery는 1~2초면 종단 상태가 되어 테넌트가 곧바로 `ActiveTenants`에서 빠지므로, active 테넌트만 도는 회수 루프는 **테넌트가 마침 다른 일을 하고 있을 때만** 판정을 끝냅니다. 같은 이유로 `retention`·`finalizer`·`outbox-sweep`도 전체 테넌트를 돕니다.
-- 프로세스 단위 설정은 `Options.Probe`(`host.ProbeConfig`: `Enabled`, `HMACKey`, `Nameservers`, `Interval`, `Timeout`)입니다. 꺼져 있으면 `POST /senders/{id}/probe`는 501입니다.
+- 프로세스 단위 설정은 `Options.Probe`(`host.ProbeConfig`: `Enabled`, `HMACKey`, `Nameservers`, `Interval`, `Timeout`, `Webhooks`)입니다. 꺼져 있으면 `POST /senders/{id}/probe`는 501이고 inbound 라우트도 마운트되지 않습니다.
+- 트리거는 kind를 구분하지 않습니다 — 웹훅 메일박스도 똑같이 run 하나와 delivery 하나를 받고, 메일은 그 주소로 갑니다. 회수 루프만 갈립니다: `probe-collect` 는 웹훅 메일박스에 접속하지 않고 **타임아웃만** 적용하며(미수신 → yellow/red), 판정은 inbound 핸들러가 요청 안에서 끝냅니다.
 - 여러 메일박스 결과의 "최악 값"이 요약 상태이고 상세는 메일박스별로 표시합니다.
 - 프로브 발송이 transport 상태(§8.3)도 갱신하므로 별도 SMTP 연결 테스트 버튼은 "프로브 즉시 실행"으로 대체합니다.
 - `POST /senders/{id}/probe`가 트리거할 프로브 메일박스가 하나도 없으면 루프백 자체를 건너뛰고, DNS 체커가 설정돼 있으면 **DNS 전용 run**으로 대체해 상태 사유에 "loopback 미구성"을 남깁니다(ErrNoMailbox, ADR-0012) — 아무 진단도 안 주는 것보다는 낫다는 판단입니다.

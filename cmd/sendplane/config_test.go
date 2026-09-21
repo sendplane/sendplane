@@ -254,4 +254,104 @@ func TestValidateRejectsProbeEnabledWithoutKey(t *testing.T) {
 	}
 }
 
+// Every probe.webhooks failure is one that would otherwise only surface as
+// "the probe never completed", hours later and blamed on the sender, so all of
+// them are refused at startup (ADR-0016).
+func TestValidateProbeWebhooks(t *testing.T) {
+	base := func(ws ...ProbeWebhookConfig) *Config {
+		cfg := &Config{
+			Store: StoreConfig{Driver: "postgres", DSN: "postgres://localhost/x"},
+			Probe: ProbeConfig{Webhooks: ws},
+		}
+		cfg.applyDefaults()
+		return cfg
+	}
+
+	if err := base(ProbeWebhookConfig{Provider: "sendplane", Secret: "s"}).Validate(false); err != nil {
+		t.Fatalf("a registered provider with a secret was rejected: %v", err)
+	}
+	// `secrets` is the real field and `secret` the sugar; either alone is
+	// enough, and both together is a rotation.
+	if err := base(ProbeWebhookConfig{Provider: "sendplane", Secrets: []string{"a", "b"}}).Validate(false); err != nil {
+		t.Fatalf("a secrets list was rejected: %v", err)
+	}
+
+	err := base(ProbeWebhookConfig{Provider: "postmarkk", Secret: "s"}).Validate(false)
+	if err == nil {
+		t.Fatal("an unknown provider name was accepted")
+	}
+	// The message has to name the alternatives: a typo here is otherwise a
+	// route that silently never fires.
+	if !strings.Contains(err.Error(), "postmarkk") || !strings.Contains(err.Error(), "sendplane") {
+		t.Fatalf("error does not list the registered providers: %v", err)
+	}
+
+	err = base(ProbeWebhookConfig{Provider: "sendplane"}).Validate(false)
+	if err == nil || !strings.Contains(err.Error(), "secret") {
+		t.Fatalf("an unsigned inbound endpoint was accepted: %v", err)
+	}
+	// An unset ${VAR} expands to the empty string, so a blank secret is the
+	// shape a missing environment variable actually arrives in.
+	err = base(ProbeWebhookConfig{Provider: "sendplane", Secrets: []string{"", "  "}}).Validate(false)
+	if err == nil || !strings.Contains(err.Error(), "secret") {
+		t.Fatalf("a blank secret was accepted: %v", err)
+	}
+
+	err = base(
+		ProbeWebhookConfig{Provider: "sendplane", Secret: "s"},
+		ProbeWebhookConfig{Provider: "sendplane", Secret: "s2"},
+	).Validate(false)
+	if err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Fatalf("two webhooks on the same path were accepted: %v", err)
+	}
+
+	// A path override makes the pair legal again.
+	if err := base(
+		ProbeWebhookConfig{Provider: "sendplane", Secret: "s"},
+		ProbeWebhookConfig{Provider: "sendplane", Secret: "s2", Path: "/hooks/sendplane-2"},
+	).Validate(false); err != nil {
+		t.Fatalf("distinct paths were rejected: %v", err)
+	}
+
+	err = base(ProbeWebhookConfig{Provider: "sendplane", Secret: "s", Path: "hooks"}).Validate(false)
+	if err == nil || !strings.Contains(err.Error(), "must start with /") {
+		t.Fatalf("a relative path was accepted: %v", err)
+	}
+
+	if err := base(ProbeWebhookConfig{
+		Provider: "sendplane", Secret: "s", Tolerance: Duration(2 * time.Minute),
+	}).Validate(false); err != nil {
+		t.Fatalf("a tolerance was rejected for a provider whose signature is timestamped: %v", err)
+	}
+	err = base(ProbeWebhookConfig{
+		Provider: "sendplane", Secret: "s", Tolerance: Duration(-time.Minute),
+	}).Validate(false)
+	if err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Fatalf("a negative tolerance was accepted: %v", err)
+	}
+}
+
+// ToHost folds `secret` into `secrets`, which is what the rest of the process
+// reads; nothing downstream should have to know the sugar exists.
+func TestProbeWebhookToHost(t *testing.T) {
+	cfg := ProbeConfig{Webhooks: []ProbeWebhookConfig{{
+		Provider: " sendplane ", Secret: "sugar", Secrets: []string{"listed", ""},
+		Path: " /hooks/in ", Tolerance: Duration(90 * time.Second),
+	}}}
+	out, err := cfg.ToHost()
+	if err != nil {
+		t.Fatalf("ToHost: %v", err)
+	}
+	if len(out.Webhooks) != 1 {
+		t.Fatalf("got %d webhooks", len(out.Webhooks))
+	}
+	got := out.Webhooks[0]
+	if got.Provider != "sendplane" || got.Path != "/hooks/in" || got.Tolerance != 90*time.Second {
+		t.Errorf("got %+v", got)
+	}
+	if len(got.Secrets) != 2 || got.Secrets[0] != "listed" || got.Secrets[1] != "sugar" {
+		t.Errorf("secrets = %q, want [listed sugar]", got.Secrets)
+	}
+}
+
 func ptrTo[T any](v T) *T { return &v }

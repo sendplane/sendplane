@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sendplane/sendplane/host"
+	"github.com/sendplane/sendplane/internal/probe/inbound"
 )
 
 // Duration wraps time.Duration so config.yaml can spell it "5m" instead of a
@@ -158,6 +159,48 @@ type ProbeConfig struct {
 	// to every enabled probe and bounce mailbox. Zero uses 15m. The loop runs
 	// whether or not probing is enabled (architecture 11.5).
 	MailboxCheckInterval Duration `yaml:"mailbox_check_interval"`
+	// Webhooks are the inbound endpoints a receiving provider posts delivered
+	// probe mail to (ADR-0016). They are global: one endpoint serves every
+	// tenant, and the tenant comes out of the probe token on the message.
+	Webhooks []ProbeWebhookConfig `yaml:"webhooks"`
+}
+
+// ProbeWebhookConfig is one inbound webhook. The provider name has to be one
+// internal/probe/inbound knows; Validate lists the registered ones when it is
+// not, because a typo here is otherwise a route that silently never fires.
+type ProbeWebhookConfig struct {
+	Provider string `yaml:"provider"`
+	// Secrets verify the provider's request signature. At least one is
+	// required, and any one matching is enough — which is what makes a
+	// rotation a matter of listing the new secret next to the old one for as
+	// long as both may arrive, rather than a flag day.
+	Secrets []string `yaml:"secrets"`
+	// Secret is sugar for a one-element Secrets, because a deployment that
+	// has never rotated anything should not have to write a list.
+	Secret string `yaml:"secret"`
+	// Path overrides the default "/probe/inbound/<provider>" route, for a
+	// deployment whose reverse proxy already owns that prefix.
+	Path string `yaml:"path"`
+	// Tolerance is how far a signed timestamp may be from this process's
+	// clock. Zero uses the provider's own default (5m for the `sendplane`
+	// format). Only a provider whose signature carries a timestamp accepts
+	// it; setting it for one that does not is refused at startup.
+	Tolerance Duration `yaml:"tolerance"`
+}
+
+// secrets is the effective secret list: `secrets` plus `secret`, blanks
+// dropped. A blank is what an unset ${VAR} expands to (LoadConfig runs
+// os.ExpandEnv over the file), so dropping it here is what turns "the
+// environment variable is missing" into the startup error below rather than
+// into an endpoint verifying against the empty string.
+func (w ProbeWebhookConfig) secrets() []string {
+	out := make([]string, 0, len(w.Secrets)+1)
+	for _, s := range append(append([]string(nil), w.Secrets...), w.Secret) {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // ToHost converts to host.ProbeConfig, decoding the base64 HMAC key.
@@ -168,6 +211,14 @@ func (p ProbeConfig) ToHost() (host.ProbeConfig, error) {
 		Interval:             time.Duration(p.Interval),
 		Timeout:              time.Duration(p.Timeout),
 		MailboxCheckInterval: time.Duration(p.MailboxCheckInterval),
+	}
+	for _, w := range p.Webhooks {
+		out.Webhooks = append(out.Webhooks, host.ProbeWebhook{
+			Provider:  strings.TrimSpace(w.Provider),
+			Secrets:   w.secrets(),
+			Path:      strings.TrimSpace(w.Path),
+			Tolerance: time.Duration(w.Tolerance),
+		})
 	}
 	if p.Enabled != nil {
 		out.Enabled = *p.Enabled
@@ -388,6 +439,7 @@ func (c *Config) Validate(needSecrets bool) error {
 			errs = append(errs, "probe.hmac_key: not valid base64")
 		}
 	}
+	errs = append(errs, validateProbeWebhooks(c.Probe.Webhooks)...)
 
 	switch c.Log.Format {
 	case "json", "text", "":
@@ -426,4 +478,57 @@ func decodeSecretKey(k string) ([]byte, error) {
 		return nil, fmt.Errorf("must decode to 32 bytes, got %d", len(b))
 	}
 	return b, nil
+}
+
+// validateProbeWebhooks checks the inbound webhook list (ADR-0016). Every
+// failure here is one that would otherwise only show up as "the probe never
+// completed", hours later and blamed on the sender, so all three are refused
+// at startup rather than logged.
+func validateProbeWebhooks(ws []ProbeWebhookConfig) []string {
+	var errs []string
+	paths := map[string]int{}
+	for i, w := range ws {
+		name := strings.TrimSpace(w.Provider)
+		if name == "" {
+			errs = append(errs, fmt.Sprintf("probe.webhooks[%d].provider is required", i))
+			continue
+		}
+		if _, ok := inbound.Lookup(name); !ok {
+			errs = append(errs, fmt.Sprintf("probe.webhooks[%d].provider %q is not a known inbound provider (have: %s)",
+				i, name, strings.Join(inbound.Names(), ", ")))
+		}
+		if len(w.secrets()) == 0 {
+			errs = append(errs, fmt.Sprintf(
+				"probe.webhooks[%d]: at least one of secret/secrets is required: an "+
+					"unsigned inbound endpoint lets anybody complete anybody's probe run", i))
+		}
+		switch p, ok := inbound.Lookup(name); {
+		case w.Tolerance < 0:
+			errs = append(errs, fmt.Sprintf("probe.webhooks[%d].tolerance must not be negative", i))
+		case w.Tolerance > 0 && ok:
+			// A tolerance only means something to a signature that carries a
+			// timestamp. Accepting it for a provider that has none would be a
+			// replay window an operator believes they configured.
+			if _, timestamped := p.(inbound.ToleranceSetter); !timestamped {
+				errs = append(errs, fmt.Sprintf(
+					"probe.webhooks[%d].tolerance: provider %q has no timestamp in its signature, "+
+						"so there is nothing to tolerate", i, name))
+			}
+		}
+		path := strings.TrimSpace(w.Path)
+		if path == "" {
+			path = inbound.DefaultPath(name)
+		}
+		if !strings.HasPrefix(path, "/") {
+			errs = append(errs, fmt.Sprintf("probe.webhooks[%d].path %q must start with /", i, path))
+			continue
+		}
+		if first, dup := paths[path]; dup {
+			errs = append(errs, fmt.Sprintf("probe.webhooks[%d].path %q is already used by probe.webhooks[%d]",
+				i, path, first))
+			continue
+		}
+		paths[path] = i
+	}
+	return errs
 }

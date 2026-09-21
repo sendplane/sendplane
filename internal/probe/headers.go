@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 )
@@ -81,6 +82,49 @@ func ParseHeaders(raw []byte) Headers {
 	}
 	flush()
 	return out
+}
+
+// HeadersFromMap builds a header block from the name -> values map an inbound
+// webhook provider hands over (inbound.Message.Headers), so that every parser
+// below works on a webhook delivery exactly as it does on a fetched message.
+//
+// A map cannot express the order two *different* headers appeared in, and it
+// does not have to: every parser here reads one name at a time, and the order
+// that matters — the Received chain bottom-up, "the first
+// Authentication-Results" — is the order of the values *within* one name,
+// which the map preserves. Names are matched case-insensitively by Get and
+// Values, so a provider's capitalization is irrelevant.
+func HeadersFromMap(m map[string][]string) Headers {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	// Sorted so that the block is deterministic; RawHeaders ends up on the
+	// ProbeRun and a diff between two runs should show what changed, not what
+	// the map iteration order happened to be.
+	sort.Strings(names)
+
+	out := make(Headers, 0, len(m))
+	for _, name := range names {
+		for _, v := range m[name] {
+			out = append(out, Field{Name: name, Value: strings.TrimSpace(v)})
+		}
+	}
+	return out
+}
+
+// String renders a header block back into an RFC 5322 header section. It is
+// what a webhook delivery stores in ProbeRun.RawHeaders, so that the diagnosis
+// column reads the same whichever channel the mail came back over.
+func (h Headers) String() string {
+	var b strings.Builder
+	for _, f := range h {
+		b.WriteString(f.Name)
+		b.WriteString(": ")
+		b.WriteString(f.Value)
+		b.WriteString("\r\n")
+	}
+	return b.String()
 }
 
 // --- Authentication-Results (RFC 8601) ---------------------------------

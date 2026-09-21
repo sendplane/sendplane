@@ -14,3 +14,10 @@ generate:
 output-options:
   skip-prune: true   # RecipientLine is reachable only via x-ndjson-line-schema; pruning would drop it
   nullable-type: true
+  exclude-operation-ids:
+    # POST /probe/inbound/{provider} is documented in the spec but hand-routed
+    # (internal/api/probeinbound.go): the route is mounted once per configured
+    # provider, at a path the host may override, and the handler needs the raw
+    # request - the exact bytes a provider signed, plus its own headers - which
+    # a strict handler's decoded request object cannot give it (ADR-0016).
+    - probeInbound

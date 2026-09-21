@@ -162,7 +162,20 @@ func (s *Sendplane) Handler() http.Handler {
 		// into a runner that does not exist instead of answering 501.
 		if r := s.probeRunner(); r != nil {
 			deps.Probe = r
+			deps.ProbeCompleter = r
 		}
+		routes, err := s.probeInboundRoutes()
+		if err != nil {
+			// A misconfigured inbound webhook is fatal for the handler, not a
+			// route quietly missing: a provider posting probe mail nowhere
+			// looks exactly like a sender that stopped delivering.
+			s.opts.Logger.Error("sendplane: cannot build the probe inbound routes", "err", err)
+			s.handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "sendplane: handler unavailable", http.StatusInternalServerError)
+			})
+			return
+		}
+		deps.ProbeInbound = routes
 		s.handler = api.New(deps)
 	})
 	return s.handler

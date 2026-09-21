@@ -99,6 +99,39 @@ probe:
   # provider's console between two six-hourly probes, and it runs whether or
   # not `enabled` above is set: bounce mailboxes need the same watch.
   mailbox_check_interval: 15m
+  # Inbound webhooks (ADR-0016). A probe mail can come back two ways: over
+  # IMAP, which sendplane polls, or over a webhook that whatever received the
+  # mail posts to sendplane. This list is the second way, and it is **global**:
+  # one endpoint serves every tenant, because an inbound endpoint is a URL
+  # somebody else was configured to call and a URL cannot be per tenant. The
+  # tenant is resolved from the signed X-Sendplane-Probe token on the message.
+  #
+  # The format sendplane ships is `sendplane` — a small JSON body anything that
+  # can POST can produce (a mail-receiving service's webhook, a Cloudflare
+  # Email Worker, a script on your MX), signed with X-Sendplane-Signature.
+  # internal/probe/README.md has the body, a curl example and the recipe for
+  # adding another provider's native format.
+  #
+  # To use one:
+  #   1. arrange for the mail to be forwarded to
+  #      https://<control>/probe/inbound/sendplane, preserving the
+  #      Authentication-Results, Received and X-Sendplane-Probe headers;
+  #   2. set the same secret here as there;
+  #   3. create a probe mailbox with `kind: webhook` and that address
+  #      (POST /api/v1/probe-mailboxes), plus the authserv-id the receiving
+  #      MX writes into Authentication-Results.
+  #
+  # A provider name this build does not know is refused at startup with the
+  # list of the ones it does know.
+  webhooks: []
+  # - provider: sendplane
+  #   # One of secret/secrets is required; several are accepted and any one
+  #   # matching is enough, which is how a secret is rotated without a window
+  #   # where deliveries are refused. `secret` is sugar for a one-element list.
+  #   secrets:
+  #     - ${SENDPLANE_PROBE_WEBHOOK_SECRET}
+  #   path: ""             # default /probe/inbound/sendplane
+  #   tolerance: 300s      # how stale a signed timestamp may be (default 5m)
 
 limits:
   max_recipients_per_campaign: 10000000

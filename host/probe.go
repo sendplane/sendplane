@@ -45,4 +45,37 @@ type ProbeConfig struct {
 	// Timeout is how long a probe mail may take to arrive before the run is
 	// called undelivered. Zero uses the probe package's default (15m).
 	Timeout time.Duration
+
+	// Webhooks are the inbound endpoints whatever receives the probe mail posts
+	// probe mail to, instead of sendplane polling an IMAP account (ADR-0016).
+	//
+	// They are process-wide and serve every tenant, which is not an oversight:
+	// an inbound endpoint is a URL somebody else was configured to call, and a
+	// per-tenant URL would mean a hostname per tenant. The tenant is resolved
+	// from the probe token on the message instead, the same way the public
+	// tracking routes resolve theirs.
+	Webhooks []ProbeWebhook
+}
+
+// ProbeWebhook is one configured inbound webhook.
+type ProbeWebhook struct {
+	// Provider names a registered internal/probe/inbound provider. The one
+	// sendplane ships is "sendplane" (internal/probe/inbound/sendplanehook).
+	// An unknown name is a configuration error, not a route that answers 404
+	// at runtime.
+	Provider string
+	// Secrets are what the provider's request signature is verified against.
+	// At least one is required: an unsigned inbound endpoint would let
+	// anybody complete anybody's probe run. Several are accepted and any one
+	// matching is enough, which is how a secret is rotated without a window
+	// in which deliveries are refused.
+	Secrets []string
+	// Path is the route to mount. Empty uses "/probe/inbound/<provider>".
+	Path string
+	// Tolerance is how far a signed timestamp may be from this process's
+	// clock, for a provider whose signature carries one
+	// (inbound.ToleranceSetter). Zero uses the provider's default (5m), and a
+	// non-zero value for a provider with no timestamp is a configuration
+	// error rather than a number that quietly does nothing.
+	Tolerance time.Duration
 }

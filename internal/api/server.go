@@ -64,6 +64,14 @@ type Deps struct {
 	Renderer *render.Renderer
 	// Probe is optional; without it the manual probe trigger answers 501.
 	Probe ProbeTrigger
+	// ProbeInbound are the inbound probe webhooks to mount, one per provider
+	// the host configured (host.ProbeConfig.Webhooks, ADR-0016). Empty mounts
+	// nothing, and POST /probe/inbound/{provider} is then a plain 404.
+	ProbeInbound []ProbeInboundRoute
+	// ProbeCompleter completes a run from an inbound webhook. Required when
+	// ProbeInbound is not empty; New drops the routes without it rather than
+	// serve a route that can only fail.
+	ProbeCompleter ProbeCompleter
 	// MailboxTester runs the credential checks the mailbox test endpoints
 	// answer with. New binds internal/mailbox to Secrets if it is nil; a test
 	// replaces it so the HTTP layer needs no IMAP server.
@@ -82,6 +90,8 @@ type server struct {
 	deps   Deps
 	signer tracking.Signer
 	limit  *ipLimiter
+	// probeSeen deduplicates inbound webhook redeliveries (ADR-0016).
+	probeSeen *deliveryMemo
 }
 
 // New returns the handler for /api/v1, /t and /healthz.
@@ -118,7 +128,19 @@ func New(d Deps) http.Handler {
 	}
 	d.Limits = d.Limits.WithDefaults()
 
-	s := &server{deps: d, signer: tracking.NewSigner(), limit: newIPLimiter(d.Clock)}
+	if d.ProbeCompleter == nil && len(d.ProbeInbound) > 0 {
+		// A route that authenticates the provider and then has nothing to
+		// complete the run with would answer 200 to every probe and lose it.
+		// Not mounting it at all is the honest failure.
+		d.Logger.Error("sendplane: probe inbound webhooks are configured without a probe runner; " +
+			"the routes are not mounted")
+		d.ProbeInbound = nil
+	}
+
+	s := &server{
+		deps: d, signer: tracking.NewSigner(), limit: newIPLimiter(d.Clock),
+		probeSeen: newDeliveryMemo(),
+	}
 
 	strict := NewStrictHandlerWithOptions(s,
 		[]StrictMiddlewareFunc{s.gate},
@@ -151,6 +173,14 @@ func New(d Deps) http.Handler {
 		writeError(w, newErr(http.StatusMethodNotAllowed, ErrorCodeInvalidRequest,
 			"method not allowed"))
 	})
+	// Mounted on the base router, before the generated routes: the spec
+	// documents one path and a deployment may configure several, or another
+	// one entirely (internal/api/probeinbound.go).
+	for _, route := range d.ProbeInbound {
+		r.Post(route.Path, s.probeInboundHandler(route))
+		d.Logger.Info("sendplane: inbound probe webhook mounted",
+			"provider", route.Provider.Name(), "path", route.Path)
+	}
 	return HandlerWithOptions(strict, ChiServerOptions{
 		BaseRouter: r,
 		ErrorHandlerFunc: func(w http.ResponseWriter, _ *http.Request, err error) {

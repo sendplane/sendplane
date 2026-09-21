@@ -383,7 +383,13 @@
     "authservHint": "이 authserv-id가 붙은 Authentication-Results 헤더만 신뢰합니다(RFC 8601).",
     "enabled": "활성",
     "hint": "실제로 발송하는 프로바이더마다 메일박스를 등록하세요. 판정은 수신 측 MTA가 붙이는 헤더에 의존합니다.",
-    "health": "상태 확인"
+    "health": "상태 확인",
+    "kind": {
+      "label": "종류",
+      "imap": "IMAP",
+      "webhook": "웹훅"
+    },
+    "webhookHint": "이 주소는 Authentication-Results, Received, X-Sendplane-Probe 헤더를 보존한 채로 sendplane의 인바운드 webhook(POST /probe/inbound/PROVIDER)으로 전달되어야 합니다."
   },
   "bounceMailbox": {
     "title": "바운스 메일박스",
@@ -428,7 +434,8 @@
     "unsavedPasswordHint": "위에 입력한 비밀번호로 테스트합니다. 이 테스트는 저장하지 않습니다.",
     "healthCheckedAt": "마지막 확인",
     "healthOkAt": "마지막 정상",
-    "healthFailures": "연속 실패 횟수"
+    "healthFailures": "연속 실패 횟수",
+    "webhookProvider": "인바운드 webhook 제공자: {name}"
   },
   "suppression": {
     "title": "수신 차단",

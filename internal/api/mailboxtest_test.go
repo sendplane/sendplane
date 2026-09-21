@@ -62,7 +62,8 @@ func newTesterEnv(t *testing.T, res mailbox.TestResult) (*env, *fakeTester) {
 func (e *env) seedProbeMailbox() ProbeMailbox {
 	e.t.Helper()
 	return decodeInto[ProbeMailbox](e.t, e.do(http.MethodPost, "/api/v1/probe-mailboxes", ProbeMailboxInput{
-		Name: "gmail", Address: "probe@example.com", Host: "imap.example.com", Port: 993,
+		Name: "gmail", Address: "probe@example.com",
+		Host: ptr("imap.example.com"), Port: ptr(int32(993)),
 		Username: ptr("probe"), Password: ptr("s3cret"),
 		InboxFolder: ptr("INBOX"), SpamFolder: ptr("[Gmail]/Spam"),
 	}), http.StatusCreated)
@@ -83,7 +84,8 @@ func TestProbeMailboxCredentialsEndpoint(t *testing.T) {
 
 	got := decodeInto[MailboxTestResult](t, e.do(http.MethodPost, "/api/v1/probe-mailboxes/test",
 		ProbeMailboxInput{
-			Name: "gmail", Address: "probe@example.com", Host: "imap.example.com", Port: 993,
+			Name: "gmail", Address: "probe@example.com",
+			Host: ptr("imap.example.com"), Port: ptr(int32(993)),
 			Username: ptr("probe"), Password: ptr("s3cret"), SpamFolder: ptr("[Gmail]/Spam"),
 		}), http.StatusOK)
 
@@ -149,7 +151,8 @@ func TestMailboxTestValidatesBody(t *testing.T) {
 	e, ft := newTesterEnv(t, okResult())
 
 	decodeError(t, e.do(http.MethodPost, "/api/v1/probe-mailboxes/test", ProbeMailboxInput{
-		Name: "gmail", Address: "probe@example.com", Host: "imap.example.com", Port: 0,
+		Name: "gmail", Address: "probe@example.com",
+		Host: ptr("imap.example.com"), Port: ptr(int32(0)),
 	}), http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
 
 	if _, n := ft.seen(); n != 0 {

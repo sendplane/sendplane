@@ -156,21 +156,53 @@ func New(opts Options) *Runner {
 // which is why the run ID is in it verbatim (architecture 11.2).
 func Subject(runID string) string { return "[sendplane probe " + runID + "]" }
 
-// Token is the X-Sendplane-Probe value: the run ID plus a short HMAC over it.
-// The run ID alone would be enough to find the mail; the HMAC is what makes a
-// forged probe mail in the mailbox unable to produce a green verdict.
-func (r *Runner) Token(runID string) string {
+// Token is the X-Sendplane-Probe value: "<tenant>/<run>" plus a short HMAC
+// over both. The IDs alone would be enough to find the mail; the HMAC is what
+// makes a forged probe mail unable to produce a green verdict.
+//
+// The tenant travels in the token for the same reason it travels in a tracking
+// token (internal/tracking.TokenPayload): the inbound webhook of ADR-0016 is
+// one global, unauthenticated endpoint, and resolving the tenant has to be one
+// Provider.ForTenant call rather than a sweep over every tenant's pending runs.
+func (r *Runner) Token(tenantID, runID string) string {
+	body := tenantID + "/" + runID
 	if len(r.opts.HMACKey) == 0 {
-		return runID
+		return body
 	}
 	mac := hmac.New(sha256.New, r.opts.HMACKey)
+	mac.Write([]byte(tenantID))
+	mac.Write([]byte{0})
 	mac.Write([]byte(runID))
-	return runID + "/" + hex.EncodeToString(mac.Sum(nil))[:16]
+	return body + "/" + hex.EncodeToString(mac.Sum(nil))[:16]
 }
 
-// VerifyToken reports whether a token found on a mail belongs to runID.
-func (r *Runner) VerifyToken(runID, token string) bool {
-	return hmac.Equal([]byte(token), []byte(r.Token(runID)))
+// ParseToken splits a token into the tenant and run it names, *without*
+// checking the MAC — like internal/tracking.TenantOf. The caller loads that
+// tenant's store, reads the run and only then calls VerifyToken, because the
+// key the MAC is checked against is process-wide but the run is not.
+//
+// The MAC is the last segment and a run ID never contains "/", so the split is
+// from the right: a tenant ID with a "/" in it still parses.
+func ParseToken(token string) (tenantID, runID string, ok bool) {
+	parts := strings.Split(token, "/")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	// Two segments is the unsigned form, three or more the signed one.
+	if len(parts) > 2 {
+		parts = parts[:len(parts)-1]
+	}
+	runID = parts[len(parts)-1]
+	tenantID = strings.Join(parts[:len(parts)-1], "/")
+	if tenantID == "" || runID == "" {
+		return "", "", false
+	}
+	return tenantID, runID, true
+}
+
+// VerifyToken reports whether a token found on a mail belongs to this run.
+func (r *Runner) VerifyToken(tenantID, runID, token string) bool {
+	return hmac.Equal([]byte(token), []byte(r.Token(tenantID, runID)))
 }
 
 // Trigger starts one probe run for a sender: one lane=probe Delivery and one
@@ -229,7 +261,7 @@ func (r *Runner) Trigger(ctx context.Context, st store.Store, senderID string) (
 			EmailNorm: emailNorm,
 			Vars: map[string]any{
 				"run_id":      runID,
-				"probe_token": r.Token(runID),
+				"probe_token": r.Token(snd.TenantID, runID),
 				"mailbox":     box.Name,
 			},
 			NextAttemptAt: now,
@@ -440,6 +472,10 @@ func (r *Runner) collectMailbox(
 	box *store.ProbeMailbox, pending []*store.ProbeRun, now time.Time,
 	touched map[string]bool,
 ) error {
+	if box.Kind.Normalized() == store.ProbeMailboxWebhook {
+		return r.collectWebhook(ctx, st, box, pending, now, touched)
+	}
+
 	var fetcher MailboxFetcher
 	var openErr error
 	// A mailbox row that was deleted while a run was in flight is left alone:
@@ -465,7 +501,7 @@ func (r *Runner) collectMailbox(
 	for _, run := range pending {
 		var msg *RawMessage
 		if fetcher != nil {
-			got, err := r.find(ctx, fetcher, run.ID)
+			got, err := r.find(ctx, fetcher, run.TenantID, run.ID)
 			if err != nil {
 				firstErr = cmpErr(firstErr, fmt.Errorf("probe: mailbox %s: %w", box.ID, err))
 			}
@@ -473,7 +509,7 @@ func (r *Runner) collectMailbox(
 		}
 		switch {
 		case msg != nil:
-			if err := r.finish(ctx, st, box, run, msg, now); err != nil {
+			if err := r.CompleteRun(ctx, st, run, evidenceOf(box, msg), now); err != nil {
 				firstErr = cmpErr(firstErr, err)
 				continue
 			}
@@ -494,7 +530,7 @@ func (r *Runner) collectMailbox(
 			if openErr != nil {
 				err = r.finishUnreachable(ctx, st, run, mailboxStage(openErr), now)
 			} else {
-				err = r.finishUndelivered(ctx, st, run, now)
+				err = r.finishUndelivered(ctx, st, run, "메일이", now)
 			}
 			if err != nil {
 				firstErr = cmpErr(firstErr, err)
@@ -504,6 +540,55 @@ func (r *Runner) collectMailbox(
 		}
 	}
 	return firstErr
+}
+
+// collectWebhook is collectMailbox for a webhook-kind mailbox (ADR-0016).
+// There is nothing to open and nothing to fetch: the inbound endpoint
+// completes a run the moment the provider posts the mail. All this loop does
+// is close out the runs whose probe never arrived, which is the only way a
+// forward that was silently switched off ever becomes visible.
+func (r *Runner) collectWebhook(
+	ctx context.Context, st store.Store,
+	box *store.ProbeMailbox, pending []*store.ProbeRun, now time.Time,
+	touched map[string]bool,
+) error {
+	var firstErr error
+	timedOut := false
+	for _, run := range pending {
+		if now.Sub(run.StartedAt) < r.opts.Timeout {
+			continue
+		}
+		if err := r.finishUndelivered(ctx, st, run, "웹훅으로 프로브가", now); err != nil {
+			firstErr = cmpErr(firstErr, err)
+			continue
+		}
+		timedOut = true
+		touched[run.SenderID] = true
+	}
+	if timedOut && box.ID != "" {
+		// A webhook mailbox has no login to check, so the mailbox-check loop
+		// skips it and a missed probe is the only evidence there is that the
+		// provider is no longer forwarding. Recording it as a mailbox error
+		// puts a broken forward next to a rotated IMAP password in the
+		// console instead of only inside a probe verdict (architecture 11.5).
+		r.recordWebhookHealth(ctx, st, box,
+			mbhealth.Fail(store.MailboxStageWebhook, "no probe received within timeout"), now)
+	}
+	return firstErr
+}
+
+// recordWebhookHealth files one observation about a webhook mailbox. It is
+// logged rather than returned for the same reason recordMailboxHealth is: the
+// verdicts matter more than the bookkeeping around them.
+func (r *Runner) recordWebhookHealth(
+	ctx context.Context, st store.Store, box *store.ProbeMailbox,
+	outcome mbhealth.Outcome, now time.Time,
+) {
+	m := mbhealth.Mailbox{ID: box.ID, Name: box.Name, Health: box.Health}
+	if _, err := mbhealth.Record(ctx, st, mbhealth.KindProbe, m, outcome, now); err != nil {
+		r.opts.Logger.Warn("sendplane: recording probe mailbox health failed",
+			"mailbox", box.ID, "err", err)
+	}
 }
 
 // stager is implemented by an Open error that knows how far it got
@@ -563,8 +648,8 @@ func (r *Runner) finishUnreachable(
 // find looks the probe mail up by its header and falls back to the subject.
 // The fallback is not a nicety today: the sender does not yet put
 // X-Sendplane-Probe on the mail (README).
-func (r *Runner) find(ctx context.Context, f MailboxFetcher, runID string) (*RawMessage, error) {
-	msgs, err := f.FetchByHeader(ctx, HeaderProbe, r.Token(runID))
+func (r *Runner) find(ctx context.Context, f MailboxFetcher, tenantID, runID string) (*RawMessage, error) {
+	msgs, err := f.FetchByHeader(ctx, HeaderProbe, r.Token(tenantID, runID))
 	if err != nil {
 		return nil, err
 	}
@@ -576,7 +661,7 @@ func (r *Runner) find(ctx context.Context, f MailboxFetcher, runID string) (*Raw
 	}
 	for i := range msgs {
 		h := ParseHeaders(msgs[i].Raw)
-		if tok := h.Get(HeaderProbe); tok != "" && !r.VerifyToken(runID, tok) {
+		if tok := h.Get(HeaderProbe); tok != "" && !r.VerifyToken(tenantID, runID, tok) {
 			// Someone put a mail with our header in the mailbox. It is not a
 			// probe result.
 			continue
@@ -589,13 +674,61 @@ func (r *Runner) find(ctx context.Context, f MailboxFetcher, runID string) (*Raw
 	return nil, nil
 }
 
-// finish turns a received probe mail into a verdict and saves it.
-func (r *Runner) finish(
-	ctx context.Context, st store.Store,
-	box *store.ProbeMailbox, run *store.ProbeRun, msg *RawMessage, now time.Time,
+// Evidence is one probe mail as the channel it arrived over saw it. The IMAP
+// collector fills it from the raw message it fetched, the inbound webhook from
+// the provider's JSON (ADR-0016); from CompleteRun on, the two are the same
+// code, which is the point of the type.
+type Evidence struct {
+	// Mailbox is the probe mailbox the mail was addressed to. It carries the
+	// authserv-id the Authentication-Results header is trusted against and the
+	// folder mapping. Nil for a mailbox that was deleted mid-flight.
+	Mailbox *store.ProbeMailbox
+
+	// Headers is the message's header block. ParseHeaders builds it from a raw
+	// message, HeadersFromMap from a provider's header map.
+	Headers Headers
+
+	// Folder is the folder the mail was filed in, in the mailbox's own naming
+	// ("INBOX", "[Gmail]/Spam"). Empty means the channel cannot see one — a
+	// webhook is told about a delivery, not about where the recipient's client
+	// later filed it — and an unknown folder never downgrades a verdict
+	// (verdict.go).
+	Folder string
+
+	// ReceivedAt is the channel's own arrival timestamp (an IMAP INTERNALDATE,
+	// a webhook's `date`). Zero falls back to the newest Received header.
+	ReceivedAt time.Time
+
+	// RawHeaders is what is kept on the run for diagnosis, already capped.
+	RawHeaders string
+}
+
+// evidenceOf is the IMAP channel's Evidence.
+func evidenceOf(box *store.ProbeMailbox, msg *RawMessage) Evidence {
+	return Evidence{
+		Mailbox:    box,
+		Headers:    ParseHeaders(msg.Raw),
+		Folder:     msg.Folder,
+		ReceivedAt: msg.ReceivedAt,
+		RawHeaders: rawHeaders(msg.Raw),
+	}
+}
+
+// CompleteRun turns a received probe mail into a verdict and saves the run. It
+// is the shared half of the two inbound channels: whatever brought the mail
+// back, the verdict of architecture 11.4, the DNS diagnostic layer and the
+// ProbeRun columns are decided here and nowhere else.
+//
+// It does *not* touch the sender's summary health. CollectWith finishes every
+// mailbox first and refreshes each affected sender once, because the summary
+// is the worst of all mailboxes and recomputing it per run would emit a
+// sender.health_changed for every intermediate value. A caller that completes
+// one run on its own calls RefreshSenderHealth after it.
+func (r *Runner) CompleteRun(
+	ctx context.Context, st store.Store, run *store.ProbeRun, ev Evidence, now time.Time,
 ) error {
-	h := ParseHeaders(msg.Raw)
-	obs := Observe(h, box, msg, now)
+	h := ev.Headers
+	obs := Observe(ev, now)
 
 	report, err := r.runDNS(ctx, st, run.SenderID, obs.ObservedIP)
 	if err != nil {
@@ -629,8 +762,8 @@ func (r *Runner) finish(
 		run.ObservedIP = obs.ObservedIP.String()
 	}
 	run.PTR, run.PTRMatch = obs.PTR, obs.PTRMatch
-	run.RawHeaders = rawHeaders(msg.Raw)
-	run.ReceivedAt = store.TruncateTime(receivedAt(msg, h, now))
+	run.RawHeaders = capRawHeaders(ev.RawHeaders)
+	run.ReceivedAt = store.TruncateTime(receivedAt(ev.ReceivedAt, h, now))
 	run.Pending = false
 	if report != nil {
 		if b, err := json.Marshal(report); err == nil {
@@ -643,19 +776,21 @@ func (r *Runner) finish(
 // finishUndelivered closes out a run whose mail never arrived. ADR-0012 asks
 // for a consecutive-failure threshold because a provider's greylisting
 // produces exactly one of these.
+// subject names what did not arrive, so that a webhook mailbox says so
+// instead of blaming a mailbox nobody polls.
 func (r *Runner) finishUndelivered(
-	ctx context.Context, st store.Store, run *store.ProbeRun, now time.Time,
+	ctx context.Context, st store.Store, run *store.ProbeRun, subject string, now time.Time,
 ) error {
 	streak, err := r.undeliveredStreak(ctx, st, run)
 	if err != nil {
 		return err
 	}
 	status := store.HealthYellow
-	reason := fmt.Sprintf("메일이 %s 안에 도착하지 않았습니다 (%d/%d)",
-		r.opts.Timeout, streak, r.opts.ConsecutiveFailuresForRed)
+	reason := fmt.Sprintf("%s %s 안에 도착하지 않았습니다 (%d/%d)",
+		subject, r.opts.Timeout, streak, r.opts.ConsecutiveFailuresForRed)
 	if streak >= r.opts.ConsecutiveFailuresForRed {
 		status = store.HealthRed
-		reason = fmt.Sprintf("메일이 도착하지 않았습니다 (연속 %d회)", streak)
+		reason = fmt.Sprintf("%s 도착하지 않았습니다 (연속 %d회)", subject, streak)
 	}
 
 	report, err := r.runDNS(ctx, st, run.SenderID, nil)
@@ -784,6 +919,21 @@ func (r *Runner) runDNS(ctx context.Context, st store.Store, senderID string, ob
 	}
 	rep := r.opts.DNS.RunAll(ctx, in)
 	return &rep, nil
+}
+
+// RefreshSenderHealth recomputes one sender's summary from its run history and
+// emits sender.health_changed when it moved. A caller that completed a single
+// run outside the collect loop — the inbound webhook of ADR-0016 — calls it
+// right after CompleteRun; CollectWith does the same thing once per affected
+// sender at the end of a tick instead.
+func (r *Runner) RefreshSenderHealth(
+	ctx context.Context, st store.Store, senderID string, now time.Time,
+) error {
+	runs, err := r.runsOf(ctx, st, senderID)
+	if err != nil {
+		return err
+	}
+	return r.updateSenderHealth(ctx, st, senderID, runs, now)
 }
 
 // updateSenderHealth recomputes a sender's summary from the newest finished
@@ -952,18 +1102,15 @@ func (r *Runner) probeVersion(ctx context.Context, st store.Store) (string, erro
 
 // --- helpers -----------------------------------------------------------
 
-// Observe reads a fetched probe mail into an Observation.
-func Observe(h Headers, box *store.ProbeMailbox, msg *RawMessage, now time.Time) Observation {
+// Observe reads one delivered probe mail into an Observation.
+func Observe(ev Evidence, now time.Time) Observation {
+	h := ev.Headers
 	obs := Observation{Delivered: true}
-	if box != nil {
-		obs.Folder = folderKind(box, msg.Folder)
-	} else {
-		obs.Folder = folderKind(nil, msg.Folder)
-	}
+	obs.Folder = folderKind(ev.Mailbox, ev.Folder)
 
 	authServID := ""
-	if box != nil {
-		authServID = box.AuthServID
+	if ev.Mailbox != nil {
+		authServID = ev.Mailbox.AuthServID
 	}
 	for _, ar := range TrustedAuthResults(h, authServID) {
 		obs.TrustedAR = true
@@ -990,14 +1137,14 @@ func Observe(h Headers, box *store.ProbeMailbox, msg *RawMessage, now time.Time)
 		obs.TLS = hop.TLS
 		obs.PTR = hop.RDNS
 	}
-	obs.Latency, _ = Latency(h, msg.ReceivedAt)
+	obs.Latency, _ = Latency(h, ev.ReceivedAt)
 	return obs
 }
 
-// receivedAt is the mailbox's timestamp, or the newest Received, or now.
-func receivedAt(msg *RawMessage, h Headers, now time.Time) time.Time {
-	if !msg.ReceivedAt.IsZero() {
-		return msg.ReceivedAt
+// receivedAt is the channel's own timestamp, or the newest Received, or now.
+func receivedAt(channelAt time.Time, h Headers, now time.Time) time.Time {
+	if !channelAt.IsZero() {
+		return channelAt
 	}
 	chain := ReceivedChain(h)
 	for i := len(chain) - 1; i >= 0; i-- {
@@ -1008,16 +1155,22 @@ func receivedAt(msg *RawMessage, h Headers, now time.Time) time.Time {
 	return now
 }
 
+// capRawHeaders bounds what a run keeps for diagnosis, whichever channel
+// filled it in.
+func capRawHeaders(s string) string {
+	if len(s) > maxRawHeaders {
+		return s[:maxRawHeaders]
+	}
+	return s
+}
+
 func rawHeaders(raw []byte) string {
 	if i := strings.Index(string(raw), "\r\n\r\n"); i >= 0 {
 		raw = raw[:i]
 	} else if i := strings.Index(string(raw), "\n\n"); i >= 0 {
 		raw = raw[:i]
 	}
-	if len(raw) > maxRawHeaders {
-		raw = raw[:maxRawHeaders]
-	}
-	return string(raw)
+	return capRawHeaders(string(raw))
 }
 
 // isPending reports whether a run is still waiting for its mail

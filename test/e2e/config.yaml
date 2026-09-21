@@ -76,6 +76,14 @@ probe:
   # The collect loop ticks once a minute, so a probe that really arrives is
   # judged inside ~65s. Two minutes is "it is not coming", not "wait longer".
   timeout: 2m
+  # Scenario 6b: the inbound webhook of ADR-0016. The harness plays the part
+  # of whatever forwards mail to sendplane - it pulls the delivered probe mail
+  # out of GreenMail, rewrites it as the {from,to,headers,text} body of
+  # internal/probe/inbound/sendplanehook and posts it signed with this secret
+  # (X-Sendplane-Signature, see test/e2e/scenario_probe_webhook.go).
+  webhooks:
+    - provider: sendplane
+      secret: whsec_e2e-probe-webhook
 
 limits:
   max_recipients_per_campaign: 100000

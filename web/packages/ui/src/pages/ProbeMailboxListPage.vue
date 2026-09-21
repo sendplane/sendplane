@@ -20,6 +20,7 @@ import { useSendplane } from '../context.js'
 import { formatDateTime } from '../lib/format.js'
 
 type MailboxTestResult = components['schemas']['MailboxTestResult']
+type ProbeMailboxKind = components['schemas']['ProbeMailboxKind']
 
 const { client, t, locale } = useSendplane()
 const toast = useToast()
@@ -34,6 +35,7 @@ const saving = ref(false)
 const draft = ref({
   name: '',
   address: '',
+  kind: 'imap' as ProbeMailboxKind,
   host: '',
   port: 993,
   tls: 'tls' as TLSMode,
@@ -56,14 +58,26 @@ const tlsOptions = computed(() =>
   (['none', 'starttls', 'tls'] as const).map((mode) => ({ value: mode, label: mode })),
 )
 
-// Mirrors the backend rule: a real credential check needs all three, whether
-// this is a brand new mailbox or a password being tried before it is saved.
-const canTestForm = computed(
-  () => Boolean(draft.value.host) && Boolean(draft.value.username) && Boolean(draft.value.password),
+const kindOptions = computed(() =>
+  (['imap', 'webhook'] as const).map((kind) => ({ value: kind, label: t(`mailbox.kind.${kind}`) })),
+)
+
+const isWebhookKind = computed(() => draft.value.kind === 'webhook')
+
+// Mirrors the backend rule: a webhook-kind mailbox has no credentials to
+// dial, so the form's own test only needs an address to send it against
+// (internal/api/mailboxtest.go's webhookMailboxTestOut). An imap-kind
+// mailbox still needs all three, whether this is a brand new mailbox or a
+// password being tried before it is saved.
+const canTestForm = computed(() =>
+  isWebhookKind.value
+    ? Boolean(draft.value.address)
+    : Boolean(draft.value.host) && Boolean(draft.value.username) && Boolean(draft.value.password),
 )
 
 const columns = computed<TableColumn[]>(() => [
   { key: 'name', label: t('common.name'), width: 'minmax(140px, 1fr)' },
+  { key: 'kind', label: t('mailbox.kind.label'), width: '90px', secondary: true },
   { key: 'address', label: t('mailbox.address'), width: 'minmax(180px, 2fr)', mono: true },
   { key: 'endpoint', label: t('mailbox.host'), width: 'minmax(150px, 1fr)', mono: true },
   { key: 'authserv', label: t('mailbox.authservId'), width: '150px', mono: true, secondary: true },
@@ -77,6 +91,7 @@ function startCreate() {
   draft.value = {
     name: '',
     address: '',
+    kind: 'imap',
     host: '',
     port: 993,
     tls: 'tls',
@@ -95,6 +110,7 @@ function startEdit(mailbox: ProbeMailbox) {
   draft.value = {
     name: mailbox.name,
     address: mailbox.address,
+    kind: mailbox.kind ?? 'imap',
     host: mailbox.host,
     port: mailbox.port,
     tls: mailbox.tls ?? 'tls',
@@ -159,18 +175,27 @@ async function testStored(mailbox: ProbeMailbox) {
 }
 
 function body() {
-  return {
+  const base = {
     name: draft.value.name,
     address: draft.value.address,
+    kind: draft.value.kind,
+    enabled: draft.value.enabled,
+    ...(draft.value.authserv_id ? { authserv_id: draft.value.authserv_id } : {}),
+  }
+  // A webhook-kind mailbox has no host, port, TLS mode, credentials or
+  // folders — the API rejects the whole IMAP block with a 422 if it sees any
+  // of them, even empty strings, so they must be left out rather than sent
+  // blank (internal/api/sending.go's webhookExtraField).
+  if (isWebhookKind.value) return base
+  return {
+    ...base,
     host: draft.value.host,
     port: Number(draft.value.port),
     tls: draft.value.tls,
-    enabled: draft.value.enabled,
     inbox_folder: draft.value.inbox_folder || 'INBOX',
     ...(draft.value.username ? { username: draft.value.username } : {}),
     ...(draft.value.password ? { password: draft.value.password } : {}),
     ...(draft.value.spam_folder ? { spam_folder: draft.value.spam_folder } : {}),
-    ...(draft.value.authserv_id ? { authserv_id: draft.value.authserv_id } : {}),
   }
 }
 
@@ -227,25 +252,32 @@ async function remove(mailbox: ProbeMailbox) {
       class="sp-page__block"
     >
       <form class="sp-form-grid" @submit.prevent="save">
+        <SpField v-slot="{ id }" :label="t('mailbox.kind.label')">
+          <SpSelect :id="id" v-model="draft.kind" :options="kindOptions" />
+        </SpField>
         <SpField v-slot="{ id }" :label="t('common.name')" required>
           <SpInput :id="id" v-model="draft.name" />
         </SpField>
         <SpField v-slot="{ id }" :label="t('mailbox.address')" required>
           <SpInput :id="id" v-model="draft.address" type="email" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('mailbox.host')" required>
+        <p v-if="isWebhookKind" class="sp-form-grid__note">
+          {{ t('mailbox.webhookHint') }}
+        </p>
+        <SpField v-if="!isWebhookKind" v-slot="{ id }" :label="t('mailbox.host')" required>
           <SpInput :id="id" v-model="draft.host" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('mailbox.port')" required>
+        <SpField v-if="!isWebhookKind" v-slot="{ id }" :label="t('mailbox.port')" required>
           <SpInput :id="id" v-model="draft.port" type="number" :min="1" :max="65535" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('mailbox.tls')">
+        <SpField v-if="!isWebhookKind" v-slot="{ id }" :label="t('mailbox.tls')">
           <SpSelect :id="id" v-model="draft.tls" :options="tlsOptions" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('mailbox.username')">
+        <SpField v-if="!isWebhookKind" v-slot="{ id }" :label="t('mailbox.username')">
           <SpInput :id="id" v-model="draft.username" autocomplete="off" />
         </SpField>
         <SpField
+          v-if="!isWebhookKind"
           v-slot="{ id, describedBy }"
           :label="t('mailbox.password')"
           :hint="editing.has_password ? t('mailbox.passwordSet') : undefined"
@@ -258,10 +290,10 @@ async function remove(mailbox: ProbeMailbox) {
             :described-by="describedBy"
           />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('mailbox.inboxFolder')">
+        <SpField v-if="!isWebhookKind" v-slot="{ id }" :label="t('mailbox.inboxFolder')">
           <SpInput :id="id" v-model="draft.inbox_folder" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('mailbox.spamFolder')">
+        <SpField v-if="!isWebhookKind" v-slot="{ id }" :label="t('mailbox.spamFolder')">
           <SpInput :id="id" v-model="draft.spam_folder" />
         </SpField>
         <SpField
@@ -284,7 +316,7 @@ async function remove(mailbox: ProbeMailbox) {
             type="submit"
             variant="primary"
             :loading="saving"
-            :disabled="!draft.name || !draft.address || !draft.host"
+            :disabled="!draft.name || !draft.address || (!isWebhookKind && !draft.host)"
           >
             {{ t('common.save') }}
           </SpButton>
@@ -311,8 +343,12 @@ async function remove(mailbox: ProbeMailbox) {
       @next="list.next()"
       @previous="list.previous()"
     >
+      <template #[`cell-kind`]="{ row }">
+        {{ t(`mailbox.kind.${(row as ProbeMailbox).kind ?? 'imap'}`) }}
+      </template>
       <template #[`cell-endpoint`]="{ row }">
-        {{ (row as ProbeMailbox).host }}:{{ (row as ProbeMailbox).port }}
+        <span v-if="(row as ProbeMailbox).kind === 'webhook'">—</span>
+        <span v-else>{{ (row as ProbeMailbox).host }}:{{ (row as ProbeMailbox).port }}</span>
       </template>
       <template #[`cell-authserv`]="{ row }">{{
         (row as ProbeMailbox).authserv_id || '—'

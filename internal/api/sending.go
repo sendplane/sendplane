@@ -567,7 +567,8 @@ func (s *server) CreateProbeMailbox(ctx context.Context, req CreateProbeMailboxR
 	}
 	m := &store.ProbeMailbox{}
 	if err := s.applyMailbox(ctx, m, ProbeMailboxUpdate{
-		Name: req.Body.Name, Address: req.Body.Address, Host: req.Body.Host, Port: req.Body.Port,
+		Name: req.Body.Name, Kind: req.Body.Kind,
+		Address: req.Body.Address, Host: req.Body.Host, Port: req.Body.Port,
 		Tls: req.Body.Tls, Username: req.Body.Username, Password: req.Body.Password,
 		InboxFolder: req.Body.InboxFolder, SpamFolder: req.Body.SpamFolder,
 		AuthservId: req.Body.AuthservId, Enabled: req.Body.Enabled,
@@ -629,11 +630,9 @@ func (s *server) applyMailbox(ctx context.Context, m *store.ProbeMailbox, in Pro
 	if err := requireNonEmpty("name", in.Name); err != nil {
 		return err
 	}
-	if err := requireNonEmpty("host", in.Host); err != nil {
+	kind, err := probeMailboxKindIn(in.Kind)
+	if err != nil {
 		return err
-	}
-	if in.Port <= 0 || in.Port > 65535 {
-		return errInvalid("port must be between 1 and 65535")
 	}
 	addr, err := store.NormalizeEmail(string(in.Address))
 	if err != nil {
@@ -643,27 +642,89 @@ func (s *server) applyMailbox(ctx context.Context, m *store.ProbeMailbox, in Pro
 	if err != nil {
 		return err
 	}
-	pw, err := s.secret(ctx, in.Password, m.Password)
-	if err != nil {
-		return err
-	}
-	m.Name, m.Address, m.Host, m.Port, m.TLS = in.Name, addr, in.Host, int(in.Port), mode
-	m.Username = deref(in.Username)
-	m.Password = pw
-	m.InboxFolder = deref(in.InboxFolder)
-	m.SpamFolder = deref(in.SpamFolder)
-	m.AuthServID = deref(in.AuthservId)
+
+	m.Name, m.Kind, m.Address, m.AuthServID = in.Name, kind, addr, deref(in.AuthservId)
 	m.Enabled = true
 	if in.Enabled != nil {
 		m.Enabled = *in.Enabled
 	}
+
+	if kind == store.ProbeMailboxWebhook {
+		// A webhook mailbox is an address and an authserv-id. Refusing the
+		// IMAP block rather than ignoring it is the point: a row that carries
+		// a host and a password nothing will ever dial is a row an operator
+		// will later read as "the probe logs in here" (ADR-0016).
+		if field := webhookExtraField(in); field != "" {
+			return errInvalid(
+				"%s is not allowed for a webhook probe mailbox: its mail arrives over the "+
+					"provider's inbound webhook, so there is nothing to log in to", field)
+		}
+		m.Host, m.Port, m.TLS = "", 0, ""
+		m.Username, m.Password = "", nil
+		m.InboxFolder, m.SpamFolder = "", ""
+		return nil
+	}
+
+	if in.Host == nil || *in.Host == "" {
+		return errInvalid("host is required")
+	}
+	if in.Port == nil || *in.Port <= 0 || *in.Port > 65535 {
+		return errInvalid("port must be between 1 and 65535")
+	}
+	pw, err := s.secret(ctx, in.Password, m.Password)
+	if err != nil {
+		return err
+	}
+	m.Host, m.Port, m.TLS = *in.Host, int(*in.Port), mode
+	m.Username = deref(in.Username)
+	m.Password = pw
+	m.InboxFolder = deref(in.InboxFolder)
+	m.SpamFolder = deref(in.SpamFolder)
 	return nil
+}
+
+// probeMailboxKindIn validates the kind, defaulting to imap. The spec
+// documents the default in prose rather than with `default:`, so an omitted
+// kind arrives here as nil and not as a value the generator invented.
+func probeMailboxKindIn(k *ProbeMailboxKind) (store.ProbeMailboxKind, error) {
+	if k == nil || *k == "" {
+		return store.ProbeMailboxIMAP, nil
+	}
+	out := store.ProbeMailboxKind(*k)
+	if !out.Valid() {
+		return "", errInvalid("kind %q is not imap or webhook", string(*k))
+	}
+	return out.Normalized(), nil
+}
+
+// webhookExtraField names the first IMAP field a webhook mailbox must not
+// carry, or "".
+func webhookExtraField(in ProbeMailboxUpdate) string {
+	switch {
+	case in.Host != nil && *in.Host != "":
+		return "host"
+	case in.Port != nil && *in.Port != 0:
+		return "port"
+	case in.Tls != nil && *in.Tls != "":
+		return "tls"
+	case in.Username != nil && *in.Username != "":
+		return "username"
+	case in.Password != nil && *in.Password != "":
+		return "password"
+	case in.InboxFolder != nil && *in.InboxFolder != "":
+		return "inbox_folder"
+	case in.SpamFolder != nil && *in.SpamFolder != "":
+		return "spam_folder"
+	}
+	return ""
 }
 
 func mailboxOut(v *store.ProbeMailbox) ProbeMailbox {
 	return ProbeMailbox{
-		Id: uuidPtrOf(v.ID), Name: v.Name, Address: openapiEmail(v.Address),
-		Host: v.Host, Port: clampInt32(v.Port), Tls: tlsModeOut(v.TLS),
+		Id: uuidPtrOf(v.ID), Name: v.Name,
+		Kind:    ptr(ProbeMailboxKind(v.Kind.Normalized())),
+		Address: openapiEmail(v.Address),
+		Host:    v.Host, Port: clampInt32(v.Port), Tls: tlsModeOut(v.TLS),
 		Username: strPtr(v.Username),
 		// The IMAP password is writeOnly (architecture 16).
 		HasPassword: ptr(len(v.Password) > 0),
@@ -708,13 +769,22 @@ func (s *server) GetProbeRun(ctx context.Context, req GetProbeRunRequestObject) 
 	return GetProbeRun200JSONResponse(probeRunOut(r)), nil
 }
 
+// probeFolderOut renders the folder a probe mail was filed in. An empty
+// folder is omitted rather than sent as "", which is not in the enum.
+func probeFolderOut(folder string) *ProbeRunFolder {
+	if folder == "" {
+		return nil
+	}
+	return ptr(ProbeRunFolder(folder))
+}
+
 func probeRunOut(v *store.ProbeRun) ProbeRun {
 	out := ProbeRun{
 		Id: uuidOf(v.ID), SenderId: uuidOf(v.SenderID), MailboxId: uuidOf(v.MailboxID),
 		DeliveryId: uuidPtrOf(v.DeliveryID), GroupId: uuidPtrOf(v.GroupID),
 		Pending: ptr(v.Pending),
 		Status:  healthOut(v.Status), Reason: strPtr(v.Reason),
-		Delivered: ptr(v.Delivered), Folder: strPtr(v.Folder),
+		Delivered: ptr(v.Delivered), Folder: probeFolderOut(v.Folder),
 		Spf: strPtr(v.SPF), Dkim: strPtr(v.DKIM), Dmarc: strPtr(v.DMARC),
 		DkimDomain: strPtr(v.DKIMDomain), DkimSelector: strPtr(v.DKIMSelector),
 		DmarcPolicy: strPtr(v.DMARCPolicy),

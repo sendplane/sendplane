@@ -215,7 +215,10 @@ type runner struct {
 	probeRunID      string
 	probeMailboxID  string
 	probeCollected  bool
-	exp             expectation
+
+	probeHookMailboxID string
+	probeHookRunID     string
+	exp                expectation
 }
 
 func (r *runner) elapsed() time.Duration { return time.Since(r.started).Round(time.Millisecond) }
@@ -339,6 +342,7 @@ func (r *runner) execute(ctx context.Context) error {
 	// Scenario 8 (lease recovery) rides along inside the bulk campaign.
 	r.scenario(ctx, "2. bulk campaign", r.scenarioBulkCampaign)
 	r.scenario(ctx, "6. loopback probe", r.scenarioProbe)
+	r.scenario(ctx, "6b. loopback probe over an inbound webhook", r.scenarioProbeWebhook)
 	r.scenario(ctx, "7. events", r.scenarioEvents)
 	return nil
 }

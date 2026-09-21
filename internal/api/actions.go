@@ -15,9 +15,15 @@ import "github.com/sendplane/sendplane/host"
 // publicOps are the operations whose spec entry clears `security` and declares
 // `x-sendplane-action: none`: the tracking routes a mail client hits and the
 // liveness probe. They skip Authenticate, the tenant resolver and Authorize.
+// ProbeInbound is the one entry the generated strict server never asks about:
+// api/oapi-codegen.yaml excludes the operation and internal/api/probeinbound.go
+// mounts it by hand. It is listed anyway so that the table still describes
+// every operation of the spec, which is what TestEveryOperationHasAnAction
+// checks.
 var publicOps = map[string]bool{
 	"GetServiceHealth":      true,
 	"OneClickUnsubscribe":   true,
+	"ProbeInbound":          true,
 	"TrackClick":            true,
 	"TrackOpen":             true,
 	"TrackUnsubscribeClick": true,

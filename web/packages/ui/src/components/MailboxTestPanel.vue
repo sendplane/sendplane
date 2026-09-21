@@ -19,6 +19,15 @@ const folders = computed(() => Object.entries(props.result?.folders ?? {}))
 const missingFolders = computed(() => folders.value.filter(([, folder]) => folder.exists === false))
 
 const hintKey = computed(() => `mailboxTest.stageHint.${props.result?.stage ?? 'config'}`)
+
+// A webhook-kind mailbox has no IMAP capabilities to list; its `server` field
+// instead names the configured inbound provider (`webhook:<provider>`,
+// internal/api/mailboxtest.go), which reads better as a sentence than as a
+// "capabilities" blob.
+const webhookProvider = computed(() => {
+  const server = props.result?.server
+  return server?.startsWith('webhook:') ? server.slice('webhook:'.length) : undefined
+})
 </script>
 
 <template>
@@ -60,7 +69,10 @@ const hintKey = computed(() => `mailboxTest.stageHint.${props.result?.stage ?? '
       </ul>
     </div>
 
-    <details v-if="result.server" class="sp-mailbox-test__server">
+    <p v-if="webhookProvider" class="sp-mailbox-test__hint">
+      {{ t('mailboxTest.webhookProvider', { name: webhookProvider }) }}
+    </p>
+    <details v-else-if="result.server" class="sp-mailbox-test__server">
       <summary>{{ t('mailboxTest.server') }}</summary>
       <p class="sp-mono">{{ result.server }}</p>
     </details>

@@ -535,6 +535,45 @@ func testProbeMailboxes(t *testing.T, p store.Provider) {
 		label:  func(v *store.ProbeMailbox) string { return v.SpamFolder },
 	})
 
+	// A webhook-kind mailbox has to survive a round trip with its IMAP block
+	// empty, and a row written before Kind existed has to read back as the
+	// empty value rather than as "webhook" (ADR-0016): the kind decides
+	// whether the collector tries to log in at all.
+	t.Run("Kind", func(t *testing.T) {
+		ctx := context.Background()
+		s, _ := fresh(t, p)
+		r := s.ProbeMailboxes()
+
+		hook := &store.ProbeMailbox{
+			Name: "forwarder", Kind: store.ProbeMailboxWebhook,
+			Address: "probe@example.net", AuthServID: "mx.example.net", Enabled: true,
+		}
+		must(t, "Create webhook mailbox", r.Create(ctx, hook))
+		got, err := r.Get(ctx, hook.ID)
+		must(t, "Get webhook mailbox", err)
+		if got.Kind != store.ProbeMailboxWebhook {
+			t.Errorf("kind = %q, want %q", got.Kind, store.ProbeMailboxWebhook)
+		}
+		if got.Host != "" || got.Port != 0 || len(got.Password) != 0 {
+			t.Errorf("webhook mailbox came back with an IMAP block: host=%q port=%d password=%d bytes",
+				got.Host, got.Port, len(got.Password))
+		}
+
+		legacy := &store.ProbeMailbox{
+			Name: "gmail", Address: "probe@gmail.com",
+			Host: "imap.gmail.com", Port: 993, TLS: store.TLSImplicit, Enabled: true,
+		}
+		must(t, "Create legacy mailbox", r.Create(ctx, legacy))
+		got, err = r.Get(ctx, legacy.ID)
+		must(t, "Get legacy mailbox", err)
+		if got.Kind != "" {
+			t.Errorf("kind = %q, want the empty value", got.Kind)
+		}
+		if got.Kind.Normalized() != store.ProbeMailboxIMAP {
+			t.Errorf("empty kind normalizes to %q, want imap", got.Kind.Normalized())
+		}
+	})
+
 	testMailboxHealth(t, p, func(t *testing.T) (mailboxHealthRepo, string) {
 		t.Helper()
 		s, _ := fresh(t, p)

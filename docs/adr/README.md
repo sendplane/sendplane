@@ -22,3 +22,4 @@
 | 0013 | `AllTenants` 루프와 outbox-sweep | accepted |
 | 0014 | 밀리초 타임스탬프 계약 | accepted |
 | 0015 | 메일박스 헬스는 프로브/바운스 결과와 분리 | accepted |
+| 0016 | 프로브 수신 채널: IMAP + 전역 inbound webhook | accepted |

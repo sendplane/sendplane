@@ -42,4 +42,9 @@ const (
 	MailboxStageAuth   = "auth"
 	MailboxStageFolder = "folder"
 	MailboxStageOK     = "ok"
+	// MailboxStageWebhook is the stage of a webhook-kind probe mailbox
+	// (ProbeMailboxWebhook): there is no login to fail, so the only thing that
+	// can be observed is whether the provider is still forwarding probe mail
+	// (ADR-0016).
+	MailboxStageWebhook = "webhook"
 )

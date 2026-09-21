@@ -63,6 +63,27 @@ probe:
   # mailbox_check_interval defaults to 15m (architecture 11.5). Drop it to
   # something like 30s here when you want to watch a mailbox you broke on
   # purpose flip to unhealthy.
+  #
+  # The inbound webhook of ADR-0016, so `make dev` can receive a test delivery
+  # with no setup: POST /probe/inbound/sendplane, signed with this secret.
+  # Committed on purpose for the same reason the keys above are, and for the
+  # same reason never reusable outside local dev - it is the only thing
+  # standing between a caller and a forged probe verdict.
+  #
+  #   BODY='{"from":"a@example.com","to":["probe@example.com"],"headers":{}}'
+  #   T=$(date +%s)
+  #   SIG=$(printf '%s.%s' "$T" "$BODY" \
+  #     | openssl dgst -sha256 -hmac whsec_dev-probe-webhook -hex \
+  #     | sed 's/^.* //')
+  #   curl -sS -X POST localhost:8080/probe/inbound/sendplane \
+  #     -H "Content-Type: application/json" \
+  #     -H "X-Sendplane-Signature: t=$T,v1=$SIG" --data-binary "$BODY"
+  #
+  # See internal/probe/README.md for the full body and what a real forwarder
+  # has to preserve.
+  webhooks:
+    - provider: sendplane
+      secret: whsec_dev-probe-webhook
 
 log:
   level: debug

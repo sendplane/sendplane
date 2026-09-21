@@ -7,10 +7,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sendplane/sendplane/internal/api"
 	"github.com/sendplane/sendplane/internal/dnscheck"
 	"github.com/sendplane/sendplane/internal/mailbox"
 	"github.com/sendplane/sendplane/internal/probe"
+	"github.com/sendplane/sendplane/internal/probe/inbound"
 	"github.com/sendplane/sendplane/store"
+
+	// The inbound webhook formats sendplane ships with. They register
+	// themselves in internal/probe/inbound's registry from init(), and this is
+	// the one place that has to name them: a host configures a webhook by
+	// provider name (host.ProbeWebhook), never by importing anything.
+	_ "github.com/sendplane/sendplane/internal/probe/inbound/sendplanehook"
 )
 
 // The two leader loops of architecture 11.2. Triggering is cheap and rare (a
@@ -44,6 +52,64 @@ func (s *Sendplane) probeRunner() *probe.Runner {
 		})
 	})
 	return s.probe
+}
+
+// probeInboundRoutes resolves the host's configured inbound webhooks
+// (host.ProbeConfig.Webhooks, ADR-0016) against the provider registry. An
+// unknown provider name is an error rather than a route that quietly never
+// fires: the reference binary catches it in config validation, and a library
+// host that builds host.ProbeConfig itself deserves the same answer.
+//
+// With probing disabled it returns nothing: an endpoint that authenticates a
+// provider and then has no runner to complete the run would accept probe mail
+// and lose it.
+func (s *Sendplane) probeInboundRoutes() ([]api.ProbeInboundRoute, error) {
+	if len(s.opts.Probe.Webhooks) == 0 || s.probeRunner() == nil {
+		return nil, nil
+	}
+	out := make([]api.ProbeInboundRoute, 0, len(s.opts.Probe.Webhooks))
+	seen := map[string]bool{}
+	for _, w := range s.opts.Probe.Webhooks {
+		p, ok := inbound.Lookup(w.Provider)
+		if !ok {
+			return nil, fmt.Errorf("sendplane: probe webhook provider %q is unknown (have: %s)",
+				w.Provider, strings.Join(inbound.Names(), ", "))
+		}
+		secrets := make([]string, 0, len(w.Secrets))
+		for _, sec := range w.Secrets {
+			if sec != "" {
+				secrets = append(secrets, sec)
+			}
+		}
+		if len(secrets) == 0 {
+			return nil, fmt.Errorf("sendplane: probe webhook %q needs a secret: an unsigned "+
+				"inbound endpoint lets anybody complete anybody's probe run", w.Provider)
+		}
+		if w.Tolerance != 0 {
+			// Only a provider whose signature carries a timestamp has
+			// anything to tolerate. Refusing rather than ignoring keeps the
+			// setting honest: an operator who set it believes it applies.
+			ts, ok := p.(inbound.ToleranceSetter)
+			if !ok {
+				return nil, fmt.Errorf("sendplane: probe webhook %q has no timestamp in its "+
+					"signature, so a tolerance means nothing to it", w.Provider)
+			}
+			if w.Tolerance < 0 {
+				return nil, fmt.Errorf("sendplane: probe webhook %q has a negative tolerance", w.Provider)
+			}
+			p = ts.WithTolerance(w.Tolerance)
+		}
+		path := w.Path
+		if path == "" {
+			path = inbound.DefaultPath(p.Name())
+		}
+		if seen[path] {
+			return nil, fmt.Errorf("sendplane: probe webhook path %q is configured twice", path)
+		}
+		seen[path] = true
+		out = append(out, api.ProbeInboundRoute{Path: path, Provider: p, Secrets: secrets})
+	}
+	return out, nil
 }
 
 // dnsChecker builds the diagnostic layer (architecture 11.3). A resolver that

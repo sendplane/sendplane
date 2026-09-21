@@ -273,6 +273,7 @@ func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
 type probeMailboxDoc struct {
 	Base        `bson:",inline"`
 	Name        string    `bson:"name"`
+	Kind        string    `bson:"kind"`
 	Address     string    `bson:"address"`
 	Host        string    `bson:"host"`
 	Port        int32     `bson:"port"`
@@ -298,7 +299,8 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 			return &probeMailboxDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
-				Name: v.Name, Address: v.Address, Host: v.Host, Port: i32(v.Port),
+				Name: v.Name, Kind: string(v.Kind),
+				Address: v.Address, Host: v.Host, Port: i32(v.Port),
 				TLS: string(v.TLS), Username: v.Username, Password: v.Password,
 				InboxFolder: v.InboxFolder, SpamFolder: v.SpamFolder,
 				AuthServID: v.AuthServID, Enabled: v.Enabled,
@@ -307,7 +309,8 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 		},
 		dec: func(d *probeMailboxDoc) *store.ProbeMailbox {
 			return &store.ProbeMailbox{
-				ID: d.ID, TenantID: d.TenantID, Name: d.Name, Address: d.Address,
+				ID: d.ID, TenantID: d.TenantID, Name: d.Name,
+				Kind: store.ProbeMailboxKind(d.Kind), Address: d.Address,
 				Host: d.Host, Port: int(d.Port), TLS: store.TLSMode(d.TLS),
 				Username: d.Username, Password: d.Password,
 				InboxFolder: d.InboxFolder, SpamFolder: d.SpamFolder,

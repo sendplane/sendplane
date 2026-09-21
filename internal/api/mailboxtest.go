@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/mailbox"
@@ -46,12 +47,16 @@ func (s *server) TestProbeMailboxCredentials(ctx context.Context, req TestProbeM
 	// a mailbox that passes the test is one that can be saved.
 	m := &store.ProbeMailbox{}
 	if err := s.applyMailbox(ctx, m, ProbeMailboxUpdate{
-		Name: req.Body.Name, Address: req.Body.Address, Host: req.Body.Host, Port: req.Body.Port,
+		Name: req.Body.Name, Kind: req.Body.Kind,
+		Address: req.Body.Address, Host: req.Body.Host, Port: req.Body.Port,
 		Tls: req.Body.Tls, Username: req.Body.Username, Password: req.Body.Password,
 		InboxFolder: req.Body.InboxFolder, SpamFolder: req.Body.SpamFolder,
 		AuthservId: req.Body.AuthservId, Enabled: req.Body.Enabled,
 	}); err != nil {
 		return nil, err
+	}
+	if m.Kind.Normalized() == store.ProbeMailboxWebhook {
+		return TestProbeMailboxCredentials200JSONResponse(s.webhookMailboxTestOut()), nil
 	}
 	res := s.deps.MailboxTester.Test(ctx, probeMailboxConfig(m))
 	return TestProbeMailboxCredentials200JSONResponse(mailboxTestOut(res)), nil
@@ -66,6 +71,12 @@ func (s *server) TestProbeMailbox(ctx context.Context, req TestProbeMailboxReque
 	if err != nil {
 		return nil, err
 	}
+	if m.Kind.Normalized() == store.ProbeMailboxWebhook {
+		// Nothing is dialled and nothing is recorded: the health of a webhook
+		// mailbox is written by probe mail arriving (or not), and a test that
+		// wrote a badge here would report on a channel it never exercised.
+		return TestProbeMailbox200JSONResponse(s.webhookMailboxTestOut()), nil
+	}
 	cfg := probeMailboxConfig(m)
 	override, err := s.overridePassword(ctx, &cfg, passwordOf(req.Body))
 	if err != nil {
@@ -78,6 +89,30 @@ func (s *server) TestProbeMailbox(ctx context.Context, req TestProbeMailboxReque
 			mbhealth.Mailbox{ID: m.ID, Name: m.Name, Health: m.Health}, res)
 	}
 	return TestProbeMailbox200JSONResponse(mailboxTestOut(res)), nil
+}
+
+// webhookMailboxTestOut is what "test this mailbox" means for a webhook-kind
+// probe mailbox (ADR-0016). There are no credentials to try, so the only thing
+// that can be answered is whether this deployment has an inbound endpoint the
+// provider could post to at all — which is exactly the misconfiguration an
+// operator hits first, and which is otherwise invisible until a probe times
+// out fifteen minutes later.
+func (s *server) webhookMailboxTestOut() MailboxTestResult {
+	out := MailboxTestResult{Folders: map[string]MailboxTestFolder{}}
+	if len(s.deps.ProbeInbound) == 0 {
+		out.Ok = false
+		out.Stage = MailboxStageConfig
+		out.Error = ptr("webhook mailboxes are verified by the provider webhook, not by login")
+		return out
+	}
+	names := make([]string, 0, len(s.deps.ProbeInbound))
+	for _, route := range s.deps.ProbeInbound {
+		names = append(names, route.Provider.Name())
+	}
+	out.Ok = true
+	out.Stage = MailboxStageOk
+	out.Server = ptr("webhook:" + strings.Join(names, ","))
+	return out
 }
 
 // probeMailboxConfig is the mailbox.Config the probe collector dials this row

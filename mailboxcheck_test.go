@@ -201,3 +201,34 @@ func TestMailboxCheckContinuesAfterFailure(t *testing.T) {
 		t.Fatalf("%d checks, want 3", got)
 	}
 }
+
+// A webhook-kind probe mailbox has no credentials and no server to reach, so
+// the loop must not try: its health comes from probe mail arriving, or failing
+// to (ADR-0016).
+func TestMailboxCheckSkipsWebhookProbeMailboxes(t *testing.T) {
+	ctx := context.Background()
+	ts := &scriptedTester{fallbak: okTest()}
+	st, loop := newCheckEnv(t, ts)
+
+	hook := &store.ProbeMailbox{
+		Name: "forwarder", Kind: store.ProbeMailboxWebhook,
+		Address: "probe@example.net", AuthServID: "mx.example.net", Enabled: true,
+	}
+	if err := st.ProbeMailboxes().Create(ctx, hook); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.Tick(ctx, checkNow); err != nil {
+		t.Fatal(err)
+	}
+	if calls := ts.seen(); len(calls) != 0 {
+		t.Fatalf("the loop dialled a webhook mailbox: %+v", calls)
+	}
+	got, err := st.ProbeMailboxes().Get(ctx, hook.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Health.Status != store.MailboxUnknown {
+		t.Fatalf("health = %s (%s), want it untouched: the loop cannot observe this kind",
+			got.Health.Status, got.Health.Reason)
+	}
+}

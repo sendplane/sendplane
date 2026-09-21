@@ -267,26 +267,27 @@ func (r *bounceMailboxRepo) UpdateHealth(ctx context.Context, id string, h store
 var mailboxSpec = spec[store.ProbeMailbox]{
 	table: "probe_mailbox",
 	cols: append([]string{
-		"name", "address", "host", "port", "tls", "username", "password",
+		"name", "kind", "address", "host", "port", "tls", "username", "password",
 		"inbox_folder", "spam_folder", "authserv_id", "enabled",
 	}, healthColumns...),
 	args: func(v *store.ProbeMailbox) ([]any, error) {
 		return append([]any{
-			v.Name, v.Address, v.Host, v.Port, string(v.TLS), v.Username,
+			v.Name, string(v.Kind), v.Address, v.Host, v.Port, string(v.TLS), v.Username,
 			v.Password, v.InboxFolder, v.SpamFolder, v.AuthServID, v.Enabled,
 		}, healthArgs(v.Health)...), nil
 	},
 	scan: func(r rowScanner) (*store.ProbeMailbox, error) {
 		var v store.ProbeMailbox
-		var tls string
+		var kind, tls string
 		var h healthCols
-		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Address, &v.Host,
+		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &kind, &v.Address, &v.Host,
 			&v.Port, &tls, &v.Username, &v.Password, &v.InboxFolder,
 			&v.SpamFolder, &v.AuthServID, &v.Enabled,
 			&h.status, &h.stage, &h.reason, &h.checkedAt, &h.lastOKAt, &h.failures,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
+		v.Kind = store.ProbeMailboxKind(kind)
 		v.TLS = store.TLSMode(tls)
 		v.Health = h.health()
 		v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()

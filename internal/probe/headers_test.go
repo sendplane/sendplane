@@ -285,8 +285,12 @@ func TestObserveFixtures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := fixture(t, tc.file)
-			msg := &RawMessage{Folder: tc.folder, ReceivedAt: time.Date(2026, 9, 21, 10, 20, 0, 0, time.UTC)}
-			obs := Observe(h, &tc.box, msg, time.Now())
+			obs := Observe(Evidence{
+				Mailbox:    &tc.box,
+				Headers:    h,
+				Folder:     tc.folder,
+				ReceivedAt: time.Date(2026, 9, 21, 10, 20, 0, 0, time.UTC),
+			}, time.Now())
 
 			if !obs.TrustedAR {
 				t.Fatalf("no trusted Authentication-Results")

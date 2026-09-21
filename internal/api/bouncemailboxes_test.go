@@ -24,7 +24,7 @@ func TestBounceMailboxCRUD(t *testing.T) {
 	if created.Id == nil {
 		t.Fatal("create returned no id")
 	}
-	if created.Protocol == nil || *created.Protocol != Imap {
+	if created.Protocol == nil || *created.Protocol != MailboxProtocolImap {
 		t.Errorf("protocol = %v, want the imap default", created.Protocol)
 	}
 	if created.HasPassword == nil || !*created.HasPassword {
@@ -110,7 +110,7 @@ func TestBounceMailboxValidation(t *testing.T) {
 			Name: "b", Host: "h", Port: 993, AfterProcess: ptr("archive"),
 		}},
 		{"move on pop3", BounceMailboxInput{
-			Name: "b", Host: "h", Port: 995, Protocol: ptr(Pop3),
+			Name: "b", Host: "h", Port: 995, Protocol: ptr(MailboxProtocolPop3),
 			AfterProcess: ptr("move:Handled"),
 		}},
 		{"move with no folder", BounceMailboxInput{

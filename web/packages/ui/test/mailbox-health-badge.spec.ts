@@ -46,6 +46,17 @@ describe('MailboxHealthBadge', () => {
     expect(wrapper.find('.sp-badge').attributes('title')).toBe('auth: invalid credentials')
   })
 
+  it('renders the webhook stage and reason for a webhook-kind mailbox that timed out', () => {
+    const wrapper = mountBadge({
+      status: 'error',
+      stage: 'webhook',
+      reason: 'no webhook received within timeout',
+    })
+    expect(wrapper.find('.sp-badge').classes()).toContain('sp-badge--danger')
+    expect(wrapper.text()).toContain('webhook')
+    expect(wrapper.text()).toContain('no webhook received within timeout')
+  })
+
   it('renders an em dash badge when there is no health yet', () => {
     const wrapper = mountBadge(undefined)
     expect(wrapper.find('.sp-badge').classes()).toContain('sp-badge--neutral')

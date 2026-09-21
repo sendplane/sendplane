@@ -1335,6 +1335,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/probe/inbound/{provider}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delivered probe mail from an inbound webhook provider
+         * @description Completes a pending `ProbeRun` from a message that was forwarded here
+         *     after delivery, for probe mailboxes of `kind: webhook` (ADR-0016).
+         *
+         *     The route is **mounted only for the providers the deployment
+         *     configured** (`probe.webhooks` in the host config), and `{provider}`
+         *     is that provider's name. A deployment may move a provider to a path of
+         *     its own, so treat this as the default rather than as a fixed URL. An
+         *     unconfigured provider answers `404`.
+         *
+         *     The format sendplane defines and registers by default is `sendplane`:
+         *     body `SendplaneInboundMessage`, authenticated with
+         *     `X-Sendplane-Signature`. Any other provider is that provider's own
+         *     body and its own signature header — the schema below does not apply to
+         *     it, and the payload is passed through verbatim.
+         *
+         *     `X-Sendplane-Signature: t=<unix seconds>,v1=<hex>[,v1=<hex>...]`,
+         *     where each `v1` is `HMAC-SHA256(secret, "<t>" + "." + <raw body>)`,
+         *     hex. Any `v1` matching any configured secret is accepted, which is how
+         *     a secret is rotated without a window where deliveries are refused, and
+         *     a `t` more than the configured tolerance (default 300s) from the
+         *     server's clock is refused as a replay. The signature covers the raw
+         *     bytes, so it is checked before the body is parsed.
+         *
+         *     Whatever forwards the mail **must preserve the
+         *     `Authentication-Results`, `Received` and `X-Sendplane-Probe`
+         *     headers**: the first two are the whole evidence a verdict is made of,
+         *     and the third is what attributes the delivery to a tenant.
+         *
+         *     Redelivery is safe. A run that is already finished is a no-op, and so
+         *     is a byte-identical body that was already handled.
+         */
+        post: operations["probeInbound"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/t/c/{token}": {
         parameters: {
             query?: never;
@@ -1985,9 +2034,13 @@ export interface components {
          *     unusable row, a password that would not decrypt), and the rest are the
          *     steps in order. The stage is what separates "the server is down" from
          *     "the password is wrong".
+         *
+         *     `webhook` belongs to a probe mailbox of `kind: webhook`, which has no
+         *     login to check: the only observation there is whether probe mail is
+         *     still being forwarded (ADR-0016).
          * @enum {string}
          */
-        MailboxStage: "config" | "dial" | "tls" | "auth" | "folder" | "ok";
+        MailboxStage: "config" | "dial" | "tls" | "auth" | "folder" | "ok" | "webhook";
         /**
          * @description Whether sendplane can still reach a mailbox account. It is deliberately
          *     not the green/yellow/red `HealthStatus` a probe verdict uses: a login
@@ -2231,9 +2284,11 @@ export interface components {
             warnings?: string[];
         };
         /**
-         * @description IMAP account a loopback probe mail is recovered from. Registering several
-         *     (Gmail, Outlook, an own MTA) is recommended: the verdict depends on the
-         *     headers the receiving MTA adds (ADR-0012).
+         * @description Mailbox a loopback probe mail is recovered from, over IMAP or over an
+         *     inbound webhook (`kind`). Registering several (Gmail, Outlook, an own
+         *     MTA) is recommended: the verdict depends on the headers the receiving
+         *     MTA adds (ADR-0012). `host` and `port` are reported as `""`/`0` for a
+         *     webhook-kind mailbox, which has neither.
          */
         ProbeMailbox: {
             /**
@@ -2255,6 +2310,7 @@ export interface components {
             /** Format: uuid */
             readonly id: string;
             inbox_folder?: string;
+            kind?: components["schemas"]["ProbeMailboxKind"];
             name: string;
             /** Format: int32 */
             port: number;
@@ -2266,24 +2322,43 @@ export interface components {
             /** Format: int64 */
             readonly version: number;
         };
+        /**
+         * @description `host` and `port` are required for `kind: imap` (the default) and must
+         *     be absent for `kind: webhook`, along with the rest of the IMAP block;
+         *     sending them anyway is a `422`.
+         */
         ProbeMailboxInput: {
             /** Format: email */
             address: string;
             authserv_id?: string;
             /** @description Omitted means `true`; a disabled mailbox takes no part in probe runs. */
             enabled?: boolean;
-            host: string;
+            host?: string;
             /** @description IMAP mailbox the probe mail is expected in; empty or omitted means `INBOX`. */
             inbox_folder?: string;
+            kind?: components["schemas"]["ProbeMailboxKind"];
             name: string;
             /** @description Encrypted at rest. Omit on update to keep the stored one. */
             password?: string;
             /** Format: int32 */
-            port: number;
+            port?: number;
             spam_folder?: string;
             tls?: components["schemas"]["TLSMode"];
             username?: string;
         };
+        /**
+         * @description How a probe mail gets back to sendplane. `imap` is an account sendplane
+         *     polls and is the only kind that can tell the inbox from the spam
+         *     folder. `webhook` is an address whose delivered mail is posted to
+         *     sendplane's global inbound endpoint (ADR-0016); such a mailbox has
+         *     no host, port or credentials, and its `folder` on a run is `unknown`,
+         *     which does not downgrade the verdict.
+         *
+         *     Omitted means `imap`, which is also what rows written before this field
+         *     existed read back as.
+         * @enum {string}
+         */
+        ProbeMailboxKind: "imap" | "webhook";
         ProbeMailboxList: components["schemas"]["PageInfo"] & {
             items: components["schemas"]["ProbeMailbox"][];
         };
@@ -2312,8 +2387,12 @@ export interface components {
             dns?: {
                 [key: string]: unknown;
             };
-            /** @description Where the mail landed: `inbox` or `spam`. */
-            folder?: string;
+            /**
+             * @description Where the mail landed: `inbox`, `spam`, `other`, or `unknown` for a
+             *     webhook-kind mailbox, where nothing reports a folder.
+             * @enum {string}
+             */
+            folder?: "inbox" | "spam" | "other" | "unknown";
             /**
              * Format: uuid
              * @description Ties together the runs one trigger created, one per probe mailbox.
@@ -2580,6 +2659,59 @@ export interface components {
         };
         /** @description Sending domain replacement carrying the read version. */
         SendingDomainUpdate: components["schemas"]["SendingDomainInput"] & components["schemas"]["VersionRequired"];
+        /**
+         * @description The body of the `sendplane` inbound webhook format (ADR-0016) — the
+         *     smallest payload that carries what a probe verdict reads. Anything that
+         *     can POST JSON can produce it: a mail-receiving service's webhook, an
+         *     email worker, a script on an MX.
+         *
+         *     Only `from` and `headers` decide anything. Unknown fields are ignored,
+         *     so the format can grow; a body over 1 MiB is refused.
+         * @example {
+         *       "from": "news@example.com",
+         *       "to": [
+         *         "probe@example.net"
+         *       ],
+         *       "headers": {
+         *         "Authentication-Results": [
+         *           "mx.example.net; spf=pass; dkim=pass header.d=example.com; dmarc=pass"
+         *         ],
+         *         "Received": [
+         *           "from mx.example.net by inbox.example.net; Tue, 22 Sep 2026 12:00:30 +0000"
+         *         ],
+         *         "X-Sendplane-Probe": [
+         *           "acme/01JB.../9f2c..."
+         *         ]
+         *       },
+         *       "text": "sendplane loopback health probe.\r\n"
+         *     }
+         */
+        SendplaneInboundMessage: {
+            /**
+             * @description Envelope sender. Required - a delivery without one is not a mail.
+             * @example news@example.com
+             */
+            from: string;
+            /**
+             * @description The message's header block, `{"Header-Name": ["value", ...]}`. Names
+             *     are matched case-insensitively; the **order of the values within one
+             *     name** is the contract, because the `Received` chain is read
+             *     bottom-up and the *first* `Authentication-Results` is a trust
+             *     decision.
+             *
+             *     `Authentication-Results`, `Received` and `X-Sendplane-Probe` must
+             *     all survive the forward. Without the first two there is no evidence
+             *     to judge; without the third the delivery cannot be attributed to a
+             *     tenant and is answered `200 ignored`.
+             */
+            headers?: {
+                [key: string]: string[];
+            };
+            /** @description Plain-text body. Optional; the verdict is made of headers. */
+            text?: string;
+            /** @description Envelope recipients. Recorded, not read by the verdict. */
+            to?: string[];
+        };
         ServiceHealth: {
             /** @enum {string} */
             status: "ok" | "degraded";
@@ -3143,6 +3275,7 @@ export type SchemaPreviewRequest = components['schemas']['PreviewRequest'];
 export type SchemaPreviewResult = components['schemas']['PreviewResult'];
 export type SchemaProbeMailbox = components['schemas']['ProbeMailbox'];
 export type SchemaProbeMailboxInput = components['schemas']['ProbeMailboxInput'];
+export type SchemaProbeMailboxKind = components['schemas']['ProbeMailboxKind'];
 export type SchemaProbeMailboxList = components['schemas']['ProbeMailboxList'];
 export type SchemaProbeMailboxUpdate = components['schemas']['ProbeMailboxUpdate'];
 export type SchemaProbeRun = components['schemas']['ProbeRun'];
@@ -3164,6 +3297,7 @@ export type SchemaSendingDomain = components['schemas']['SendingDomain'];
 export type SchemaSendingDomainInput = components['schemas']['SendingDomainInput'];
 export type SchemaSendingDomainList = components['schemas']['SendingDomainList'];
 export type SchemaSendingDomainUpdate = components['schemas']['SendingDomainUpdate'];
+export type SchemaSendplaneInboundMessage = components['schemas']['SendplaneInboundMessage'];
 export type SchemaServiceHealth = components['schemas']['ServiceHealth'];
 export type SchemaSigningKeyInfo = components['schemas']['SigningKeyInfo'];
 export type SchemaStartCampaignRequest = components['schemas']['StartCampaignRequest'];
@@ -5753,6 +5887,88 @@ export interface operations {
                 };
             };
             500: components["responses"]["InternalError"];
+        };
+    };
+    probeInbound: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registered inbound provider name. */
+                provider: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * @description For the `sendplane` provider, a `SendplaneInboundMessage`. For any
+         *     other provider, that provider's own payload, verbatim. Either way
+         *     the raw bytes are what the signature covers.
+         */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendplaneInboundMessage"];
+            };
+        };
+        responses: {
+            /**
+             * @description Recorded, already recorded, or not a sendplane probe. The body is a
+             *     one-word outcome (`accepted`, `ignored`) for a human reading logs.
+             *     "Not ours" is a `200` on purpose: a `4xx` would make a sender retry
+             *     forever a message sendplane will never want.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /**
+             * @description The signature verified but the body is not the provider's format.
+             *     Retrying the same bytes cannot help, so this is not a deferral.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description The signature is missing, malformed, made with an unknown secret,
+             *     or carries a timestamp outside the tolerance.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No inbound webhook is configured for this provider. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The body is over the 1 MiB inbound cap. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            429: components["responses"]["TooManyRequests"];
+            /**
+             * @description Could not be recorded now; the sender should hold the mail and
+             *     retry. `Retry-After` says when.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     trackClick: {

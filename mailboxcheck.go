@@ -168,7 +168,10 @@ func (l mailboxCheck) probeMailboxes(ctx context.Context) ([]store.ProbeMailbox,
 			return nil, err
 		}
 		for _, m := range res.Items {
-			if m.Enabled {
+			// A webhook mailbox has no credentials and no server to reach, so
+			// there is nothing here to check: its health is written by probe
+			// mail arriving, or failing to (ADR-0016).
+			if m.Enabled && m.Kind.Normalized() != store.ProbeMailboxWebhook {
 				out = append(out, m)
 			}
 		}

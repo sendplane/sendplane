@@ -463,6 +463,34 @@ type probeRun struct {
 	ReceivedAt *time.Time `json:"received_at"`
 }
 
+type probeRunList struct {
+	Items []probeRun `json:"items"`
+}
+
+// probeMailbox is the subset scenario 6b asserts on.
+type probeMailbox struct {
+	ID     string         `json:"id"`
+	Name   string         `json:"name"`
+	Kind   string         `json:"kind"`
+	Host   string         `json:"host"`
+	Port   int32          `json:"port"`
+	Health *mailboxHealth `json:"health"`
+}
+
+type mailboxHealth struct {
+	Status string `json:"status"`
+	Stage  string `json:"stage"`
+	Reason string `json:"reason"`
+}
+
+// mailboxTestResult mirrors the MailboxTestResult schema.
+type mailboxTestResult struct {
+	OK     bool   `json:"ok"`
+	Stage  string `json:"stage"`
+	Error  string `json:"error"`
+	Server string `json:"server"`
+}
+
 type probeTriggerResult struct {
 	Runs []struct {
 		RunID      string `json:"run_id"`

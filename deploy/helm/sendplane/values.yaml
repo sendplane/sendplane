@@ -146,6 +146,19 @@ config:
     lease_for: 5m
     ehlo_name: ""
     default_rate_per_second: 0
+  # Loopback sending health check (docs/architecture.md 11). Off unless
+  # hmac_key is set; see cmd/sendplane/config.example.yaml for every field.
+  # probe:
+  #   enabled: true
+  #   hmac_key: ${SENDPLANE_PROBE_HMAC_KEY}
+  #   # Inbound webhooks (ADR-0016): whatever receives the probe mail posts
+  #   # it to https://<control>/probe/inbound/sendplane instead of sendplane
+  #   # polling IMAP. Global, one endpoint for every tenant. Point an Ingress
+  #   # path at it.
+  #   webhooks:
+  #     - provider: sendplane
+  #       secrets:
+  #         - ${SENDPLANE_PROBE_WEBHOOK_SECRET}
   limits: {}
   log:
     level: info
@@ -162,3 +175,9 @@ secrets:
   storeDSN: ""
   secretsKey: ""
   webhookSecret: ""
+  # Only rendered into the Secret when set, so a deployment that does not probe
+  # carries no empty keys. Referenced from config above as
+  # ${SENDPLANE_PROBE_HMAC_KEY} and ${SENDPLANE_PROBE_WEBHOOK_SECRET}
+  # (ADR-0016).
+  probeHMACKey: ""
+  probeWebhookSecret: ""

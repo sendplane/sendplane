@@ -6,13 +6,54 @@ import (
 	"time"
 )
 
-// ProbeMailbox is an IMAP account a loopback probe mail is recovered from.
-// Registering several (Gmail, Outlook, own MTA) is recommended: the verdict
-// depends on the headers the receiving MTA adds (ADR-0012).
+// ProbeMailboxKind is how a probe mail gets back to sendplane (ADR-0016).
+//
+// The empty value means ProbeMailboxIMAP: the kind was added after the model
+// shipped, and every row that predates it is an IMAP account.
+type ProbeMailboxKind string
+
+const (
+	// ProbeMailboxIMAP is an account the probe collector logs in to and
+	// searches. It is the only kind that can tell inbox from spam.
+	ProbeMailboxIMAP ProbeMailboxKind = "imap"
+	// ProbeMailboxWebhook is an address whose provider posts the delivered
+	// mail to sendplane's global inbound endpoint. Only Address, AuthServID,
+	// Enabled and Health are meaningful; there is nothing to log in to.
+	ProbeMailboxWebhook ProbeMailboxKind = "webhook"
+)
+
+// Normalized resolves the empty value to imap.
+func (k ProbeMailboxKind) Normalized() ProbeMailboxKind {
+	if k == "" {
+		return ProbeMailboxIMAP
+	}
+	return k
+}
+
+// Valid reports whether k is a kind this version knows.
+func (k ProbeMailboxKind) Valid() bool {
+	switch k.Normalized() {
+	case ProbeMailboxIMAP, ProbeMailboxWebhook:
+		return true
+	}
+	return false
+}
+
+func (k ProbeMailboxKind) String() string { return string(k.Normalized()) }
+
+// ProbeMailbox is a mailbox a loopback probe mail is recovered from, either by
+// polling it over IMAP or by the provider posting it to sendplane's inbound
+// webhook (Kind). Registering several (Gmail, Outlook, own MTA) is
+// recommended: the verdict depends on the headers the receiving MTA adds
+// (ADR-0012).
 type ProbeMailbox struct {
 	ID       string
 	TenantID string
 	Name     string
+
+	// Kind is imap (the default and the zero value) or webhook. For a webhook
+	// mailbox the IMAP block below is unused and rejected on write.
+	Kind ProbeMailboxKind
 
 	// Address is where probe mail is sent.
 	Address string

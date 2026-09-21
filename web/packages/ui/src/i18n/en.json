@@ -383,7 +383,13 @@
     "authservHint": "Only Authentication-Results headers with this authserv-id are trusted (RFC 8601).",
     "enabled": "Enabled",
     "hint": "Register several mailboxes on the providers you actually send to: the verdict depends on the headers the receiving MTA adds.",
-    "health": "Health"
+    "health": "Health",
+    "kind": {
+      "label": "Kind",
+      "imap": "IMAP",
+      "webhook": "Webhook"
+    },
+    "webhookHint": "This address must forward to sendplane's inbound webhook (POST /probe/inbound/PROVIDER) with the Authentication-Results, Received, and X-Sendplane-Probe headers preserved."
   },
   "bounceMailbox": {
     "title": "Bounce mailboxes",
@@ -428,7 +434,8 @@
     "unsavedPasswordHint": "Tests the password typed above; it is not saved by this test.",
     "healthCheckedAt": "Last checked",
     "healthOkAt": "Last OK",
-    "healthFailures": "Consecutive failures"
+    "healthFailures": "Consecutive failures",
+    "webhookProvider": "Inbound webhook provider: {name}"
   },
   "suppression": {
     "title": "Suppressions",
