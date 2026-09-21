@@ -145,6 +145,13 @@ export const routes: readonly SendplaneRoute[] = [
     navKey: 'nav.probeMailboxes',
   },
   {
+    name: 'bounce-mailboxes',
+    path: '/bounce-mailboxes',
+    page: () => import('./pages/BounceMailboxListPage.vue'),
+    params: [],
+    navKey: 'nav.bounceMailboxes',
+  },
+  {
     name: 'suppressions',
     path: '/suppressions',
     page: () => import('./pages/SuppressionListPage.vue'),

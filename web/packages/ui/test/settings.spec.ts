@@ -40,6 +40,8 @@ const ALL_EVENT_TYPES = [
   'transport.unhealthy',
   'transport.recovered',
   'sender.health_changed',
+  'mailbox.unhealthy',
+  'mailbox.recovered',
   'recipient.unsubscribed',
   'delivery.opened',
   'delivery.clicked',
@@ -156,6 +158,18 @@ describe('SettingsPage', () => {
         }),
       }),
     )
+  })
+
+  it('offers the mailbox health event types, on by default', async () => {
+    const { wrapper } = build({ event_types: [] })
+    await flush()
+
+    expect(
+      (checkboxByLabel(wrapper, 'mailbox.unhealthy').element as HTMLInputElement).checked,
+    ).toBe(true)
+    expect(
+      (checkboxByLabel(wrapper, 'mailbox.recovered').element as HTMLInputElement).checked,
+    ).toBe(true)
   })
 
   it('reset to default clears the array', async () => {

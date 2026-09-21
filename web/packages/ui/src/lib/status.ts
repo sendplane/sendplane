@@ -8,12 +8,23 @@ import type {
   TransportStatus,
 } from '@sendplane/api'
 
+import type { components } from '@sendplane/api'
+
+type MailboxStatus = components['schemas']['MailboxStatus']
+
 /** The visual families the badge paints; everything else maps onto these. */
 export type Tone = 'neutral' | 'info' | 'ok' | 'warn' | 'danger'
 
 /** Which vocabulary a status value belongs to. */
 export type StatusKind =
-  'delivery' | 'campaign' | 'transport' | 'health' | 'outbox' | 'bounce' | 'errorClass'
+  | 'delivery'
+  | 'campaign'
+  | 'transport'
+  | 'health'
+  | 'outbox'
+  | 'bounce'
+  | 'errorClass'
+  | 'mailbox'
 
 const DELIVERY: Record<DeliveryStatus, Tone> = {
   pending: 'neutral',
@@ -72,6 +83,14 @@ const ERROR_CLASS: Record<ErrorClass, Tone> = {
   auth: 'danger',
 }
 
+// Deliberately not the green/yellow/red `HEALTH` table above: a mailbox login
+// either works or it does not (ADR-0015, `MailboxStatus`'s own description).
+const MAILBOX: Record<MailboxStatus, Tone> = {
+  unknown: 'neutral',
+  ok: 'ok',
+  error: 'danger',
+}
+
 const TABLES: Record<StatusKind, Record<string, Tone>> = {
   delivery: DELIVERY,
   campaign: CAMPAIGN,
@@ -80,6 +99,7 @@ const TABLES: Record<StatusKind, Record<string, Tone>> = {
   outbox: OUTBOX,
   bounce: BOUNCE,
   errorClass: ERROR_CLASS,
+  mailbox: MAILBOX,
 }
 
 export function toneFor(kind: StatusKind, value: string | undefined): Tone {

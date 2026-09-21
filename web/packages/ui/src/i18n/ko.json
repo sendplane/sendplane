@@ -59,6 +59,7 @@
     "senders": "발신자",
     "sendingDomains": "발신 도메인",
     "probeMailboxes": "프로브 메일박스",
+    "bounceMailboxes": "바운스 메일박스",
     "suppressions": "수신 차단",
     "events": "이벤트",
     "settings": "설정"
@@ -117,6 +118,11 @@
       "permanent": "영구",
       "policy": "정책",
       "auth": "인증"
+    },
+    "mailbox": {
+      "unknown": "미확인",
+      "ok": "정상",
+      "error": "오류"
     }
   },
   "campaign": {
@@ -376,7 +382,53 @@
     "authservId": "authserv-id",
     "authservHint": "이 authserv-id가 붙은 Authentication-Results 헤더만 신뢰합니다(RFC 8601).",
     "enabled": "활성",
-    "hint": "실제로 발송하는 프로바이더마다 메일박스를 등록하세요. 판정은 수신 측 MTA가 붙이는 헤더에 의존합니다."
+    "hint": "실제로 발송하는 프로바이더마다 메일박스를 등록하세요. 판정은 수신 측 MTA가 붙이는 헤더에 의존합니다.",
+    "health": "상태 확인"
+  },
+  "bounceMailbox": {
+    "title": "바운스 메일박스",
+    "one": "바운스 메일박스",
+    "new": "새 바운스 메일박스",
+    "address": "메일박스 주소",
+    "protocol": "프로토콜",
+    "host": "호스트",
+    "port": "포트",
+    "tls": "TLS",
+    "username": "사용자명",
+    "password": "비밀번호",
+    "passwordSet": "비밀번호가 저장되어 있습니다. 비워 두면 유지됩니다.",
+    "folder": "폴더",
+    "folderHint": "읽을 IMAP 메일함입니다. 비우면 INBOX이며, POP3에서는 무시됩니다.",
+    "afterProcess": "처리 후 동작",
+    "afterProcessHint": "keep, delete, move:FOLDER (IMAP 전용) 중 하나입니다. 비우면 keep입니다.",
+    "enabled": "활성",
+    "health": "상태 확인",
+    "hint": "메일박스마다 클러스터 전체에서 폴러가 하나만 실행됩니다. 비활성화하면 건너뜁니다."
+  },
+  "mailboxTest": {
+    "run": "테스트",
+    "testing": "테스트 중…",
+    "retest": "지금 테스트",
+    "ok": "연결 성공",
+    "failed": "연결 실패",
+    "latency": "지연 시간",
+    "folders": "폴더",
+    "folderMissing": "없음",
+    "foldersMissing": "찾을 수 없는 폴더: {folders}",
+    "messages": "메시지 {count}개",
+    "server": "서버 기능",
+    "stageHint": {
+      "config": "입력값을 확인하세요.",
+      "dial": "호스트·포트·TLS 모드를 확인하세요.",
+      "tls": "호스트·포트·TLS 모드를 확인하세요.",
+      "auth": "계정/비밀번호를 확인하세요.",
+      "folder": "폴더 이름을 확인하세요.",
+      "ok": "정상적으로 연결되었습니다."
+    },
+    "unsavedPasswordHint": "위에 입력한 비밀번호로 테스트합니다. 이 테스트는 저장하지 않습니다.",
+    "healthCheckedAt": "마지막 확인",
+    "healthOkAt": "마지막 정상",
+    "healthFailures": "연속 실패 횟수"
   },
   "suppression": {
     "title": "수신 차단",

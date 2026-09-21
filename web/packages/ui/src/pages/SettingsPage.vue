@@ -38,6 +38,8 @@ const EVENT_TYPES = [
   'transport.unhealthy',
   'transport.recovered',
   'sender.health_changed',
+  'mailbox.unhealthy',
+  'mailbox.recovered',
   'recipient.unsubscribed',
   'delivery.opened',
   'delivery.clicked',

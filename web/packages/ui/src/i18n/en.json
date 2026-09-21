@@ -59,6 +59,7 @@
     "senders": "Senders",
     "sendingDomains": "Sending domains",
     "probeMailboxes": "Probe mailboxes",
+    "bounceMailboxes": "Bounce mailboxes",
     "suppressions": "Suppressions",
     "events": "Events",
     "settings": "Settings"
@@ -117,6 +118,11 @@
       "permanent": "Permanent",
       "policy": "Policy",
       "auth": "Auth"
+    },
+    "mailbox": {
+      "unknown": "Not checked",
+      "ok": "OK",
+      "error": "Error"
     }
   },
   "campaign": {
@@ -376,7 +382,53 @@
     "authservId": "authserv-id",
     "authservHint": "Only Authentication-Results headers with this authserv-id are trusted (RFC 8601).",
     "enabled": "Enabled",
-    "hint": "Register several mailboxes on the providers you actually send to: the verdict depends on the headers the receiving MTA adds."
+    "hint": "Register several mailboxes on the providers you actually send to: the verdict depends on the headers the receiving MTA adds.",
+    "health": "Health"
+  },
+  "bounceMailbox": {
+    "title": "Bounce mailboxes",
+    "one": "Bounce mailbox",
+    "new": "New bounce mailbox",
+    "address": "Mailbox address",
+    "protocol": "Protocol",
+    "host": "Host",
+    "port": "Port",
+    "tls": "TLS",
+    "username": "Username",
+    "password": "Password",
+    "passwordSet": "A password is stored; leave empty to keep it.",
+    "folder": "Folder",
+    "folderHint": "IMAP mailbox to read; empty means INBOX. Ignored under POP3.",
+    "afterProcess": "After processing",
+    "afterProcessHint": "keep, delete, or move:FOLDER (IMAP only). Empty means keep.",
+    "enabled": "Enabled",
+    "health": "Health",
+    "hint": "One poller runs per mailbox cluster-wide, so a disabled mailbox is simply skipped."
+  },
+  "mailboxTest": {
+    "run": "Test",
+    "testing": "Testing…",
+    "retest": "Test now",
+    "ok": "Connected",
+    "failed": "Connection failed",
+    "latency": "Latency",
+    "folders": "Folders",
+    "folderMissing": "not found",
+    "foldersMissing": "Folder(s) not found: {folders}",
+    "messages": "{count} messages",
+    "server": "Server capabilities",
+    "stageHint": {
+      "config": "Check the entered values.",
+      "dial": "Check the host, port and TLS mode.",
+      "tls": "Check the host, port and TLS mode.",
+      "auth": "Check the account and password.",
+      "folder": "Check the folder name.",
+      "ok": "Connected successfully."
+    },
+    "unsavedPasswordHint": "Tests the password typed above; it is not saved by this test.",
+    "healthCheckedAt": "Last checked",
+    "healthOkAt": "Last OK",
+    "healthFailures": "Consecutive failures"
   },
   "suppression": {
     "title": "Suppressions",
