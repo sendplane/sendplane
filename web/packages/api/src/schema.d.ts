@@ -47,6 +47,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/bounce-mailboxes/{mailboxId}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Bounce mailbox ID. */
+                mailboxId: components["parameters"]["BounceMailboxId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a stored bounce mailbox
+         * @description Checks the stored credentials and records the outcome as the mailbox's
+         *     `health`, so a manual test updates the badge the monitoring loop writes.
+         *
+         *     Send `password` to try a new one before saving it. Such a test is not
+         *     recorded as health and never saves the password: it answers "would this
+         *     password work", which is not the same question as "is this mailbox
+         *     working", and a typo in the form must not mark a healthy mailbox
+         *     broken.
+         */
+        post: operations["testBounceMailbox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bounce-mailboxes/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test bounce mailbox credentials without saving them
+         * @description Connects with the credentials in the body exactly as the poller would -
+         *     dial, TLS, login, select the folder, log out - and reports how far it
+         *     got. Nothing is persisted, so it is what a "Test" button next to a
+         *     mailbox form calls before the mailbox exists.
+         *
+         *     A mailbox that refuses the login is a `200` with `ok: false` and
+         *     `stage: auth`, not a `4xx`: the request succeeded, the mailbox is what
+         *     failed.
+         */
+        post: operations["testBounceMailboxCredentials"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/bounces": {
         parameters: {
             query?: never;
@@ -722,6 +779,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/probe-mailboxes/{mailboxId}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe mailbox ID. */
+                mailboxId: components["parameters"]["MailboxId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a stored probe mailbox
+         * @description Checks the stored credentials and records the outcome as the mailbox's
+         *     `health`, so a manual test updates the badge the monitoring loop writes.
+         *
+         *     Send `password` to try a new one before saving it. Such a test is not
+         *     recorded as health and never saves the password: it answers "would this
+         *     password work", which is not the same question as "is this mailbox
+         *     working", and a typo in the form must not mark a healthy mailbox
+         *     broken.
+         */
+        post: operations["testProbeMailbox"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/probe-mailboxes/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test probe mailbox credentials without saving them
+         * @description Connects with the credentials in the body exactly as the probe
+         *     collector would - dial, TLS, login, select the inbox and, when set, the
+         *     spam folder, log out - and reports how far it got. Nothing is
+         *     persisted.
+         *
+         *     A mailbox that refuses the login is a `200` with `ok: false` and
+         *     `stage: auth`, not a `4xx`: the request succeeded, the mailbox is what
+         *     failed.
+         */
+        post: operations["testProbeMailboxCredentials"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/probe-runs": {
         parameters: {
             query?: never;
@@ -1374,6 +1488,7 @@ export interface components {
             /** @description IMAP mailbox to read. Empty means INBOX; POP3 ignores it. */
             folder?: string;
             readonly has_password?: boolean;
+            health?: components["schemas"]["MailboxHealth"];
             host: string;
             /** Format: uuid */
             readonly id: string;
@@ -1837,12 +1952,98 @@ export interface components {
             items: components["schemas"]["LinkClick"][];
         };
         /**
+         * @description The last reachability check of the account, written by the bounce
+         *     poller, the probe collector, the `mailbox-check` leader loop and the
+         *     test endpoints (architecture 11.5).
+         */
+        MailboxHealth: {
+            /** Format: date-time */
+            checked_at?: string;
+            /**
+             * Format: int32
+             * @description Failed checks since the last success. `mailbox.unhealthy` is
+             *     emitted when it reaches 2, so that a single blip is not a
+             *     notification.
+             */
+            consecutive_failures?: number;
+            /** Format: date-time */
+            last_ok_at?: string;
+            /** @description The failure text, empty while `status` is `ok`. */
+            reason?: string;
+            stage?: components["schemas"]["MailboxStage"];
+            status: components["schemas"]["MailboxStatus"];
+        };
+        /**
          * @description Receiving protocol, `imap` when omitted. POP3 cannot move messages to
          *     another folder, so `after_process` may not be `move:<folder>` on a POP3
          *     mailbox.
          * @enum {string}
          */
         MailboxProtocol: "imap" | "pop3";
+        /**
+         * @description How far a mailbox check got. `config` means it was never sent (an
+         *     unusable row, a password that would not decrypt), and the rest are the
+         *     steps in order. The stage is what separates "the server is down" from
+         *     "the password is wrong".
+         * @enum {string}
+         */
+        MailboxStage: "config" | "dial" | "tls" | "auth" | "folder" | "ok";
+        /**
+         * @description Whether sendplane can still reach a mailbox account. It is deliberately
+         *     not the green/yellow/red `HealthStatus` a probe verdict uses: a login
+         *     either works or it does not, and a rejected password is a different
+         *     problem from a deliverability one (ADR-0015).
+         * @enum {string}
+         */
+        MailboxStatus: "unknown" | "ok" | "error";
+        MailboxTestFolder: {
+            /**
+             * @description False for a folder the server does not have, which is the usual
+             *     shape of a mistyped spam folder.
+             */
+            exists: boolean;
+            /**
+             * Format: int32
+             * @description Messages the server reported (IMAP `EXISTS`, POP3 `STAT`). A probe
+             *     mailbox holding thousands is not being drained.
+             */
+            messages?: number;
+        };
+        /**
+         * @description Optional body of a stored-mailbox test. It exists for one case: trying
+         *     a new password before saving it.
+         */
+        MailboxTestRequest: {
+            /**
+             * @description Test this password instead of the stored one. It is not saved,
+             *     whatever the result.
+             */
+            password?: string;
+        };
+        /**
+         * @description One credential check. A remote failure is reported here, not as an HTTP
+         *     error: "the password is wrong" is the answer to the question.
+         */
+        MailboxTestResult: {
+            /**
+             * @description The failure text, the server's own wording where there is one.
+             *     Empty when `ok`.
+             */
+            error?: string;
+            /** @description What each inspected folder looked like, keyed by name. */
+            folders: {
+                [key: string]: components["schemas"]["MailboxTestFolder"];
+            };
+            /** Format: int64 */
+            latency_ms: number;
+            ok: boolean;
+            /**
+             * @description What answered: the POP3 greeting, or the IMAP capability list.
+             *     Diagnostic only.
+             */
+            server?: string;
+            stage: components["schemas"]["MailboxStage"];
+        };
         MessageRecipient: {
             /** Format: email */
             email: string;
@@ -1983,8 +2184,8 @@ export interface components {
              * @description One of `delivery.sent|deferred|failed|bounced|complained|suppressed`,
              *     `campaign.started|paused|completed|cancelled`,
              *     `transport.unhealthy|recovered`, `sender.health_changed`,
-             *     `recipient.unsubscribed`, `delivery.opened|clicked`,
-             *     `i18n.missing_key`.
+             *     `mailbox.unhealthy|recovered`, `recipient.unsubscribed`,
+             *     `delivery.opened|clicked`, `i18n.missing_key`.
              */
             type: string;
         };
@@ -2049,6 +2250,7 @@ export interface components {
             readonly created_at?: string;
             enabled?: boolean;
             readonly has_password?: boolean;
+            health?: components["schemas"]["MailboxHealth"];
             host: string;
             /** Format: uuid */
             readonly id: string;
@@ -2919,7 +3121,13 @@ export type SchemaLayoutList = components['schemas']['LayoutList'];
 export type SchemaLayoutUpdate = components['schemas']['LayoutUpdate'];
 export type SchemaLinkClick = components['schemas']['LinkClick'];
 export type SchemaLinkClickList = components['schemas']['LinkClickList'];
+export type SchemaMailboxHealth = components['schemas']['MailboxHealth'];
 export type SchemaMailboxProtocol = components['schemas']['MailboxProtocol'];
+export type SchemaMailboxStage = components['schemas']['MailboxStage'];
+export type SchemaMailboxStatus = components['schemas']['MailboxStatus'];
+export type SchemaMailboxTestFolder = components['schemas']['MailboxTestFolder'];
+export type SchemaMailboxTestRequest = components['schemas']['MailboxTestRequest'];
+export type SchemaMailboxTestResult = components['schemas']['MailboxTestResult'];
 export type SchemaMessageRecipient = components['schemas']['MessageRecipient'];
 export type SchemaMessageRequest = components['schemas']['MessageRequest'];
 export type SchemaMessageResult = components['schemas']['MessageResult'];
@@ -3150,6 +3358,67 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    testBounceMailbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Bounce mailbox ID. */
+                mailboxId: components["parameters"]["BounceMailboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["MailboxTestRequest"];
+            };
+        };
+        responses: {
+            /** @description The check result, whether or not it succeeded. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxTestResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    testBounceMailboxCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BounceMailboxInput"];
+            };
+        };
+        responses: {
+            /** @description The check result, whether or not it succeeded. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxTestResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -4313,6 +4582,67 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    testProbeMailbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Probe mailbox ID. */
+                mailboxId: components["parameters"]["MailboxId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["MailboxTestRequest"];
+            };
+        };
+        responses: {
+            /** @description The check result, whether or not it succeeded. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxTestResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    testProbeMailboxCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProbeMailboxInput"];
+            };
+        };
+        responses: {
+            /** @description The check result, whether or not it succeeded. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailboxTestResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
             500: components["responses"]["InternalError"];
         };
     };

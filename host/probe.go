@@ -32,6 +32,16 @@ type ProbeConfig struct {
 	// Interval is how stale a sender's health may get before it is probed
 	// again. Zero uses the probe package's default (6h).
 	Interval time.Duration
+	// MailboxCheckInterval is how often the mailbox-check leader loop logs
+	// in to every enabled probe and bounce mailbox, and how stale a mailbox's
+	// health may get before it is checked again. Zero uses 15m.
+	//
+	// It lives here next to the rest of the probe wiring, but the loop it
+	// configures runs whether or not Enabled is set: bounce mailboxes need
+	// the same watch, and a deployment with no probe at all still has
+	// credentials that expire (architecture 11.5).
+	MailboxCheckInterval time.Duration
+
 	// Timeout is how long a probe mail may take to arrive before the run is
 	// called undelivered. Zero uses the probe package's default (15m).
 	Timeout time.Duration

@@ -91,6 +91,10 @@ type BounceMailbox struct {
 
 	Enabled bool
 
+	// Health is the last reachability check of the account. It is written by
+	// UpdateHealth, never by Update: see MailboxHealth.
+	Health MailboxHealth
+
 	Version   int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -107,4 +111,8 @@ type BounceMailboxRepo interface {
 	// unpaginated: the poller re-reads the whole set every RefreshInterval and
 	// a tenant has a handful of bounce mailboxes, not a page of them.
 	ListEnabled(ctx context.Context) ([]BounceMailbox, error)
+	// UpdateHealth writes the reachability of the account and nothing else.
+	// It takes no part in optimistic concurrency and does not bump Version;
+	// see ProbeMailboxRepo.UpdateHealth.
+	UpdateHealth(ctx context.Context, id string, h MailboxHealth) error
 }

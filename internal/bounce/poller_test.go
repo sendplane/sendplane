@@ -342,3 +342,77 @@ func TestNextBackoff(t *testing.T) {
 		}
 	}
 }
+
+// Every poll is also a credential check: a bounce mailbox may be polled for
+// months without anything else ever looking at it (architecture 11.5).
+func TestPollOnceRecordsHealth(t *testing.T) {
+	ctx := context.Background()
+	p, fake, box := newPollEnv(t, "postfix_hard.eml")
+	st, _ := p.ForTenant(ctx, testTenant)
+
+	row := &store.BounceMailbox{
+		Name: "bounces", Host: "imap.example.com", Port: 993, Enabled: true,
+	}
+	if err := st.BounceMailboxes().Create(ctx, row); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	box.MailboxID = row.ID
+
+	r := newRunner(t, p, "worker-1", fake)
+	if _, err := r.PollOnce(ctx, box); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	got, err := st.BounceMailboxes().Get(ctx, row.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Health.Status != store.MailboxOK || got.Health.Stage != store.MailboxStageOK {
+		t.Fatalf("health after a good poll = %+v", got.Health)
+	}
+	if got.Version != row.Version {
+		t.Errorf("the health write bumped the version to %d", got.Version)
+	}
+
+	// A refused login is recorded as auth, not as "unreachable", and the
+	// second one in a row is what tells the host.
+	authFail := func(c *RunnerConfig) {
+		c.Dial = func(context.Context, mailbox.Config, host.SecretCipher) (mailbox.Client, error) {
+			return nil, &mailbox.DialError{
+				Stage: mailbox.StageAuth, Err: errors.New("login rejected"),
+			}
+		}
+	}
+	broken := newRunner(t, p, "worker-1", nil, authFail)
+	for range 2 {
+		if _, err := broken.PollOnce(ctx, box); err == nil {
+			t.Fatal("PollOnce ignored a dial failure")
+		}
+	}
+	got, err = st.BounceMailboxes().Get(ctx, row.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Health.Status != store.MailboxError || got.Health.Stage != store.MailboxStageAuth {
+		t.Fatalf("health after two refused logins = %+v", got.Health)
+	}
+	if got.Health.ConsecutiveFailures != 2 {
+		t.Fatalf("failure streak = %d, want 2", got.Health.ConsecutiveFailures)
+	}
+	if got.Health.LastOKAt.IsZero() {
+		t.Error("LastOKAt was cleared by a failure; it is the last success, not the last check")
+	}
+
+	evs, err := st.Outbox().List(ctx, "", store.Page{Limit: 100})
+	if err != nil {
+		t.Fatalf("Outbox List: %v", err)
+	}
+	unhealthy := 0
+	for _, ev := range evs.Items {
+		if ev.Type == "mailbox.unhealthy" {
+			unhealthy++
+		}
+	}
+	if unhealthy != 1 {
+		t.Fatalf("%d mailbox.unhealthy events, want exactly 1", unhealthy)
+	}
+}

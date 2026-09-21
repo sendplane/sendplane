@@ -64,6 +64,10 @@ type Deps struct {
 	Renderer *render.Renderer
 	// Probe is optional; without it the manual probe trigger answers 501.
 	Probe ProbeTrigger
+	// MailboxTester runs the credential checks the mailbox test endpoints
+	// answer with. New binds internal/mailbox to Secrets if it is nil; a test
+	// replaces it so the HTTP layer needs no IMAP server.
+	MailboxTester MailboxTester
 
 	Logger  *slog.Logger
 	Clock   func() time.Time
@@ -108,6 +112,9 @@ func New(d Deps) http.Handler {
 	}
 	if d.Metrics == nil {
 		d.Metrics = host.NopMetrics{}
+	}
+	if d.MailboxTester == nil {
+		d.MailboxTester = cipherTester{cipher: d.Secrets}
 	}
 	d.Limits = d.Limits.WithDefaults()
 

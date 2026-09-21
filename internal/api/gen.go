@@ -361,6 +361,57 @@ func (e MailboxProtocol) Valid() bool {
 	}
 }
 
+// Defines values for MailboxStage.
+const (
+	MailboxStageAuth   MailboxStage = "auth"
+	MailboxStageConfig MailboxStage = "config"
+	MailboxStageDial   MailboxStage = "dial"
+	MailboxStageFolder MailboxStage = "folder"
+	MailboxStageOk     MailboxStage = "ok"
+	MailboxStageTls    MailboxStage = "tls"
+)
+
+// Valid indicates whether the value is a known member of the MailboxStage enum.
+func (e MailboxStage) Valid() bool {
+	switch e {
+	case MailboxStageAuth:
+		return true
+	case MailboxStageConfig:
+		return true
+	case MailboxStageDial:
+		return true
+	case MailboxStageFolder:
+		return true
+	case MailboxStageOk:
+		return true
+	case MailboxStageTls:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for MailboxStatus.
+const (
+	MailboxStatusError   MailboxStatus = "error"
+	MailboxStatusOk      MailboxStatus = "ok"
+	MailboxStatusUnknown MailboxStatus = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the MailboxStatus enum.
+func (e MailboxStatus) Valid() bool {
+	switch e {
+	case MailboxStatusError:
+		return true
+	case MailboxStatusOk:
+		return true
+	case MailboxStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for OutboxStatus.
 const (
 	OutboxStatusDelivered OutboxStatus = "delivered"
@@ -604,12 +655,17 @@ type BounceMailbox struct {
 	Enabled      *bool      `json:"enabled,omitempty"`
 
 	// Folder IMAP mailbox to read. Empty means INBOX; POP3 ignores it.
-	Folder      *string             `json:"folder,omitempty"`
-	HasPassword *bool               `json:"has_password,omitempty"`
-	Host        string              `json:"host"`
-	Id          *openapi_types.UUID `json:"id,omitempty"`
-	Name        string              `json:"name"`
-	Port        int32               `json:"port"`
+	Folder      *string `json:"folder,omitempty"`
+	HasPassword *bool   `json:"has_password,omitempty"`
+
+	// Health The last reachability check of the account, written by the bounce
+	// poller, the probe collector, the `mailbox-check` leader loop and the
+	// test endpoints (architecture 11.5).
+	Health *MailboxHealth      `json:"health,omitempty"`
+	Host   string              `json:"host"`
+	Id     *openapi_types.UUID `json:"id,omitempty"`
+	Name   string              `json:"name"`
+	Port   int32               `json:"port"`
 
 	// Protocol Receiving protocol, `imap` when omitted. POP3 cannot move messages to
 	// another folder, so `after_process` may not be `move:<folder>` on a POP3
@@ -1120,10 +1176,92 @@ type LinkClickList struct {
 	Items []LinkClick `json:"items"`
 }
 
+// MailboxHealth The last reachability check of the account, written by the bounce
+// poller, the probe collector, the `mailbox-check` leader loop and the
+// test endpoints (architecture 11.5).
+type MailboxHealth struct {
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+
+	// ConsecutiveFailures Failed checks since the last success. `mailbox.unhealthy` is
+	// emitted when it reaches 2, so that a single blip is not a
+	// notification.
+	ConsecutiveFailures *int32     `json:"consecutive_failures,omitempty"`
+	LastOkAt            *time.Time `json:"last_ok_at,omitempty"`
+
+	// Reason The failure text, empty while `status` is `ok`.
+	Reason *string `json:"reason,omitempty"`
+
+	// Stage How far a mailbox check got. `config` means it was never sent (an
+	// unusable row, a password that would not decrypt), and the rest are the
+	// steps in order. The stage is what separates "the server is down" from
+	// "the password is wrong".
+	Stage *MailboxStage `json:"stage,omitempty"`
+
+	// Status Whether sendplane can still reach a mailbox account. It is deliberately
+	// not the green/yellow/red `HealthStatus` a probe verdict uses: a login
+	// either works or it does not, and a rejected password is a different
+	// problem from a deliverability one (ADR-0015).
+	Status MailboxStatus `json:"status"`
+}
+
 // MailboxProtocol Receiving protocol, `imap` when omitted. POP3 cannot move messages to
 // another folder, so `after_process` may not be `move:<folder>` on a POP3
 // mailbox.
 type MailboxProtocol string
+
+// MailboxStage How far a mailbox check got. `config` means it was never sent (an
+// unusable row, a password that would not decrypt), and the rest are the
+// steps in order. The stage is what separates "the server is down" from
+// "the password is wrong".
+type MailboxStage string
+
+// MailboxStatus Whether sendplane can still reach a mailbox account. It is deliberately
+// not the green/yellow/red `HealthStatus` a probe verdict uses: a login
+// either works or it does not, and a rejected password is a different
+// problem from a deliverability one (ADR-0015).
+type MailboxStatus string
+
+// MailboxTestFolder defines model for MailboxTestFolder.
+type MailboxTestFolder struct {
+	// Exists False for a folder the server does not have, which is the usual
+	// shape of a mistyped spam folder.
+	Exists bool `json:"exists"`
+
+	// Messages Messages the server reported (IMAP `EXISTS`, POP3 `STAT`). A probe
+	// mailbox holding thousands is not being drained.
+	Messages *int32 `json:"messages,omitempty"`
+}
+
+// MailboxTestRequest Optional body of a stored-mailbox test. It exists for one case: trying
+// a new password before saving it.
+type MailboxTestRequest struct {
+	// Password Test this password instead of the stored one. It is not saved,
+	// whatever the result.
+	Password *string `json:"password,omitempty"`
+}
+
+// MailboxTestResult One credential check. A remote failure is reported here, not as an HTTP
+// error: "the password is wrong" is the answer to the question.
+type MailboxTestResult struct {
+	// Error The failure text, the server's own wording where there is one.
+	// Empty when `ok`.
+	Error *string `json:"error,omitempty"`
+
+	// Folders What each inspected folder looked like, keyed by name.
+	Folders   map[string]MailboxTestFolder `json:"folders"`
+	LatencyMs int64                        `json:"latency_ms"`
+	Ok        bool                         `json:"ok"`
+
+	// Server What answered: the POP3 greeting, or the IMAP capability list.
+	// Diagnostic only.
+	Server *string `json:"server,omitempty"`
+
+	// Stage How far a mailbox check got. `config` means it was never sent (an
+	// unusable row, a password that would not decrypt), and the rest are the
+	// steps in order. The stage is what separates "the server is down" from
+	// "the password is wrong".
+	Stage MailboxStage `json:"stage"`
+}
 
 // MessageRecipient defines model for MessageRecipient.
 type MessageRecipient struct {
@@ -1242,8 +1380,8 @@ type OutboxEvent struct {
 	// Type One of `delivery.sent|deferred|failed|bounced|complained|suppressed`,
 	// `campaign.started|paused|completed|cancelled`,
 	// `transport.unhealthy|recovered`, `sender.health_changed`,
-	// `recipient.unsubscribed`, `delivery.opened|clicked`,
-	// `i18n.missing_key`.
+	// `mailbox.unhealthy|recovered`, `recipient.unsubscribed`,
+	// `delivery.opened|clicked`, `i18n.missing_key`.
 	Type string `json:"type"`
 }
 
@@ -1311,10 +1449,15 @@ type ProbeMailbox struct {
 
 	// AuthservId Only `Authentication-Results` headers carrying this authserv-id are
 	// trusted (RFC 8601).
-	AuthservId  *string             `json:"authserv_id,omitempty"`
-	CreatedAt   *time.Time          `json:"created_at,omitempty"`
-	Enabled     *bool               `json:"enabled,omitempty"`
-	HasPassword *bool               `json:"has_password,omitempty"`
+	AuthservId  *string    `json:"authserv_id,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+	Enabled     *bool      `json:"enabled,omitempty"`
+	HasPassword *bool      `json:"has_password,omitempty"`
+
+	// Health The last reachability check of the account, written by the bounce
+	// poller, the probe collector, the `mailbox-check` leader loop and the
+	// test endpoints (architecture 11.5).
+	Health      *MailboxHealth      `json:"health,omitempty"`
 	Host        string              `json:"host"`
 	Id          *openapi_types.UUID `json:"id,omitempty"`
 	InboxFolder *string             `json:"inbox_folder,omitempty"`
@@ -2484,8 +2627,14 @@ type OneClickUnsubscribeFormdataBodyListUnsubscribe string
 // CreateBounceMailboxJSONRequestBody defines body for CreateBounceMailbox for application/json ContentType.
 type CreateBounceMailboxJSONRequestBody = BounceMailboxInput
 
+// TestBounceMailboxCredentialsJSONRequestBody defines body for TestBounceMailboxCredentials for application/json ContentType.
+type TestBounceMailboxCredentialsJSONRequestBody = BounceMailboxInput
+
 // UpdateBounceMailboxJSONRequestBody defines body for UpdateBounceMailbox for application/json ContentType.
 type UpdateBounceMailboxJSONRequestBody = BounceMailboxUpdate
+
+// TestBounceMailboxJSONRequestBody defines body for TestBounceMailbox for application/json ContentType.
+type TestBounceMailboxJSONRequestBody = MailboxTestRequest
 
 // CreateCampaignJSONRequestBody defines body for CreateCampaign for application/json ContentType.
 type CreateCampaignJSONRequestBody = CampaignInput
@@ -2517,8 +2666,14 @@ type SendMessageJSONRequestBody = MessageRequest
 // CreateProbeMailboxJSONRequestBody defines body for CreateProbeMailbox for application/json ContentType.
 type CreateProbeMailboxJSONRequestBody = ProbeMailboxInput
 
+// TestProbeMailboxCredentialsJSONRequestBody defines body for TestProbeMailboxCredentials for application/json ContentType.
+type TestProbeMailboxCredentialsJSONRequestBody = ProbeMailboxInput
+
 // UpdateProbeMailboxJSONRequestBody defines body for UpdateProbeMailbox for application/json ContentType.
 type UpdateProbeMailboxJSONRequestBody = ProbeMailboxUpdate
+
+// TestProbeMailboxJSONRequestBody defines body for TestProbeMailbox for application/json ContentType.
+type TestProbeMailboxJSONRequestBody = MailboxTestRequest
 
 // CreateSenderJSONRequestBody defines body for CreateSender for application/json ContentType.
 type CreateSenderJSONRequestBody = SenderInput
@@ -2711,6 +2866,9 @@ type ServerInterface interface {
 	// CreateBounceMailbox Create a bounce mailbox
 	// (POST /api/v1/bounce-mailboxes)
 	CreateBounceMailbox(w http.ResponseWriter, r *http.Request)
+	// TestBounceMailboxCredentials Test bounce mailbox credentials without saving them
+	// (POST /api/v1/bounce-mailboxes/test)
+	TestBounceMailboxCredentials(w http.ResponseWriter, r *http.Request)
 	// DeleteBounceMailbox Delete a bounce mailbox
 	// (DELETE /api/v1/bounce-mailboxes/{mailboxId})
 	DeleteBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId)
@@ -2720,6 +2878,9 @@ type ServerInterface interface {
 	// UpdateBounceMailbox Replace a bounce mailbox
 	// (PUT /api/v1/bounce-mailboxes/{mailboxId})
 	UpdateBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId)
+	// TestBounceMailbox Test a stored bounce mailbox
+	// (POST /api/v1/bounce-mailboxes/{mailboxId}/test)
+	TestBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId)
 	// ListBounces List bounce events
 	// (GET /api/v1/bounces)
 	ListBounces(w http.ResponseWriter, r *http.Request, params ListBouncesParams)
@@ -2825,6 +2986,9 @@ type ServerInterface interface {
 	// CreateProbeMailbox Create a probe mailbox
 	// (POST /api/v1/probe-mailboxes)
 	CreateProbeMailbox(w http.ResponseWriter, r *http.Request)
+	// TestProbeMailboxCredentials Test probe mailbox credentials without saving them
+	// (POST /api/v1/probe-mailboxes/test)
+	TestProbeMailboxCredentials(w http.ResponseWriter, r *http.Request)
 	// DeleteProbeMailbox Delete a probe mailbox
 	// (DELETE /api/v1/probe-mailboxes/{mailboxId})
 	DeleteProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId)
@@ -2834,6 +2998,9 @@ type ServerInterface interface {
 	// UpdateProbeMailbox Replace a probe mailbox
 	// (PUT /api/v1/probe-mailboxes/{mailboxId})
 	UpdateProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId)
+	// TestProbeMailbox Test a stored probe mailbox
+	// (POST /api/v1/probe-mailboxes/{mailboxId}/test)
+	TestProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId)
 	// ListProbeRuns List probe runs for a sender
 	// (GET /api/v1/probe-runs)
 	ListProbeRuns(w http.ResponseWriter, r *http.Request, params ListProbeRunsParams)
@@ -2978,6 +3145,12 @@ func (_ Unimplemented) CreateBounceMailbox(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// TestBounceMailboxCredentials Test bounce mailbox credentials without saving them
+// (POST /api/v1/bounce-mailboxes/test)
+func (_ Unimplemented) TestBounceMailboxCredentials(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // DeleteBounceMailbox Delete a bounce mailbox
 // (DELETE /api/v1/bounce-mailboxes/{mailboxId})
 func (_ Unimplemented) DeleteBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
@@ -2993,6 +3166,12 @@ func (_ Unimplemented) GetBounceMailbox(w http.ResponseWriter, r *http.Request, 
 // UpdateBounceMailbox Replace a bounce mailbox
 // (PUT /api/v1/bounce-mailboxes/{mailboxId})
 func (_ Unimplemented) UpdateBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// TestBounceMailbox Test a stored bounce mailbox
+// (POST /api/v1/bounce-mailboxes/{mailboxId}/test)
+func (_ Unimplemented) TestBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -3206,6 +3385,12 @@ func (_ Unimplemented) CreateProbeMailbox(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// TestProbeMailboxCredentials Test probe mailbox credentials without saving them
+// (POST /api/v1/probe-mailboxes/test)
+func (_ Unimplemented) TestProbeMailboxCredentials(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // DeleteProbeMailbox Delete a probe mailbox
 // (DELETE /api/v1/probe-mailboxes/{mailboxId})
 func (_ Unimplemented) DeleteProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId) {
@@ -3221,6 +3406,12 @@ func (_ Unimplemented) GetProbeMailbox(w http.ResponseWriter, r *http.Request, m
 // UpdateProbeMailbox Replace a probe mailbox
 // (PUT /api/v1/probe-mailboxes/{mailboxId})
 func (_ Unimplemented) UpdateProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// TestProbeMailbox Test a stored probe mailbox
+// (POST /api/v1/probe-mailboxes/{mailboxId}/test)
+func (_ Unimplemented) TestProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -3545,6 +3736,20 @@ func (siw *ServerInterfaceWrapper) CreateBounceMailbox(w http.ResponseWriter, r 
 	handler.ServeHTTP(w, r)
 }
 
+// TestBounceMailboxCredentials operation middleware
+func (siw *ServerInterfaceWrapper) TestBounceMailboxCredentials(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TestBounceMailboxCredentials(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DeleteBounceMailbox operation middleware
 func (siw *ServerInterfaceWrapper) DeleteBounceMailbox(w http.ResponseWriter, r *http.Request) {
 
@@ -3614,6 +3819,32 @@ func (siw *ServerInterfaceWrapper) UpdateBounceMailbox(w http.ResponseWriter, r 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.UpdateBounceMailbox(w, r, mailboxId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// TestBounceMailbox operation middleware
+func (siw *ServerInterfaceWrapper) TestBounceMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "mailboxId" -------------
+	var mailboxId BounceMailboxId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TestBounceMailbox(w, r, mailboxId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -4945,6 +5176,20 @@ func (siw *ServerInterfaceWrapper) CreateProbeMailbox(w http.ResponseWriter, r *
 	handler.ServeHTTP(w, r)
 }
 
+// TestProbeMailboxCredentials operation middleware
+func (siw *ServerInterfaceWrapper) TestProbeMailboxCredentials(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TestProbeMailboxCredentials(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DeleteProbeMailbox operation middleware
 func (siw *ServerInterfaceWrapper) DeleteProbeMailbox(w http.ResponseWriter, r *http.Request) {
 
@@ -5014,6 +5259,32 @@ func (siw *ServerInterfaceWrapper) UpdateProbeMailbox(w http.ResponseWriter, r *
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.UpdateProbeMailbox(w, r, mailboxId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// TestProbeMailbox operation middleware
+func (siw *ServerInterfaceWrapper) TestProbeMailbox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "mailboxId" -------------
+	var mailboxId MailboxId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TestProbeMailbox(w, r, mailboxId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6408,6 +6679,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/v1/bounce-mailboxes", wrapper.CreateBounceMailbox)
 	})
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/bounce-mailboxes/test", wrapper.TestBounceMailboxCredentials)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/bounce-mailboxes/{mailboxId}/test", wrapper.TestBounceMailbox)
+	})
+	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/v1/bounce-mailboxes/{mailboxId}", wrapper.DeleteBounceMailbox)
 	})
 	r.Group(func(r chi.Router) {
@@ -6421,6 +6698,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/probe-mailboxes", wrapper.CreateProbeMailbox)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/probe-mailboxes/test", wrapper.TestProbeMailboxCredentials)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/probe-mailboxes/{mailboxId}/test", wrapper.TestProbeMailbox)
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/v1/probe-mailboxes/{mailboxId}", wrapper.DeleteProbeMailbox)
@@ -6811,6 +7094,100 @@ func (response CreateBounceMailbox500JSONResponse) VisitCreateBounceMailboxRespo
 	return err
 }
 
+type TestBounceMailboxCredentialsRequestObject struct {
+	Body *TestBounceMailboxCredentialsJSONRequestBody
+}
+
+type TestBounceMailboxCredentialsResponseObject interface {
+	VisitTestBounceMailboxCredentialsResponse(w http.ResponseWriter) error
+}
+
+type TestBounceMailboxCredentials200JSONResponse MailboxTestResult
+
+func (response TestBounceMailboxCredentials200JSONResponse) VisitTestBounceMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailboxCredentials400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response TestBounceMailboxCredentials400JSONResponse) VisitTestBounceMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailboxCredentials401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response TestBounceMailboxCredentials401JSONResponse) VisitTestBounceMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailboxCredentials403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response TestBounceMailboxCredentials403JSONResponse) VisitTestBounceMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailboxCredentials422JSONResponse struct {
+	UnprocessableEntityJSONResponse
+}
+
+func (response TestBounceMailboxCredentials422JSONResponse) VisitTestBounceMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailboxCredentials500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response TestBounceMailboxCredentials500JSONResponse) VisitTestBounceMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type DeleteBounceMailboxRequestObject struct {
 	MailboxId BounceMailboxId `json:"mailboxId"`
 }
@@ -7086,6 +7463,99 @@ func (response UpdateBounceMailbox422JSONResponse) VisitUpdateBounceMailboxRespo
 type UpdateBounceMailbox500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response UpdateBounceMailbox500JSONResponse) VisitUpdateBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailboxRequestObject struct {
+	MailboxId BounceMailboxId `json:"mailboxId"`
+	Body      *TestBounceMailboxJSONRequestBody
+}
+
+type TestBounceMailboxResponseObject interface {
+	VisitTestBounceMailboxResponse(w http.ResponseWriter) error
+}
+
+type TestBounceMailbox200JSONResponse MailboxTestResult
+
+func (response TestBounceMailbox200JSONResponse) VisitTestBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailbox400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response TestBounceMailbox400JSONResponse) VisitTestBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailbox401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response TestBounceMailbox401JSONResponse) VisitTestBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailbox403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response TestBounceMailbox403JSONResponse) VisitTestBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailbox404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response TestBounceMailbox404JSONResponse) VisitTestBounceMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestBounceMailbox500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response TestBounceMailbox500JSONResponse) VisitTestBounceMailboxResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -10436,6 +10906,100 @@ func (response CreateProbeMailbox500JSONResponse) VisitCreateProbeMailboxRespons
 	return err
 }
 
+type TestProbeMailboxCredentialsRequestObject struct {
+	Body *TestProbeMailboxCredentialsJSONRequestBody
+}
+
+type TestProbeMailboxCredentialsResponseObject interface {
+	VisitTestProbeMailboxCredentialsResponse(w http.ResponseWriter) error
+}
+
+type TestProbeMailboxCredentials200JSONResponse MailboxTestResult
+
+func (response TestProbeMailboxCredentials200JSONResponse) VisitTestProbeMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailboxCredentials400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response TestProbeMailboxCredentials400JSONResponse) VisitTestProbeMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailboxCredentials401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response TestProbeMailboxCredentials401JSONResponse) VisitTestProbeMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailboxCredentials403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response TestProbeMailboxCredentials403JSONResponse) VisitTestProbeMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailboxCredentials422JSONResponse struct {
+	UnprocessableEntityJSONResponse
+}
+
+func (response TestProbeMailboxCredentials422JSONResponse) VisitTestProbeMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailboxCredentials500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response TestProbeMailboxCredentials500JSONResponse) VisitTestProbeMailboxCredentialsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type DeleteProbeMailboxRequestObject struct {
 	MailboxId MailboxId `json:"mailboxId"`
 }
@@ -10711,6 +11275,99 @@ func (response UpdateProbeMailbox422JSONResponse) VisitUpdateProbeMailboxRespons
 type UpdateProbeMailbox500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response UpdateProbeMailbox500JSONResponse) VisitUpdateProbeMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailboxRequestObject struct {
+	MailboxId MailboxId `json:"mailboxId"`
+	Body      *TestProbeMailboxJSONRequestBody
+}
+
+type TestProbeMailboxResponseObject interface {
+	VisitTestProbeMailboxResponse(w http.ResponseWriter) error
+}
+
+type TestProbeMailbox200JSONResponse MailboxTestResult
+
+func (response TestProbeMailbox200JSONResponse) VisitTestProbeMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailbox400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response TestProbeMailbox400JSONResponse) VisitTestProbeMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailbox401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response TestProbeMailbox401JSONResponse) VisitTestProbeMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailbox403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response TestProbeMailbox403JSONResponse) VisitTestProbeMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailbox404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response TestProbeMailbox404JSONResponse) VisitTestProbeMailboxResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type TestProbeMailbox500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response TestProbeMailbox500JSONResponse) VisitTestProbeMailboxResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -14496,6 +15153,9 @@ type StrictServerInterface interface {
 	// CreateBounceMailbox Create a bounce mailbox
 	// (POST /api/v1/bounce-mailboxes)
 	CreateBounceMailbox(ctx context.Context, request CreateBounceMailboxRequestObject) (CreateBounceMailboxResponseObject, error)
+	// TestBounceMailboxCredentials Test bounce mailbox credentials without saving them
+	// (POST /api/v1/bounce-mailboxes/test)
+	TestBounceMailboxCredentials(ctx context.Context, request TestBounceMailboxCredentialsRequestObject) (TestBounceMailboxCredentialsResponseObject, error)
 	// DeleteBounceMailbox Delete a bounce mailbox
 	// (DELETE /api/v1/bounce-mailboxes/{mailboxId})
 	DeleteBounceMailbox(ctx context.Context, request DeleteBounceMailboxRequestObject) (DeleteBounceMailboxResponseObject, error)
@@ -14505,6 +15165,9 @@ type StrictServerInterface interface {
 	// UpdateBounceMailbox Replace a bounce mailbox
 	// (PUT /api/v1/bounce-mailboxes/{mailboxId})
 	UpdateBounceMailbox(ctx context.Context, request UpdateBounceMailboxRequestObject) (UpdateBounceMailboxResponseObject, error)
+	// TestBounceMailbox Test a stored bounce mailbox
+	// (POST /api/v1/bounce-mailboxes/{mailboxId}/test)
+	TestBounceMailbox(ctx context.Context, request TestBounceMailboxRequestObject) (TestBounceMailboxResponseObject, error)
 	// ListBounces List bounce events
 	// (GET /api/v1/bounces)
 	ListBounces(ctx context.Context, request ListBouncesRequestObject) (ListBouncesResponseObject, error)
@@ -14610,6 +15273,9 @@ type StrictServerInterface interface {
 	// CreateProbeMailbox Create a probe mailbox
 	// (POST /api/v1/probe-mailboxes)
 	CreateProbeMailbox(ctx context.Context, request CreateProbeMailboxRequestObject) (CreateProbeMailboxResponseObject, error)
+	// TestProbeMailboxCredentials Test probe mailbox credentials without saving them
+	// (POST /api/v1/probe-mailboxes/test)
+	TestProbeMailboxCredentials(ctx context.Context, request TestProbeMailboxCredentialsRequestObject) (TestProbeMailboxCredentialsResponseObject, error)
 	// DeleteProbeMailbox Delete a probe mailbox
 	// (DELETE /api/v1/probe-mailboxes/{mailboxId})
 	DeleteProbeMailbox(ctx context.Context, request DeleteProbeMailboxRequestObject) (DeleteProbeMailboxResponseObject, error)
@@ -14619,6 +15285,9 @@ type StrictServerInterface interface {
 	// UpdateProbeMailbox Replace a probe mailbox
 	// (PUT /api/v1/probe-mailboxes/{mailboxId})
 	UpdateProbeMailbox(ctx context.Context, request UpdateProbeMailboxRequestObject) (UpdateProbeMailboxResponseObject, error)
+	// TestProbeMailbox Test a stored probe mailbox
+	// (POST /api/v1/probe-mailboxes/{mailboxId}/test)
+	TestProbeMailbox(ctx context.Context, request TestProbeMailboxRequestObject) (TestProbeMailboxResponseObject, error)
 	// ListProbeRuns List probe runs for a sender
 	// (GET /api/v1/probe-runs)
 	ListProbeRuns(ctx context.Context, request ListProbeRunsRequestObject) (ListProbeRunsResponseObject, error)
@@ -14843,6 +15512,37 @@ func (sh *strictHandler) CreateBounceMailbox(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// TestBounceMailboxCredentials operation middleware
+func (sh *strictHandler) TestBounceMailboxCredentials(w http.ResponseWriter, r *http.Request) {
+	var request TestBounceMailboxCredentialsRequestObject
+
+	var body TestBounceMailboxCredentialsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.TestBounceMailboxCredentials(ctx, request.(TestBounceMailboxCredentialsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "TestBounceMailboxCredentials")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(TestBounceMailboxCredentialsResponseObject); ok {
+		if err := validResponse.VisitTestBounceMailboxCredentialsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // DeleteBounceMailbox operation middleware
 func (sh *strictHandler) DeleteBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
 	var request DeleteBounceMailboxRequestObject
@@ -14921,6 +15621,42 @@ func (sh *strictHandler) UpdateBounceMailbox(w http.ResponseWriter, r *http.Requ
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(UpdateBounceMailboxResponseObject); ok {
 		if err := validResponse.VisitUpdateBounceMailboxResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// TestBounceMailbox operation middleware
+func (sh *strictHandler) TestBounceMailbox(w http.ResponseWriter, r *http.Request, mailboxId BounceMailboxId) {
+	var request TestBounceMailboxRequestObject
+
+	request.MailboxId = mailboxId
+
+	var body TestBounceMailboxJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.TestBounceMailbox(ctx, request.(TestBounceMailboxRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "TestBounceMailbox")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(TestBounceMailboxResponseObject); ok {
+		if err := validResponse.VisitTestBounceMailboxResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -15914,6 +16650,37 @@ func (sh *strictHandler) CreateProbeMailbox(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// TestProbeMailboxCredentials operation middleware
+func (sh *strictHandler) TestProbeMailboxCredentials(w http.ResponseWriter, r *http.Request) {
+	var request TestProbeMailboxCredentialsRequestObject
+
+	var body TestProbeMailboxCredentialsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.TestProbeMailboxCredentials(ctx, request.(TestProbeMailboxCredentialsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "TestProbeMailboxCredentials")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(TestProbeMailboxCredentialsResponseObject); ok {
+		if err := validResponse.VisitTestProbeMailboxCredentialsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // DeleteProbeMailbox operation middleware
 func (sh *strictHandler) DeleteProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId) {
 	var request DeleteProbeMailboxRequestObject
@@ -15992,6 +16759,42 @@ func (sh *strictHandler) UpdateProbeMailbox(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(UpdateProbeMailboxResponseObject); ok {
 		if err := validResponse.VisitUpdateProbeMailboxResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// TestProbeMailbox operation middleware
+func (sh *strictHandler) TestProbeMailbox(w http.ResponseWriter, r *http.Request, mailboxId MailboxId) {
+	var request TestProbeMailboxRequestObject
+
+	request.MailboxId = mailboxId
+
+	var body TestProbeMailboxJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if !errors.Is(err, io.EOF) {
+			sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+			return
+		}
+	} else {
+		request.Body = &body
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.TestProbeMailbox(ctx, request.(TestProbeMailboxRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "TestProbeMailbox")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(TestProbeMailboxResponseObject); ok {
+		if err := validResponse.VisitTestProbeMailboxResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

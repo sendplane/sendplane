@@ -67,6 +67,37 @@ func (r *bounceMailboxRepo) ListEnabled(ctx context.Context) ([]store.BounceMail
 	return out, nil
 }
 
+func (r *bounceMailboxRepo) UpdateHealth(ctx context.Context, id string, h store.MailboxHealth) error {
+	return updateHealth(ctx, r.s, r.coll(), r.m.kind, id, h)
+}
+
+// --- probe mailboxes ---------------------------------------------------
+
+type probeMailboxRepo struct {
+	*table[store.ProbeMailbox, probeMailboxDoc, *probeMailboxDoc]
+}
+
+func (r *probeMailboxRepo) UpdateHealth(ctx context.Context, id string, h store.MailboxHealth) error {
+	return updateHealth(ctx, r.s, r.coll(), r.m.kind, id, h)
+}
+
+// updateHealth is the shared UpdateHealth write: the health sub-document
+// alone, with no version predicate, no version bump and no updated_at, so a
+// background check never fights an operator's edit (store.MailboxHealth).
+func updateHealth(ctx context.Context, s *tenantStore, coll *mongo.Collection,
+	kind, id string, h store.MailboxHealth) error {
+	res, err := coll.UpdateOne(ctx,
+		s.scope(bson.E{Key: "_id", Value: id}),
+		bson.D{{Key: "$set", Value: bson.D{{Key: "health", Value: encHealth(h)}}}})
+	if err != nil {
+		return wrap("update "+kind+" health", err)
+	}
+	if res.MatchedCount == 0 {
+		return notFound(kind, id)
+	}
+	return nil
+}
+
 // --- bounces -----------------------------------------------------------
 
 type bounceRepo struct {

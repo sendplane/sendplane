@@ -501,6 +501,18 @@ func testBounceMailboxes(t *testing.T, p store.Provider) {
 	enabled, err = r.ListEnabled(ctx)
 	must(t, "ListEnabled after disable", err)
 	eq(t, "ListEnabled empty", len(enabled), 0)
+
+	testMailboxHealth(t, p, func(t *testing.T) (mailboxHealthRepo, string) {
+		t.Helper()
+		s, _ := fresh(t, p)
+		repo := s.BounceMailboxes()
+		m := &store.BounceMailbox{
+			Name: "bounces", Protocol: "imap",
+			Host: "imap.example.com", Port: 993, TLS: store.TLSImplicit, Enabled: true,
+		}
+		must(t, "Create bounce mailbox", repo.Create(context.Background(), m))
+		return bounceMailboxHealth{repo}, m.ID
+	})
 }
 
 func testProbeMailboxes(t *testing.T, p store.Provider) {
@@ -522,6 +534,113 @@ func testProbeMailboxes(t *testing.T, p store.Provider) {
 		mutate: func(v *store.ProbeMailbox) { v.Enabled = false; v.SpamFolder = "Junk" },
 		label:  func(v *store.ProbeMailbox) string { return v.SpamFolder },
 	})
+
+	testMailboxHealth(t, p, func(t *testing.T) (mailboxHealthRepo, string) {
+		t.Helper()
+		s, _ := fresh(t, p)
+		r := s.ProbeMailboxes()
+		m := &store.ProbeMailbox{
+			Name: "gmail", Address: "probe@gmail.com",
+			Host: "imap.gmail.com", Port: 993, TLS: store.TLSImplicit, Enabled: true,
+		}
+		must(t, "Create probe mailbox", r.Create(context.Background(), m))
+		return probeMailboxHealth{r}, m.ID
+	})
+}
+
+// --- mailbox health ----------------------------------------------------
+
+// mailboxHealthRepo is the slice of ProbeMailboxRepo and BounceMailboxRepo the
+// health cases need, so one body covers both aggregates.
+type mailboxHealthRepo interface {
+	UpdateHealth(ctx context.Context, id string, h store.MailboxHealth) error
+	// read returns the row's health plus the bookkeeping UpdateHealth must
+	// leave alone.
+	read(ctx context.Context, id string) (store.MailboxHealth, int64, time.Time, error)
+}
+
+type probeMailboxHealth struct{ r store.ProbeMailboxRepo }
+
+func (p probeMailboxHealth) UpdateHealth(ctx context.Context, id string, h store.MailboxHealth) error {
+	return p.r.UpdateHealth(ctx, id, h)
+}
+
+func (p probeMailboxHealth) read(ctx context.Context, id string) (store.MailboxHealth, int64, time.Time, error) {
+	v, err := p.r.Get(ctx, id)
+	if err != nil {
+		return store.MailboxHealth{}, 0, time.Time{}, err
+	}
+	return v.Health, v.Version, v.UpdatedAt, nil
+}
+
+type bounceMailboxHealth struct{ r store.BounceMailboxRepo }
+
+func (b bounceMailboxHealth) UpdateHealth(ctx context.Context, id string, h store.MailboxHealth) error {
+	return b.r.UpdateHealth(ctx, id, h)
+}
+
+func (b bounceMailboxHealth) read(ctx context.Context, id string) (store.MailboxHealth, int64, time.Time, error) {
+	v, err := b.r.Get(ctx, id)
+	if err != nil {
+		return store.MailboxHealth{}, 0, time.Time{}, err
+	}
+	return v.Health, v.Version, v.UpdatedAt, nil
+}
+
+// testMailboxHealth covers store.MailboxHealth for one mailbox aggregate: a
+// fresh row reads back unknown, UpdateHealth round-trips every field without
+// touching Version or UpdatedAt, and a row of another tenant is ErrNotFound.
+func testMailboxHealth(t *testing.T, p store.Provider, open func(t *testing.T) (mailboxHealthRepo, string)) {
+	t.Helper()
+	ctx := context.Background()
+	repo, id := open(t)
+
+	h0, ver0, updated0, err := repo.read(ctx, id)
+	must(t, "Get before UpdateHealth", err)
+	eq(t, "fresh health status", h0.Status, store.MailboxUnknown)
+	eq(t, "fresh health stage", h0.Stage, "")
+	eq(t, "fresh health failures", h0.ConsecutiveFailures, 0)
+	eqTime(t, "fresh health checked_at", h0.CheckedAt, time.Time{})
+
+	// A failed check: no LastOKAt, a stage and a streak.
+	failed := time.Now().UTC().Add(-time.Minute)
+	must(t, "UpdateHealth error", repo.UpdateHealth(ctx, id, store.MailboxHealth{
+		Status: store.MailboxError, Stage: store.MailboxStageAuth,
+		Reason: "login rejected", CheckedAt: failed, ConsecutiveFailures: 2,
+	}))
+	got, ver, updated, err := repo.read(ctx, id)
+	must(t, "Get after UpdateHealth error", err)
+	eq(t, "health status", got.Status, store.MailboxError)
+	eq(t, "health stage", got.Stage, store.MailboxStageAuth)
+	eq(t, "health reason", got.Reason, "login rejected")
+	eq(t, "health failures", got.ConsecutiveFailures, 2)
+	eqTime(t, "health checked_at", got.CheckedAt, failed)
+	eqTime(t, "health last_ok_at", got.LastOKAt, time.Time{})
+	// UpdateHealth is not an aggregate edit: an operator's optimistic
+	// concurrency must survive a background check (store.MailboxHealth).
+	eq(t, "UpdateHealth version", ver, ver0)
+	eqTime(t, "UpdateHealth updated_at", updated, updated0)
+
+	// A recovery clears the streak and stamps LastOKAt.
+	ok := time.Now().UTC()
+	must(t, "UpdateHealth ok", repo.UpdateHealth(ctx, id, store.MailboxHealth{
+		Status: store.MailboxOK, Stage: store.MailboxStageOK,
+		CheckedAt: ok, LastOKAt: ok,
+	}))
+	got, _, _, err = repo.read(ctx, id)
+	must(t, "Get after UpdateHealth ok", err)
+	eq(t, "recovered status", got.Status, store.MailboxOK)
+	eq(t, "recovered reason", got.Reason, "")
+	eq(t, "recovered failures", got.ConsecutiveFailures, 0)
+	eqTime(t, "recovered last_ok_at", got.LastOKAt, ok)
+
+	// Another tenant's ID is not reachable from this one.
+	other, otherID := open(t)
+	_ = other
+	mustBe(t, "cross-tenant UpdateHealth", repo.UpdateHealth(ctx, otherID,
+		store.MailboxHealth{Status: store.MailboxOK}), store.ErrNotFound)
+	mustBe(t, "unknown UpdateHealth", repo.UpdateHealth(ctx, store.NewID(),
+		store.MailboxHealth{Status: store.MailboxOK}), store.ErrNotFound)
 }
 
 func testLayouts(t *testing.T, p store.Provider) {

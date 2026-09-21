@@ -103,6 +103,45 @@ func (r *bounceMailboxRepo) ListEnabled(_ context.Context) ([]store.BounceMailbo
 	return out, nil
 }
 
+func (r *bounceMailboxRepo) UpdateHealth(_ context.Context, id string, h store.MailboxHealth) error {
+	r.p.mu.Lock()
+	defer r.p.mu.Unlock()
+	if err := r.p.check(); err != nil {
+		return err
+	}
+	m, ok := r.rows[id]
+	if !ok {
+		return fmt.Errorf("%w: bounce mailbox %s", store.ErrNotFound, id)
+	}
+	m.Health = truncateHealth(h)
+	return nil
+}
+
+// --- probe mailboxes ---------------------------------------------------
+
+type probeMailboxRepo struct{ table[store.ProbeMailbox] }
+
+func (r *probeMailboxRepo) UpdateHealth(_ context.Context, id string, h store.MailboxHealth) error {
+	r.p.mu.Lock()
+	defer r.p.mu.Unlock()
+	if err := r.p.check(); err != nil {
+		return err
+	}
+	m, ok := r.rows[id]
+	if !ok {
+		return fmt.Errorf("%w: probe mailbox %s", store.ErrNotFound, id)
+	}
+	m.Health = truncateHealth(h)
+	return nil
+}
+
+// truncateHealth applies the contract's timestamp resolution to a health
+// value on the way in, like table.truncateRow does for a whole row.
+func truncateHealth(h store.MailboxHealth) store.MailboxHealth {
+	truncate(&h.CheckedAt, &h.LastOKAt)
+	return h
+}
+
 // --- probe runs --------------------------------------------------------
 
 type probeRunRepo struct{ table[store.ProbeRun] }

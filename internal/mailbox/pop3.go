@@ -59,17 +59,17 @@ func dialPOP3(ctx context.Context, cfg Config, password string) (Client, error) 
 
 	if _, err := m.readStatus(); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("mailbox: pop3 greeting %s: %w", cfg.Addr(), err)
+		return nil, stageErr(StageDial, fmt.Errorf("mailbox: pop3 greeting %s: %w", cfg.Addr(), err))
 	}
 	if cfg.TLS == store.TLSSTARTTLS {
 		if _, err := m.cmd("STLS"); err != nil {
 			_ = conn.Close()
-			return nil, fmt.Errorf("mailbox: pop3 stls %s: %w", cfg.Addr(), err)
+			return nil, stageErr(StageTLS, fmt.Errorf("mailbox: pop3 stls %s: %w", cfg.Addr(), err))
 		}
 		tc := tls.Client(conn, cfg.tlsConfig())
 		if err := tc.HandshakeContext(ctx); err != nil {
 			_ = conn.Close()
-			return nil, fmt.Errorf("mailbox: pop3 tls handshake %s: %w", cfg.Addr(), err)
+			return nil, stageErr(StageTLS, fmt.Errorf("mailbox: pop3 tls handshake %s: %w", cfg.Addr(), err))
 		}
 		m.conn = tc
 		m.reset(tc)
@@ -77,11 +77,11 @@ func dialPOP3(ctx context.Context, cfg Config, password string) (Client, error) 
 	}
 	if _, err := m.cmd("USER " + cfg.Username); err != nil {
 		_ = m.conn.Close()
-		return nil, fmt.Errorf("mailbox: pop3 user %s: %w", cfg.Username, err)
+		return nil, stageErr(loginStage(err), fmt.Errorf("mailbox: pop3 user %s: %w", cfg.Username, err))
 	}
 	if _, err := m.cmd("PASS " + password); err != nil {
 		_ = m.conn.Close()
-		return nil, fmt.Errorf("mailbox: pop3 login %s: %w", cfg.Username, err)
+		return nil, stageErr(loginStage(err), fmt.Errorf("mailbox: pop3 login %s: %w", cfg.Username, err))
 	}
 	return m, nil
 }
@@ -194,6 +194,17 @@ func (m *pop3Mailbox) send(line string) error {
 	return nil
 }
 
+// ServerError is a command the server itself refused: an IMAP tagged NO/BAD
+// or a POP3 -ERR. It is told apart from an I/O error so that Test can report
+// "the password is wrong" rather than "something went wrong"; nothing else in
+// the package branches on it.
+type ServerError struct {
+	// Text is the server's own wording, without the status token.
+	Text string
+}
+
+func (e *ServerError) Error() string { return "mailbox: server refused: " + e.Text }
+
 // readStatus reads one +OK/-ERR status line.
 func (m *pop3Mailbox) readStatus() (string, error) {
 	line, err := m.r.ReadString('\n')
@@ -205,7 +216,7 @@ func (m *pop3Mailbox) readStatus() (string, error) {
 	case strings.HasPrefix(line, "+OK"):
 		return strings.TrimSpace(strings.TrimPrefix(line, "+OK")), nil
 	case strings.HasPrefix(line, "-ERR"):
-		return "", fmt.Errorf("mailbox: pop3 server said %s", strings.TrimSpace(line))
+		return "", &ServerError{Text: strings.TrimSpace(strings.TrimPrefix(line, "-ERR"))}
 	default:
 		return "", fmt.Errorf("mailbox: pop3 unexpected response %q", line)
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/mailbox"
+	"github.com/sendplane/sendplane/internal/mbhealth"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -320,6 +321,11 @@ func (r *Runner) PollOnce(ctx context.Context, box TenantMailbox) (Stats, error)
 	defer cancel()
 
 	client, err := r.cfg.Dial(sessionCtx, box.Config, r.cfg.Secrets)
+	// Every poll is also a credential check: this is the only thing that
+	// looks at a bounce mailbox regularly, so a password somebody rotated in
+	// the provider's console has to be noticed here or not at all
+	// (architecture 11.5).
+	r.recordHealth(ctx, st, box, err)
 	if err != nil {
 		return stats, err
 	}
@@ -408,6 +414,48 @@ func (r *Runner) PollOnce(ctx context.Context, box TenantMailbox) (Stats, error)
 		}
 	}
 	return stats, nil
+}
+
+// recordHealth turns the outcome of one dial into the mailbox's stored
+// store.MailboxHealth, and lets mbhealth decide whether it is worth an event.
+//
+// It re-reads the row rather than trusting the TenantMailbox it was handed:
+// the mailbox list is refreshed every RefreshInterval, so the health on it is
+// up to that old, and the failure streak has to be counted off the current
+// value or two replicas would each restart it.
+//
+// A health write that fails is logged, never returned: the poll itself is the
+// job, and failing it over bookkeeping would stop the mailbox being drained.
+func (r *Runner) recordHealth(ctx context.Context, st store.Store, box TenantMailbox, dialErr error) {
+	// A cancelled Run must not write its shutdown into every mailbox's
+	// health; the context is already done, so the write would fail anyway.
+	if ctx.Err() != nil {
+		return
+	}
+	healthCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
+	m := mbhealth.Mailbox{ID: box.MailboxID}
+	if row, err := st.BounceMailboxes().Get(healthCtx, box.MailboxID); err == nil {
+		m.Name, m.Health = row.Name, row.Health
+	} else if !errors.Is(err, store.ErrNotFound) {
+		r.cfg.Logger.Warn("sendplane: reading bounce mailbox health failed",
+			"mailbox", box.MailboxID, "err", err)
+		return
+	} else {
+		// The row was deleted between the refresh and this poll. There is
+		// nothing to record it on.
+		return
+	}
+
+	outcome := mbhealth.OK()
+	if dialErr != nil {
+		outcome = mbhealth.Fail(mailbox.StageOf(dialErr), dialErr.Error())
+	}
+	if _, err := mbhealth.Record(healthCtx, st, mbhealth.KindBounce, m, outcome, r.cfg.Clock().UTC()); err != nil {
+		r.cfg.Logger.Warn("sendplane: recording bounce mailbox health failed",
+			"mailbox", box.MailboxID, "err", err)
+	}
 }
 
 func (r *Runner) ack(ctx context.Context, client mailbox.Client, ids []string, action mailbox.Action) error {

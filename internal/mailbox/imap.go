@@ -57,22 +57,22 @@ func dialIMAP(ctx context.Context, cfg Config, password string) (Client, error) 
 		m.c, err = imapclient.NewStartTLS(conn, opts)
 		if err != nil {
 			_ = conn.Close()
-			return nil, fmt.Errorf("mailbox: imap starttls %s: %w", cfg.Addr(), err)
+			return nil, stageErr(StageTLS, fmt.Errorf("mailbox: imap starttls %s: %w", cfg.Addr(), err))
 		}
 	} else {
 		m.c = imapclient.New(conn, opts)
 		if err := m.c.WaitGreeting(); err != nil {
 			_ = m.c.Close()
-			return nil, fmt.Errorf("mailbox: imap greeting %s: %w", cfg.Addr(), err)
+			return nil, stageErr(StageDial, fmt.Errorf("mailbox: imap greeting %s: %w", cfg.Addr(), err))
 		}
 	}
 	if err := m.c.Login(cfg.Username, password).Wait(); err != nil {
 		_ = m.c.Close()
-		return nil, fmt.Errorf("mailbox: imap login %s: %w", cfg.Username, err)
+		return nil, stageErr(loginStage(err), fmt.Errorf("mailbox: imap login %s: %w", cfg.Username, err))
 	}
 	if _, err := m.c.Select(cfg.Folder, nil).Wait(); err != nil {
 		_ = m.c.Close()
-		return nil, fmt.Errorf("mailbox: imap select %q: %w", cfg.Folder, err)
+		return nil, stageErr(StageFolder, fmt.Errorf("mailbox: imap select %q: %w", cfg.Folder, err))
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return m, nil

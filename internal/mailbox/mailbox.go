@@ -135,6 +135,10 @@ type Config struct {
 
 	// Folder is the IMAP mailbox to read. Empty means INBOX. POP3 ignores it.
 	Folder string
+	// ExtraFolders are further folders [Test] inspects, on top of Folder: a
+	// probe mailbox's spam folder, which Dial never selects because an IMAP
+	// connection has exactly one selected mailbox. Dial ignores it.
+	ExtraFolders []string
 	// AfterProcess is the default Action for handled messages.
 	AfterProcess Action
 
@@ -240,7 +244,7 @@ func (c Config) dialConn(ctx context.Context) (net.Conn, error) {
 	}
 	conn, err := dial(dialCtx, "tcp", c.Addr())
 	if err != nil {
-		return nil, fmt.Errorf("mailbox: dial %s: %w", c.Addr(), err)
+		return nil, stageErr(StageDial, fmt.Errorf("mailbox: dial %s: %w", c.Addr(), err))
 	}
 	if c.TLS != store.TLSImplicit {
 		return conn, nil
@@ -248,7 +252,7 @@ func (c Config) dialConn(ctx context.Context) (net.Conn, error) {
 	tc := tls.Client(conn, c.tlsConfig())
 	if err := tc.HandshakeContext(dialCtx); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("mailbox: tls handshake %s: %w", c.Addr(), err)
+		return nil, stageErr(StageTLS, fmt.Errorf("mailbox: tls handshake %s: %w", c.Addr(), err))
 	}
 	return tc, nil
 }
@@ -258,7 +262,7 @@ func (c Config) dialConn(ctx context.Context) (net.Conn, error) {
 // a host that stores secrets outside sendplane use.
 func Dial(ctx context.Context, cfg Config, cipher host.SecretCipher) (Client, error) {
 	if err := cfg.Validate(); err != nil {
-		return nil, err
+		return nil, stageErr(StageConfig, err)
 	}
 	cfg = cfg.withDefaults()
 
@@ -266,7 +270,7 @@ func Dial(ctx context.Context, cfg Config, cipher host.SecretCipher) (Client, er
 	if cipher != nil && len(password) > 0 {
 		plain, err := cipher.Decrypt(ctx, password)
 		if err != nil {
-			return nil, fmt.Errorf("mailbox: decrypt password for %s: %w", cfg.Username, err)
+			return nil, stageErr(StageConfig, fmt.Errorf("mailbox: decrypt password for %s: %w", cfg.Username, err))
 		}
 		password = plain
 	}

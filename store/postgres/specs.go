@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sendplane/sendplane/store"
@@ -132,30 +133,94 @@ var domainSpec = spec[store.SendingDomain]{
 	updated:  func(v *store.SendingDomain) *time.Time { return &v.UpdatedAt },
 }
 
+// --- mailbox health ----------------------------------------------------
+
+// healthCols is the six-column MailboxHealth block probe_mailbox and
+// bounce_mailbox share. The two specs scan into its fields by name, because a
+// Scan argument list cannot be spliced.
+type healthCols struct {
+	status              int16
+	stage, reason       string
+	checkedAt, lastOKAt *time.Time
+	failures            int
+}
+
+func (h healthCols) health() store.MailboxHealth {
+	return store.MailboxHealth{
+		Status:              enumOut[store.MailboxStatus](h.status),
+		Stage:               h.stage,
+		Reason:              h.reason,
+		CheckedAt:           tsOut(h.checkedAt),
+		LastOKAt:            tsOut(h.lastOKAt),
+		ConsecutiveFailures: h.failures,
+	}
+}
+
+// healthColumns is the column list, in the order healthArgs produces values.
+var healthColumns = []string{
+	"health_status", "health_stage", "health_reason",
+	"health_checked_at", "health_last_ok_at", "health_failures",
+}
+
+func healthArgs(h store.MailboxHealth) []any {
+	return []any{
+		i16(h.Status), h.Stage, h.Reason,
+		tsIn(h.CheckedAt), tsIn(h.LastOKAt), h.ConsecutiveFailures,
+	}
+}
+
+// updateHealth is the shared UpdateHealth statement. It writes the health
+// block alone: no version check, no version bump and no updated_at, so a
+// background check never fights an operator's edit (store.MailboxHealth).
+func updateHealth(ctx context.Context, p *Provider, table, tenant, id string, h store.MailboxHealth) error {
+	if err := p.check(); err != nil {
+		return err
+	}
+	a := &args{}
+	vals := healthArgs(h)
+	sets := make([]string, 0, len(healthColumns))
+	for i, col := range healthColumns {
+		sets = append(sets, col+" = "+a.add(vals[i]))
+	}
+	q := fmt.Sprintf("UPDATE %s SET %s WHERE id = %s AND tenant_id = %s",
+		table, strings.Join(sets, ", "), a.add(id), a.add(tenant))
+	tag, err := p.pool.Exec(ctx, q, a.v...)
+	if err != nil {
+		return mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s %s", store.ErrNotFound, table, id)
+	}
+	return nil
+}
+
 // --- bounce mailbox ----------------------------------------------------
 
 var bounceMailboxSpec = spec[store.BounceMailbox]{
 	table: "bounce_mailbox",
-	cols: []string{
+	cols: append([]string{
 		"name", "address", "protocol", "host", "port", "tls", "username",
 		"password", "folder", "after_process", "enabled",
-	},
+	}, healthColumns...),
 	args: func(v *store.BounceMailbox) ([]any, error) {
-		return []any{
+		return append([]any{
 			v.Name, v.Address, v.Protocol, v.Host, v.Port, string(v.TLS),
 			v.Username, v.Password, v.Folder, v.AfterProcess, v.Enabled,
-		}, nil
+		}, healthArgs(v.Health)...), nil
 	},
 	scan: func(r rowScanner) (*store.BounceMailbox, error) {
 		var v store.BounceMailbox
 		var tls string
+		var h healthCols
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Address, &v.Protocol,
 			&v.Host, &v.Port, &tls, &v.Username, &v.Password, &v.Folder,
 			&v.AfterProcess, &v.Enabled,
+			&h.status, &h.stage, &h.reason, &h.checkedAt, &h.lastOKAt, &h.failures,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
 		v.TLS = store.TLSMode(tls)
+		v.Health = h.health()
 		v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
 		return &v, nil
 	},
@@ -193,30 +258,37 @@ func (r *bounceMailboxRepo) ListEnabled(ctx context.Context) ([]store.BounceMail
 	return out, mapErr(rows.Err())
 }
 
+func (r *bounceMailboxRepo) UpdateHealth(ctx context.Context, id string, h store.MailboxHealth) error {
+	return updateHealth(ctx, r.p, "bounce_mailbox", r.tenant, id, h)
+}
+
 // --- probe mailbox -----------------------------------------------------
 
 var mailboxSpec = spec[store.ProbeMailbox]{
 	table: "probe_mailbox",
-	cols: []string{
+	cols: append([]string{
 		"name", "address", "host", "port", "tls", "username", "password",
 		"inbox_folder", "spam_folder", "authserv_id", "enabled",
-	},
+	}, healthColumns...),
 	args: func(v *store.ProbeMailbox) ([]any, error) {
-		return []any{
+		return append([]any{
 			v.Name, v.Address, v.Host, v.Port, string(v.TLS), v.Username,
 			v.Password, v.InboxFolder, v.SpamFolder, v.AuthServID, v.Enabled,
-		}, nil
+		}, healthArgs(v.Health)...), nil
 	},
 	scan: func(r rowScanner) (*store.ProbeMailbox, error) {
 		var v store.ProbeMailbox
 		var tls string
+		var h healthCols
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Address, &v.Host,
 			&v.Port, &tls, &v.Username, &v.Password, &v.InboxFolder,
 			&v.SpamFolder, &v.AuthServID, &v.Enabled,
+			&h.status, &h.stage, &h.reason, &h.checkedAt, &h.lastOKAt, &h.failures,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
 		v.TLS = store.TLSMode(tls)
+		v.Health = h.health()
 		v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
 		return &v, nil
 	},
@@ -225,6 +297,12 @@ var mailboxSpec = spec[store.ProbeMailbox]{
 	version:  func(v *store.ProbeMailbox) *int64 { return &v.Version },
 	created:  func(v *store.ProbeMailbox) *time.Time { return &v.CreatedAt },
 	updated:  func(v *store.ProbeMailbox) *time.Time { return &v.UpdatedAt },
+}
+
+type probeMailboxRepo struct{ *crud[store.ProbeMailbox] }
+
+func (r *probeMailboxRepo) UpdateHealth(ctx context.Context, id string, h store.MailboxHealth) error {
+	return updateHealth(ctx, r.p, "probe_mailbox", r.tenant, id, h)
 }
 
 // --- probe run (immutable) ---------------------------------------------

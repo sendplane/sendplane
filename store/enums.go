@@ -186,6 +186,28 @@ func (v *TrackingKind) UnmarshalText(b []byte) error {
 	return enumParse(b, trackingKindNames, v)
 }
 
+// MailboxStatus is the reachability of a probe or bounce mailbox account
+// (MailboxHealth). It is a separate enum from HealthStatus on purpose: a
+// mailbox is reachable or it is not, there is no "yellow" version of a
+// rejected login, and mixing the two would make a broken credential look like
+// a deliverability verdict (ADR-0015).
+type MailboxStatus int8
+
+const (
+	// MailboxUnknown is a mailbox nothing has checked yet.
+	MailboxUnknown MailboxStatus = iota
+	MailboxOK
+	MailboxError
+)
+
+var mailboxStatusNames = []string{"unknown", "ok", "error"}
+
+func (v MailboxStatus) String() string               { return enumString(v, mailboxStatusNames) }
+func (v MailboxStatus) MarshalText() ([]byte, error) { return enumText(v, mailboxStatusNames) }
+func (v *MailboxStatus) UnmarshalText(b []byte) error {
+	return enumParse(b, mailboxStatusNames, v)
+}
+
 // HealthStatus summarizes a sending domain or sender health check
 // (architecture 11.4).
 type HealthStatus int8

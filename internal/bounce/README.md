@@ -125,6 +125,20 @@ func LockName(mailboxID string) string                              // "bounce:"
 raw 보존은 `TenantSettings.BounceRetainRaw`(기본 off)이고 프로세서는 테넌트 설정을 읽습니다 — §10 그대로입니다.
 suppression 보존기간은 `SuppressionRepo.DeleteBefore`(만료가 **있는** 항목만)로 control의 retention 루프가 정리합니다.
 
+## 메일박스 헬스
+
+패스마다 다이얼 결과를 `BounceMailbox.Health`(architecture 11.5)에 씁니다 — 성공은 `ok`, 실패는
+`mailbox.StageOf(err)` 가 준 단계(`dial`/`tls`/`auth`/`folder`)와 사유, 그리고 연속 실패 카운트입니다
+(`internal/mbhealth`). 연속 2회에서 `mailbox.unhealthy`, 복구되면 `mailbox.recovered` 이벤트가 한 번 납니다.
+
+바운스 메일박스를 주기적으로 들여다보는 건 이 폴러뿐이라 여기서 안 보면 아무도 못 봅니다. 폴링을
+끈 배포를 위해서는 control 리더의 `mailbox-check` 루프가 같은 일을 합니다.
+
+헬스는 `TenantMailbox` 가 아니라 **스토어 행에서 다시 읽습니다**: 메일박스 목록은 `RefreshInterval`
+(기본 5분)마다 갱신되므로 목록에 실린 헬스는 그만큼 낡았고, 연속 실패는 현재 값에서 세지 않으면
+두 레플리카가 서로의 카운트를 되돌립니다. 헬스 쓰기 실패는 로그만 남기고 패스를 실패시키지 않습니다 —
+메일을 빼내는 게 본업입니다.
+
 아직 계약에 없는 것:
 
 1. **`store.BounceType`에 auto-reply 값이 없습니다.** 자동응답은 저장하지 않으므로 `Parsed.AutoReply` 플래그로만 둡니다.

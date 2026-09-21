@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -801,5 +802,118 @@ func TestTriggerWithoutMailboxOrDNS(t *testing.T) {
 	e := newEnv(t, Options{})
 	if _, err := e.runner.Trigger(context.Background(), e.st, e.sender.ID); err == nil {
 		t.Fatal("want ErrNoMailbox")
+	}
+}
+
+// failingOpener is a MailboxOpener that cannot reach the mailbox, carrying the
+// stage the way internal/mailbox.DialError does.
+type failingOpener struct{ stage string }
+
+func (o failingOpener) Open(context.Context, *store.ProbeMailbox) (MailboxFetcher, error) {
+	return nil, stagedErr(o)
+}
+
+type stagedErr struct{ stage string }
+
+func (e stagedErr) Error() string        { return "imap login rejected" }
+func (e stagedErr) MailboxStage() string { return e.stage }
+
+// A mailbox sendplane cannot log in to says nothing about the sender. Closing
+// its runs out as red "not delivered" would send an operator hunting through
+// DNS for a problem that is a rotated IMAP password (ADR-0015).
+func TestCollectMailboxUnreachable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e := newEnv(t, Options{Timeout: 15 * time.Minute}, "gmail")
+
+	runID, err := e.runner.Trigger(ctx, e.st, e.sender.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener := failingOpener{stage: store.MailboxStageAuth}
+
+	// Before the timeout the run stays pending; the mailbox health is already
+	// recorded, because the collector is what noticed.
+	e.now = baseTime.Add(time.Minute)
+	if err := e.runner.CollectWith(ctx, e.st, opener, e.now); err == nil {
+		t.Fatal("CollectWith hid the open failure")
+	}
+	box, err := e.st.ProbeMailboxes().Get(ctx, "gmail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if box.Health.Status != store.MailboxError || box.Health.Stage != store.MailboxStageAuth {
+		t.Fatalf("mailbox health = %+v, want an auth error", box.Health)
+	}
+	run, _ := e.st.ProbeRuns().Get(ctx, runID)
+	if !run.Pending {
+		t.Fatal("the run was closed out before its timeout")
+	}
+
+	// Past the timeout it is closed out as unknown, naming the stage.
+	e.now = baseTime.Add(16 * time.Minute)
+	if err := e.runner.CollectWith(ctx, e.st, opener, e.now); err == nil {
+		t.Fatal("CollectWith hid the open failure")
+	}
+	run, _ = e.st.ProbeRuns().Get(ctx, runID)
+	if run.Pending {
+		t.Fatal("the run is still pending past its timeout")
+	}
+	if run.Status != store.HealthUnknown {
+		t.Fatalf("status = %s (%s), want unknown", run.Status, run.Reason)
+	}
+	if !strings.Contains(run.Reason, "probe mailbox unreachable") ||
+		!strings.Contains(run.Reason, store.MailboxStageAuth) {
+		t.Fatalf("reason = %q, want it to name the mailbox and the stage", run.Reason)
+	}
+
+	// The sender's summary carries that reason rather than a delivery verdict,
+	// so nobody reads a broken mailbox as a broken sender.
+	snd, _ := e.st.Senders().Get(ctx, e.sender.ID)
+	if snd.Health != store.HealthUnknown {
+		t.Fatalf("sender health = %s, want unknown", snd.Health)
+	}
+	if !strings.Contains(snd.HealthReason, "probe mailbox unreachable") {
+		t.Fatalf("sender reason = %q, want the mailbox to be named", snd.HealthReason)
+	}
+
+	// Two failed opens in a row is what tells the host.
+	evs, err := e.st.Outbox().List(ctx, "", store.Page{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unhealthy := 0
+	for _, ev := range evs.Items {
+		if ev.Type == "mailbox.unhealthy" {
+			unhealthy++
+		}
+	}
+	if unhealthy != 1 {
+		t.Fatalf("%d mailbox.unhealthy events, want exactly 1", unhealthy)
+	}
+}
+
+// A mailbox that comes back is recorded as healthy again on the next collect.
+func TestCollectRecordsMailboxRecovery(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	e := newEnv(t, Options{Timeout: 15 * time.Minute}, "gmail")
+
+	if _, err := e.runner.Trigger(ctx, e.st, e.sender.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.now = baseTime.Add(time.Minute)
+	if err := e.runner.CollectWith(ctx, e.st, perMailbox{}, e.now); err != nil {
+		t.Fatal(err)
+	}
+	box, err := e.st.ProbeMailboxes().Get(ctx, "gmail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if box.Health.Status != store.MailboxOK {
+		t.Fatalf("mailbox health = %+v, want ok after a successful open", box.Health)
+	}
+	if box.Health.LastOKAt.IsZero() {
+		t.Error("LastOKAt was not stamped")
 	}
 }

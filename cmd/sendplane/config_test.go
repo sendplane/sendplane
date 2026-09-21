@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,3 +220,38 @@ func TestRoleConfigsReachTheLibrary(t *testing.T) {
 		t.Errorf("bounce config = %+v", b)
 	}
 }
+
+// `probe.enabled: true` with no hmac_key used to be accepted and then
+// silently overruled - ToHost derives Enabled from the key - so a deployment
+// that asked for probing got none and nothing said why.
+func TestValidateRejectsProbeEnabledWithoutKey(t *testing.T) {
+	cfg := &Config{
+		Store: StoreConfig{Driver: "postgres", DSN: "postgres://localhost/x"},
+		Probe: ProbeConfig{Enabled: ptrTo(true)},
+	}
+	cfg.applyDefaults()
+	err := cfg.Validate(false)
+	if err == nil {
+		t.Fatal("probe.enabled: true with an empty hmac_key was accepted")
+	}
+	if !strings.Contains(err.Error(), "probe.hmac_key") {
+		t.Fatalf("error does not name the field to fix: %v", err)
+	}
+
+	// Off, or on with a key, is fine.
+	cfg.Probe = ProbeConfig{Enabled: ptrTo(false)}
+	if err := cfg.Validate(false); err != nil {
+		t.Errorf("probe.enabled: false must not require a key: %v", err)
+	}
+	cfg.Probe = ProbeConfig{Enabled: ptrTo(true), HMACKey: "9Qe1sYpVqz3dK7mCw0oXhR2tNbGvLuAjE5FrZ8SdI4w="}
+	if err := cfg.Validate(false); err != nil {
+		t.Errorf("probe.enabled with a key: %v", err)
+	}
+
+	cfg.Probe.HMACKey = "not base64!!"
+	if err := cfg.Validate(false); err == nil {
+		t.Fatal("a probe.hmac_key that is not base64 was accepted")
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }

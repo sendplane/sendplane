@@ -154,15 +154,20 @@ type ProbeConfig struct {
 	Nameservers []string `yaml:"nameservers"`
 	Interval    Duration `yaml:"interval"`
 	Timeout     Duration `yaml:"timeout"`
+	// MailboxCheckInterval is how often the mailbox-check leader loop logs in
+	// to every enabled probe and bounce mailbox. Zero uses 15m. The loop runs
+	// whether or not probing is enabled (architecture 11.5).
+	MailboxCheckInterval Duration `yaml:"mailbox_check_interval"`
 }
 
 // ToHost converts to host.ProbeConfig, decoding the base64 HMAC key.
 func (p ProbeConfig) ToHost() (host.ProbeConfig, error) {
 	out := host.ProbeConfig{
-		Enabled:     p.HMACKey != "",
-		Nameservers: p.Nameservers,
-		Interval:    time.Duration(p.Interval),
-		Timeout:     time.Duration(p.Timeout),
+		Enabled:              p.HMACKey != "",
+		Nameservers:          p.Nameservers,
+		Interval:             time.Duration(p.Interval),
+		Timeout:              time.Duration(p.Timeout),
+		MailboxCheckInterval: time.Duration(p.MailboxCheckInterval),
 	}
 	if p.Enabled != nil {
 		out.Enabled = *p.Enabled
@@ -366,6 +371,21 @@ func (c *Config) Validate(needSecrets bool) error {
 	if c.Events.Webhook.URL != "" {
 		if c.Events.Webhook.Secret == "" {
 			errs = append(errs, "events.webhook.secret is required when events.webhook.url is set")
+		}
+	}
+
+	// `probe.enabled: true` used to be silently overruled by an empty
+	// hmac_key: Enabled follows the key unless the operator says otherwise,
+	// so a deployment that asked for probing got none and nothing said why.
+	// Saying it here is the whole fix.
+	if c.Probe.Enabled != nil && *c.Probe.Enabled && strings.TrimSpace(c.Probe.HMACKey) == "" {
+		errs = append(errs,
+			"probe.hmac_key is required when probe.enabled is true "+
+				"(32 random bytes, base64: openssl rand -base64 32)")
+	}
+	if key := strings.TrimSpace(c.Probe.HMACKey); key != "" {
+		if _, err := base64.StdEncoding.DecodeString(key); err != nil {
+			errs = append(errs, "probe.hmac_key: not valid base64")
 		}
 	}
 

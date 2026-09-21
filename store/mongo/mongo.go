@@ -425,7 +425,7 @@ type tenantStore struct {
 	transports     *table[store.Transport, transportDoc, *transportDoc]
 	senders        *table[store.Sender, senderDoc, *senderDoc]
 	domains        *table[store.SendingDomain, domainDoc, *domainDoc]
-	probeMailboxes *table[store.ProbeMailbox, probeMailboxDoc, *probeMailboxDoc]
+	probeMailboxes *probeMailboxRepo
 
 	bounceMailboxes *bounceMailboxRepo
 	layouts         *table[store.Layout, layoutDoc, *layoutDoc]
@@ -454,7 +454,7 @@ func newTenantStore(p *Provider, tenant string) *tenantStore {
 	s.transports = newTable(s, collTransport, transportMeta())
 	s.senders = newTable(s, collSender, senderMeta())
 	s.domains = newTable(s, collDomain, domainMeta())
-	s.probeMailboxes = newTable(s, collProbeMailbox, probeMailboxMeta())
+	s.probeMailboxes = &probeMailboxRepo{newTable(s, collProbeMailbox, probeMailboxMeta())}
 	s.bounceMailboxes = &bounceMailboxRepo{newTable(s, collBounceMailbox, bounceMailboxMeta())}
 	s.layouts = newTable(s, collLayout, layoutMeta())
 	s.templates = newTable(s, collTemplate, templateMeta())

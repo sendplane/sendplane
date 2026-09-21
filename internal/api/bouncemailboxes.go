@@ -169,6 +169,7 @@ func bounceMailboxOut(v *store.BounceMailbox) BounceMailbox {
 		Folder:       strPtr(v.Folder),
 		AfterProcess: strPtr(v.AfterProcess),
 		Enabled:      ptr(v.Enabled),
+		Health:       mailboxHealthOut(v.Health),
 		Version:      ptr(v.Version),
 		CreatedAt:    timePtr(v.CreatedAt), UpdatedAt: timePtr(v.UpdatedAt),
 	}

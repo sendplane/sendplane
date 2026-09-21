@@ -93,6 +93,12 @@ probe:
   nameservers: ["1.1.1.1", "8.8.8.8"]
   interval: 6h   # how stale a sender's health may get before it is re-probed
   timeout: 15m   # how long a probe mail may take to arrive
+  # How often the mailbox-check leader loop logs in to every enabled probe and
+  # bounce mailbox and records the result as that mailbox's health
+  # (architecture 11.5). It is what notices a password rotated in the
+  # provider's console between two six-hourly probes, and it runs whether or
+  # not `enabled` above is set: bounce mailboxes need the same watch.
+  mailbox_check_interval: 15m
 
 limits:
   max_recipients_per_campaign: 10000000

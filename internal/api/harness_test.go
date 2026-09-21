@@ -83,7 +83,10 @@ type env struct {
 	now      time.Time
 }
 
-func newEnv(t *testing.T) *env {
+// newEnv builds the handler over a memstore. tune adjusts the Deps before
+// New sees them, which is how a test swaps in a MailboxTester instead of
+// standing up an IMAP server.
+func newEnv(t *testing.T, tune ...func(*Deps)) *env {
 	t.Helper()
 	now := testNow
 	clock := func() time.Time { return now }
@@ -97,11 +100,15 @@ func newEnv(t *testing.T) *env {
 	authz := &stubAuthz{deny: map[host.Action]bool{}}
 
 	e := &env{t: t, provider: p, ctrl: c, auth: auth, authz: authz, tenantID: "acme", now: now}
-	e.h = New(Deps{
+	deps := Deps{
 		Provider: p, Auth: auth, Authz: authz,
 		Control: c, Logger: slog.New(slog.DiscardHandler), Clock: clock,
 		Secrets: xorCipher{}, Version: "test",
-	})
+	}
+	for _, f := range tune {
+		f(&deps)
+	}
+	e.h = New(deps)
 	st, err := p.ForTenant(context.Background(), "acme")
 	if err != nil {
 		t.Fatalf("ForTenant: %v", err)

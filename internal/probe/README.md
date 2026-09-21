@@ -125,6 +125,27 @@ runner := probe.New(probe.Options{
 `lane=probe` 는 **트래킹(오픈 픽셀·링크 재작성·수신거부)과 suppression에서 모두 제외**됩니다(§11.2, ADR-0012).
 프로브 메일은 sendplane이 소유한 메일박스로 가므로 오픈/클릭 이벤트를 남길 이유가 없습니다.
 
+## 메일박스 헬스
+
+수집 루프는 메일박스를 열 때마다 그 결과를 `ProbeMailbox.Health`(architecture 11.5)에 기록합니다
+(`internal/mbhealth`). 열지 **못했는데** 타임아웃까지 지난 run은 red "미수신"이 아니라
+
+```
+Status = unknown
+Reason = "probe mailbox unreachable: auth"   // 또는 dial / tls / folder
+```
+
+으로 닫힙니다. 아무것도 관측하지 못한 실행을 sender 탓으로 돌리면 로테이션된 IMAP 비밀번호가
+"이 sender는 red"로 나타나고, 그러면 DNS 를 뒤지게 됩니다(ADR-0015). `undeliveredStreak` 도 그런 run을
+건너뜁니다 — 증거가 없는 실행은 연속 실패를 늘리지도 끊지도 않습니다.
+
+단계는 opener 가 돌려주는 에러에서 읽습니다. 이 패키지는 `internal/mailbox` 를 import 하지 않으므로
+한-메서드 인터페이스(`interface{ MailboxStage() string }`)로만 봅니다. 루트의 어댑터가 감싸는
+`mailbox.DialError` 가 그걸 구현합니다.
+
+수집 루프는 **pending run 이 있을 때만** 메일박스를 엽니다 — 6시간 주기라면 6시간에 몇 분입니다.
+그 사이의 공백은 control 리더의 `mailbox-check` 루프(루트 `mailboxcheck.go`, 기본 15분)가 메웁니다.
+
 ## 스토어 계약
 
 `ProbeRunRepo` 는 `Create`/`Update`/`Get`/`ListBySender`/`ListPending` 입니다. run은 `Pending: true` 로

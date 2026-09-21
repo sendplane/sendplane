@@ -175,9 +175,9 @@ func (s *Sendplane) Handler() http.Handler {
 // called first.
 func (s *Sendplane) controlPlane() (*control.Control, error) {
 	s.controlOnce.Do(func() {
+		opts := append(s.probeLoopOptions(), s.mailboxCheckLoopOption())
 		s.control, s.controlErr = control.New(
-			s.opts.Store, s.opts.Hooks, s.opts.Logger, s.opts.Clock,
-			s.probeLoopOptions()...)
+			s.opts.Store, s.opts.Hooks, s.opts.Logger, s.opts.Clock, opts...)
 	})
 	return s.control, s.controlErr
 }

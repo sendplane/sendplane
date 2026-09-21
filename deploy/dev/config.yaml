@@ -51,7 +51,18 @@ sender:
   ehlo_name: localhost
 
 probe:
-  enabled: false
+  enabled: true
+  # 32 raw bytes, base64, committed on purpose for the same reason
+  # secrets.key above is: `make dev` must work with no setup step, and this
+  # key only signs the X-Sendplane-Probe token of mail your own machine sends
+  # to your own mailbox. Production MUST supply its own
+  # (SENDPLANE_PROBE_HMAC_KEY in config.example.yaml). Without it
+  # `probe.enabled: true` fails validation, because a probe nothing can
+  # verify is worse than none.
+  hmac_key: 9Qe1sYpVqz3dK7mCw0oXhR2tNbGvLuAjE5FrZ8SdI4w=
+  # mailbox_check_interval defaults to 15m (architecture 11.5). Drop it to
+  # something like 30s here when you want to watch a mailbox you broke on
+  # purpose flip to unhealthy.
 
 log:
   level: debug

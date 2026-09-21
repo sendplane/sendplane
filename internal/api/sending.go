@@ -669,6 +669,7 @@ func mailboxOut(v *store.ProbeMailbox) ProbeMailbox {
 		HasPassword: ptr(len(v.Password) > 0),
 		InboxFolder: strPtr(v.InboxFolder), SpamFolder: strPtr(v.SpamFolder),
 		AuthservId: strPtr(v.AuthServID), Enabled: ptr(v.Enabled),
+		Health:  mailboxHealthOut(v.Health),
 		Version: ptr(v.Version), CreatedAt: timePtr(v.CreatedAt), UpdatedAt: timePtr(v.UpdatedAt),
 	}
 }

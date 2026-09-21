@@ -28,6 +28,7 @@ import (
 
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/dnscheck"
+	"github.com/sendplane/sendplane/internal/mbhealth"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -441,7 +442,10 @@ func (r *Runner) collectMailbox(
 ) error {
 	var fetcher MailboxFetcher
 	var openErr error
-	if box.Enabled || box.Host != "" || box.Address != "" {
+	// A mailbox row that was deleted while a run was in flight is left alone:
+	// there is nothing to connect to and nothing to record health on.
+	attempted := box.Enabled || box.Host != "" || box.Address != ""
+	if attempted {
 		fetcher, openErr = opener.Open(ctx, box)
 		if fetcher != nil {
 			if c, ok := fetcher.(io.Closer); ok {
@@ -453,6 +457,9 @@ func (r *Runner) collectMailbox(
 	var firstErr error
 	if openErr != nil {
 		firstErr = fmt.Errorf("probe: mailbox %s: %w", box.ID, openErr)
+	}
+	if attempted {
+		r.recordMailboxHealth(ctx, st, box, openErr, now)
 	}
 
 	for _, run := range pending {
@@ -478,7 +485,18 @@ func (r *Runner) collectMailbox(
 					"mailbox", box.ID, "run", run.ID, "err", err)
 			}
 		case now.Sub(run.StartedAt) >= r.opts.Timeout:
-			if err := r.finishUndelivered(ctx, st, run, now); err != nil {
+			// A mailbox that could not be opened proves nothing about the
+			// sender: the mail may well have arrived and simply not been
+			// looked at. Closing such a run out as "not delivered" is how a
+			// rotated IMAP password turns into a red sender and a wild goose
+			// chase through DNS (ADR-0015).
+			var err error
+			if openErr != nil {
+				err = r.finishUnreachable(ctx, st, run, mailboxStage(openErr), now)
+			} else {
+				err = r.finishUndelivered(ctx, st, run, now)
+			}
+			if err != nil {
 				firstErr = cmpErr(firstErr, err)
 				continue
 			}
@@ -486,6 +504,60 @@ func (r *Runner) collectMailbox(
 		}
 	}
 	return firstErr
+}
+
+// stager is implemented by an Open error that knows how far it got
+// (internal/mailbox.DialError). This package deliberately does not import
+// internal/mailbox, so it reads the stage through this one-method interface
+// instead.
+type stager interface{ MailboxStage() string }
+
+// mailboxStage is the stage an Open failure reached, defaulting to dial for an
+// opener that does not classify its errors.
+func mailboxStage(err error) string {
+	var s stager
+	if errors.As(err, &s) {
+		if stage := s.MailboxStage(); stage != "" {
+			return stage
+		}
+	}
+	return store.MailboxStageDial
+}
+
+// recordMailboxHealth files the outcome of one Open as the mailbox's
+// reachability. The probe collector runs every minute, so it is the fastest
+// thing in the system to notice a mailbox going away - but only while a run
+// is pending, which is why the mailbox-check loop exists as well.
+//
+// A failed health write is logged, never returned: the verdicts this collect
+// is producing matter more than the bookkeeping around them.
+func (r *Runner) recordMailboxHealth(
+	ctx context.Context, st store.Store, box *store.ProbeMailbox, openErr error, now time.Time,
+) {
+	outcome := mbhealth.OK()
+	if openErr != nil {
+		outcome = mbhealth.Fail(mailboxStage(openErr), openErr.Error())
+	}
+	m := mbhealth.Mailbox{ID: box.ID, Name: box.Name, Health: box.Health}
+	if _, err := mbhealth.Record(ctx, st, mbhealth.KindProbe, m, outcome, now); err != nil {
+		r.opts.Logger.Warn("sendplane: recording probe mailbox health failed",
+			"mailbox", box.ID, "err", err)
+	}
+}
+
+// finishUnreachable closes out a run whose mailbox could not be opened. The
+// verdict is unknown rather than red: nothing was observed, so there is
+// nothing to blame the sender for. The reason names the stage, because
+// "auth" and "dial" have different owners.
+func (r *Runner) finishUnreachable(
+	ctx context.Context, st store.Store, run *store.ProbeRun, stage string, now time.Time,
+) error {
+	run.Status = store.HealthUnknown
+	run.Reason = "probe mailbox unreachable: " + stage
+	run.Delivered = false
+	run.ReceivedAt = time.Time{}
+	run.Pending = false
+	return updateRun(ctx, st, run)
 }
 
 // find looks the probe mail up by its header and falls back to the subject.
@@ -618,6 +690,11 @@ func (r *Runner) undeliveredStreak(ctx context.Context, st store.Store, run *sto
 	for i := len(runs) - 1; i >= 0; i-- {
 		prev := &runs[i]
 		if prev.ID == run.ID || prev.MailboxID != run.MailboxID || isPending(prev) {
+			continue
+		}
+		if prev.Status == store.HealthUnknown && !prev.Delivered {
+			// A run closed out because the mailbox could not be opened saw
+			// nothing at all. It neither extends the streak nor ends it.
 			continue
 		}
 		if prev.Delivered {

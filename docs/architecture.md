@@ -196,7 +196,7 @@ type SenderConfig struct {
   "테넌트 URL 템플릿(Liquid, 예: `https://app.example.com/u?e={{ recipient.email | url_encode }}&t={{ recipient.vars.unsub_token }}`)"
   으로도 줄 수 있고, 이벤트는 webhook으로 받을 수 있습니다. Go 훅은 escape hatch입니다.
 - 참조 바이너리(`cmd/sendplane`)는 `Authenticator`로 **정적 API Key(테넌트 매핑 포함) / JWT(JWKS)** 두 구현을 설정 파일로 제공합니다.
-- `Handler()`와 `RunControl()`은 프로세스 전체에서 공유하는 하나의 `*control.Control`을 처음 호출한 쪽이 만듭니다(`sendplane.controlPlane`, `sync.Once`). `Options.Probe.Enabled`가 켜져 있으면 이때 `probe-trigger`/`probe-collect` 리더 루프도 함께 등록됩니다.
+- `Handler()`와 `RunControl()`은 프로세스 전체에서 공유하는 하나의 `*control.Control`을 처음 호출한 쪽이 만듭니다(`sendplane.controlPlane`, `sync.Once`). `Options.Probe.Enabled`가 켜져 있으면 이때 `probe-trigger`/`probe-collect` 리더 루프도 함께 등록됩니다. `mailbox-check`(§11.5)는 `Probe.Enabled`와 무관하게 항상 등록됩니다 — 바운스 메일박스도 같은 감시가 필요합니다.
 
 ## 4. 도메인 모델
 
@@ -576,6 +576,7 @@ IP는 기본 저장하지 않고(테넌트 설정으로 해시 저장), UA는 �
 - 결과: `BounceEvent` 저장(raw 보존은 테넌트 설정) → delivery `bounced|complained` 전이(이미 `sent`인 경우만) → suppression 삽입(테넌트 설정) → 이벤트 발행.
 - 폴러: `emersion/go-imap/v2`(IDLE 지원 시 사용, 아니면 주기 폴링), POP3는 직접 구현(`internal/mailbox/pop3.go`). 처리 후 삭제/이동 정책 설정. 메일박스 하나당 폴러 하나(스토어 lock으로 보장) → 여러 레플리카가 같은 메일을 이중 처리하지 않음.
 - 메일박스는 테넌트 리소스입니다: `store.BounceMailbox`(프로토콜·호스트·자격증명·폴더·`after_process`·`enabled`) + `/api/v1/bounce-mailboxes`. 폴러는 `Provider.Tenants`(활성 여부와 무관한 전체 테넌트)를 돌며 각 테넌트의 enabled 메일박스를 읽습니다 — 바운스는 캠페인이 끝나고 한참 뒤에 옵니다.
+- **폴링은 곧 자격증명 점검입니다.** 패스마다 다이얼 결과를 `BounceMailbox.Health`(§11.5)에 씁니다 — 성공하면 `ok`, 실패하면 단계(`dial`/`tls`/`auth`/`folder`)와 사유를 남기고 연속 실패를 셉니다. 바운스 메일박스를 주기적으로 들여다보는 건 이 폴러뿐이라, 여기서 못 보면 아무도 못 봅니다.
 - raw 보존은 `TenantSettings.BounceRetainRaw`(기본 off), suppression 보존기간은 `SuppressionRepo.DeleteBefore`로 control의 retention 루프가 정리합니다.
 - 프로바이더 webhook(SES/SendGrid 등)은 같은 `BounceEvent` 경로로 들어오는 어댑터로 후순위 추가.
 
@@ -636,11 +637,52 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
 - green(전부 pass, inbox, TLS) / yellow(dmarc p=none, spam 폴더, PTR 불일치, TLS 없음) / red(미수신, spf/dkim/dmarc fail).
 - 캠페인 start 시 Sender가 red면 경고(차단 여부는 테넌트 정책).
 - ProbeRun 이력으로 "언제부터 깨졌는지" 추적. 원본 헤더는 진단용 보관(보존기간 적용).
+- **메일박스를 못 열었으면 판정하지 않습니다.** 프로브 메일박스 접속이 실패한 채로 타임아웃이 지난 run은
+  red "미수신"이 아니라 `unknown` + `probe mailbox unreachable: {단계}`로 닫힙니다. 아무것도 관측하지
+  못한 실행을 sender 탓으로 돌리면, 로테이션된 IMAP 비밀번호가 DNS 추적으로 이어집니다(ADR-0015).
+  sender 요약도 그 사유를 그대로 물고 가므로 화면에서 원인이 보입니다.
+
+### 11.5 메일박스 헬스 (자격증명 감시)
+
+프로브·바운스 메일박스는 **같은 문제**를 공유합니다: 비밀번호가 바뀌거나 앱 비밀번호가 만료되면
+조용히 죽습니다. 그래서 두 모델 모두 `MailboxHealth`(`status` ok/error/unknown, `stage`, `reason`,
+`checked_at`, `last_ok_at`, `consecutive_failures`)를 갖고, 리포지터리의 `UpdateHealth`로만 쓰입니다 —
+낙관적 동시성에 참여하지 않고 `version`/`updated_at`도 건드리지 않으므로, 백그라운드 점검이 운영자의
+편집과 경합하지 않습니다.
+
+쓰는 주체는 넷입니다.
+
+| 주체 | 시점 |
+|---|---|
+| 바운스 폴러 | 패스마다(§10) |
+| 프로브 수집 루프 | 메일박스를 열 때마다(pending run이 있을 때만) |
+| `mailbox-check` 리더 루프 | `AllTenants`, 기본 15분(`probe.mailbox_check_interval`). enabled 메일박스 중 `checked_at`이 간격보다 오래된 것만, 틱당 20개까지, 오래된 순으로 |
+| 테스트 엔드포인트 | 운영자가 누를 때 |
+
+`mailbox-check`가 따로 있는 이유는 나머지 셋이 모두 **다른 일의 부산물**이기 때문입니다: 바운스 폴링은
+꺼져 있을 수 있고, 프로브 수집은 6시간마다 몇 분만 메일박스를 봅니다. 그 사이에 바뀐 비밀번호는
+"최근 프로브 4번이 도착하지 않음"으로, 6시간 늦게, 엉뚱한 곳(sender)을 가리키며 나타납니다.
+
+**테스트 엔드포인트**(`sender.write`):
+
+- `POST /api/v1/{probe,bounce}-mailboxes/test` — 본문의 자격증명으로 접속만 해 보고 아무것도 저장하지
+  않습니다. 생성 폼의 "테스트" 버튼용입니다.
+- `POST /api/v1/{probe,bounce}-mailboxes/{id}/test` — 저장된 행으로 접속하고 결과를 `health`에 기록합니다.
+  본문에 `password`를 주면 **저장 전에** 새 비밀번호만 시험합니다(그 경우 health는 쓰지 않습니다 — 폼의
+  오타가 멀쩡한 메일박스를 고장 난 것으로 만들면 안 됩니다).
+
+둘 다 응답은 `MailboxTestResult{ok, stage, error?, latency_ms, folders{name:{exists,messages}}, server?}`이고,
+**원격 실패는 200 + `ok:false`** 입니다. 로그인 거절은 요청의 답이지 요청의 실패가 아닙니다.
+`stage`는 `config`(보내 보지도 못함) → `dial` → `tls` → `auth` → `folder` → `ok` 순서이고, 20초 안에 끝납니다.
+
+전이할 때만 이벤트가 납니다: 연속 실패가 2에 도달하면 `mailbox.unhealthy`, 거기서 복구되면
+`mailbox.recovered`. 1회 실패는 blip이라 알리지 않고, 계속 실패해도 한 장애당 한 번만 알립니다.
 
 ## 12. 이벤트 · 관측성
 
 - 이벤트는 **아웃박스 패턴**: 상태 전이와 같은 스토어에 `EventOutbox` 삽입 → control 리더 루프가 `EventSink`로 배달(webhook: HMAC 서명, 재시도, 실패 시 dead-letter 조회/재전송 API). 호스트 측 Go `EventSink` 구현이면 동기 호출.
-- 이벤트 타입: `delivery.sent|deferred|failed|bounced|complained|suppressed`, `campaign.started|paused|completed|cancelled`, `transport.unhealthy|recovered`, `sender.health_changed`, `recipient.unsubscribed`, `delivery.opened|clicked`, `i18n.missing_key`.
+- 이벤트 타입: `delivery.sent|deferred|failed|bounced|complained|suppressed`, `campaign.started|paused|completed|cancelled`, `transport.unhealthy|recovered`, `sender.health_changed`, `mailbox.unhealthy|recovered`, `recipient.unsubscribed`, `delivery.opened|clicked`, `i18n.missing_key`.
+- `mailbox.unhealthy`/`mailbox.recovered`는 프로브·바운스 메일박스 자격증명의 전이입니다(§11.5). 페이로드는 `{kind: probe|bounce, mailbox_id, name, status, stage, reason, consecutive_failures, checked_at, last_ok_at}`. 한 메일박스당 한 장애에 한 번이라 기본 집합에 들어 있습니다.
 - **구독 필터**는 `TenantSettings.EventTypes`(API `event_types`)입니다. 비어 있으면 **기본 집합** = `delivery.sent`·`delivery.opened`·`delivery.clicked`를 뺀 전부, 값이 있으면 그 목록이 곧 전부입니다. 필터는 두 번 걸립니다: **enqueue 할 때**(구독하지 않은 타입은 outbox 행 자체를 만들지 않습니다)와 **dispatch 할 때**(구독을 끄면 이미 쌓인 행도 나가지 않고, 그 행은 delivered로 정리됩니다).
 - `delivery.sent`/`delivery.failed`는 sender의 배치 `Complete` 이후 같은 스토어에 씁니다. 계약은 **delivery 하나당 outbox 행 하나**이고, 그래서 100만 수신자 캠페인을 구독하면 outbox 행·dispatch·HTTP POST가 100만 건입니다 — `delivery.sent`가 기본 집합에서 빠져 있는 이유가 그것입니다. 켜기 전에 그 비용을 계산하십시오.
 - outbox 디스패처는 두 개입니다: active 테넌트(+3틱 유예)를 1초마다 도는 것(캠페인 전이의 지연을 짧게)과, **모든 테넌트**(`Provider.Tenants`)를 10초마다 도는 `outbox-sweep`. 바운스(며칠 뒤)·프로브 판정(1분 뒤)처럼 테넌트가 한가해진 뒤에 생기는 이벤트는 sweep이 아니면 다음 캠페인 때까지 pending으로 남습니다. `ClaimPending`이 lease를 잡으므로 둘이 같은 행을 두 번 보내지 않습니다.

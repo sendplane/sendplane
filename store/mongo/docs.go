@@ -188,21 +188,52 @@ func domainMeta() meta[store.SendingDomain, domainDoc] {
 	}
 }
 
+// --- mailbox health ----------------------------------------------------
+
+// healthDoc is the MailboxHealth block probe and bounce mailboxes share. It is
+// a nested document rather than six inlined fields so that UpdateHealth can
+// $set it as one key without naming every column.
+type healthDoc struct {
+	Status    int32      `bson:"status"`
+	Stage     string     `bson:"stage"`
+	Reason    string     `bson:"reason"`
+	CheckedAt *time.Time `bson:"checked_at"`
+	LastOKAt  *time.Time `bson:"last_ok_at"`
+	Failures  int32      `bson:"failures"`
+}
+
+func encHealth(h store.MailboxHealth) healthDoc {
+	return healthDoc{
+		Status: int32(h.Status), Stage: h.Stage, Reason: h.Reason,
+		CheckedAt: encTime(h.CheckedAt), LastOKAt: encTime(h.LastOKAt),
+		Failures: i32(h.ConsecutiveFailures),
+	}
+}
+
+func decHealth(d healthDoc) store.MailboxHealth {
+	return store.MailboxHealth{
+		Status: store.MailboxStatus(enum8(d.Status)), Stage: d.Stage, Reason: d.Reason,
+		CheckedAt: decTime(d.CheckedAt), LastOKAt: decTime(d.LastOKAt),
+		ConsecutiveFailures: int(d.Failures),
+	}
+}
+
 // --- bounce mailbox ----------------------------------------------------
 
 type bounceMailboxDoc struct {
 	Base         `bson:",inline"`
-	Name         string `bson:"name"`
-	Address      string `bson:"address"`
-	Protocol     string `bson:"protocol"`
-	Host         string `bson:"host"`
-	Port         int32  `bson:"port"`
-	TLS          string `bson:"tls"`
-	Username     string `bson:"username"`
-	Password     []byte `bson:"password"`
-	Folder       string `bson:"folder"`
-	AfterProcess string `bson:"after_process"`
-	Enabled      bool   `bson:"enabled"`
+	Name         string    `bson:"name"`
+	Address      string    `bson:"address"`
+	Protocol     string    `bson:"protocol"`
+	Host         string    `bson:"host"`
+	Port         int32     `bson:"port"`
+	TLS          string    `bson:"tls"`
+	Username     string    `bson:"username"`
+	Password     []byte    `bson:"password"`
+	Folder       string    `bson:"folder"`
+	AfterProcess string    `bson:"after_process"`
+	Enabled      bool      `bson:"enabled"`
+	Health       healthDoc `bson:"health"`
 }
 
 func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
@@ -221,6 +252,7 @@ func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
 				Host: v.Host, Port: i32(v.Port), TLS: string(v.TLS),
 				Username: v.Username, Password: v.Password,
 				Folder: v.Folder, AfterProcess: v.AfterProcess, Enabled: v.Enabled,
+				Health: encHealth(v.Health),
 			}
 		},
 		dec: func(d *bounceMailboxDoc) *store.BounceMailbox {
@@ -229,6 +261,7 @@ func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
 				Protocol: d.Protocol, Host: d.Host, Port: int(d.Port),
 				TLS: store.TLSMode(d.TLS), Username: d.Username, Password: d.Password,
 				Folder: d.Folder, AfterProcess: d.AfterProcess, Enabled: d.Enabled,
+				Health:  decHealth(d.Health),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
 		},
@@ -239,17 +272,18 @@ func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
 
 type probeMailboxDoc struct {
 	Base        `bson:",inline"`
-	Name        string `bson:"name"`
-	Address     string `bson:"address"`
-	Host        string `bson:"host"`
-	Port        int32  `bson:"port"`
-	TLS         string `bson:"tls"`
-	Username    string `bson:"username"`
-	Password    []byte `bson:"password"`
-	InboxFolder string `bson:"inbox_folder"`
-	SpamFolder  string `bson:"spam_folder"`
-	AuthServID  string `bson:"auth_serv_id"`
-	Enabled     bool   `bson:"enabled"`
+	Name        string    `bson:"name"`
+	Address     string    `bson:"address"`
+	Host        string    `bson:"host"`
+	Port        int32     `bson:"port"`
+	TLS         string    `bson:"tls"`
+	Username    string    `bson:"username"`
+	Password    []byte    `bson:"password"`
+	InboxFolder string    `bson:"inbox_folder"`
+	SpamFolder  string    `bson:"spam_folder"`
+	AuthServID  string    `bson:"auth_serv_id"`
+	Enabled     bool      `bson:"enabled"`
+	Health      healthDoc `bson:"health"`
 }
 
 func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
@@ -268,6 +302,7 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 				TLS: string(v.TLS), Username: v.Username, Password: v.Password,
 				InboxFolder: v.InboxFolder, SpamFolder: v.SpamFolder,
 				AuthServID: v.AuthServID, Enabled: v.Enabled,
+				Health: encHealth(v.Health),
 			}
 		},
 		dec: func(d *probeMailboxDoc) *store.ProbeMailbox {
@@ -277,6 +312,7 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 				Username: d.Username, Password: d.Password,
 				InboxFolder: d.InboxFolder, SpamFolder: d.SpamFolder,
 				AuthServID: d.AuthServID, Enabled: d.Enabled,
+				Health:  decHealth(d.Health),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
 		},

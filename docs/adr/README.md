@@ -21,3 +21,4 @@
 | 0012 | 헬스체크는 루프백 프로브가 1차, DNS 검사는 진단 계층 | accepted |
 | 0013 | `AllTenants` 루프와 outbox-sweep | accepted |
 | 0014 | 밀리초 타임스탬프 계약 | accepted |
+| 0015 | 메일박스 헬스는 프로브/바운스 결과와 분리 | accepted |

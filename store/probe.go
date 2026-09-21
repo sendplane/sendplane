@@ -32,6 +32,10 @@ type ProbeMailbox struct {
 
 	Enabled bool
 
+	// Health is the last reachability check of the account. It is written by
+	// UpdateHealth, never by Update: see MailboxHealth.
+	Health MailboxHealth
+
 	Version   int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -43,6 +47,12 @@ type ProbeMailboxRepo interface {
 	Update(ctx context.Context, m *ProbeMailbox) error
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, p Page) (Result[ProbeMailbox], error)
+	// UpdateHealth writes the reachability of the account and nothing else.
+	// It takes no part in optimistic concurrency and does not bump Version,
+	// like the sender's transport status writes: the writers are background
+	// loops, and an operator editing the row must neither lose their edit to
+	// a health observation nor make one fail.
+	UpdateHealth(ctx context.Context, id string, h MailboxHealth) error
 }
 
 // ProbeRun is one sender x mailbox loopback result plus the DNS diagnosis

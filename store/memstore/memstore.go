@@ -219,14 +219,14 @@ type tenantStore struct {
 	tenant string
 	d      *tenantData
 
-	transports     *table[store.Transport]
-	senders        *table[store.Sender]
-	domains        *table[store.SendingDomain]
-	probeMailboxes *table[store.ProbeMailbox]
-	layouts        *table[store.Layout]
-	templates      *table[store.Template]
+	transports *table[store.Transport]
+	senders    *table[store.Sender]
+	domains    *table[store.SendingDomain]
+	layouts    *table[store.Layout]
+	templates  *table[store.Template]
 
 	bounceMailboxes *bounceMailboxRepo
+	probeMailboxes  *probeMailboxRepo
 
 	probeRuns *probeRunRepo
 	versions  *versionRepo
@@ -276,14 +276,20 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 		version: func(v *store.BounceMailbox) *int64 { return &v.Version },
 		created: func(v *store.BounceMailbox) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.BounceMailbox) *time.Time { return &v.UpdatedAt },
+		times: func(v *store.BounceMailbox) []*time.Time {
+			return []*time.Time{&v.Health.CheckedAt, &v.Health.LastOKAt}
+		},
 	}}}
-	s.probeMailboxes = &table[store.ProbeMailbox]{p: p, tenant: tenant, rows: d.probeMailboxes, m: meta[store.ProbeMailbox]{
+	s.probeMailboxes = &probeMailboxRepo{table[store.ProbeMailbox]{p: p, tenant: tenant, rows: d.probeMailboxes, m: meta[store.ProbeMailbox]{
 		id:      func(v *store.ProbeMailbox) *string { return &v.ID },
 		tenant:  func(v *store.ProbeMailbox) *string { return &v.TenantID },
 		version: func(v *store.ProbeMailbox) *int64 { return &v.Version },
 		created: func(v *store.ProbeMailbox) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.ProbeMailbox) *time.Time { return &v.UpdatedAt },
-	}}
+		times: func(v *store.ProbeMailbox) []*time.Time {
+			return []*time.Time{&v.Health.CheckedAt, &v.Health.LastOKAt}
+		},
+	}}}
 	s.layouts = &table[store.Layout]{p: p, tenant: tenant, rows: d.layouts, m: meta[store.Layout]{
 		id:      func(v *store.Layout) *string { return &v.ID },
 		tenant:  func(v *store.Layout) *string { return &v.TenantID },

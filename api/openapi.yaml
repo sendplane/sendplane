@@ -611,6 +611,72 @@ paths:
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
         '500': { $ref: '#/components/responses/InternalError' }
 
+  /api/v1/bounce-mailboxes/test:
+    post:
+      operationId: testBounceMailboxCredentials
+      summary: Test bounce mailbox credentials without saving them
+      description: |
+        Connects with the credentials in the body exactly as the poller would -
+        dial, TLS, login, select the folder, log out - and reports how far it
+        got. Nothing is persisted, so it is what a "Test" button next to a
+        mailbox form calls before the mailbox exists.
+
+        A mailbox that refuses the login is a `200` with `ok: false` and
+        `stage: auth`, not a `4xx`: the request succeeded, the mailbox is what
+        failed.
+      tags: [Bounce Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BounceMailboxInput' }
+      responses:
+        '200':
+          description: The check result, whether or not it succeeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MailboxTestResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/bounce-mailboxes/{mailboxId}/test:
+    parameters:
+      - { $ref: '#/components/parameters/BounceMailboxId' }
+    post:
+      operationId: testBounceMailbox
+      summary: Test a stored bounce mailbox
+      description: |
+        Checks the stored credentials and records the outcome as the mailbox's
+        `health`, so a manual test updates the badge the monitoring loop writes.
+
+        Send `password` to try a new one before saving it. Such a test is not
+        recorded as health and never saves the password: it answers "would this
+        password work", which is not the same question as "is this mailbox
+        working", and a typo in the form must not mark a healthy mailbox
+        broken.
+      tags: [Bounce Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MailboxTestRequest' }
+      responses:
+        '200':
+          description: The check result, whether or not it succeeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MailboxTestResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
   /api/v1/bounce-mailboxes/{mailboxId}:
     parameters:
       - { $ref: '#/components/parameters/BounceMailboxId' }
@@ -706,6 +772,72 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/probe-mailboxes/test:
+    post:
+      operationId: testProbeMailboxCredentials
+      summary: Test probe mailbox credentials without saving them
+      description: |
+        Connects with the credentials in the body exactly as the probe
+        collector would - dial, TLS, login, select the inbox and, when set, the
+        spam folder, log out - and reports how far it got. Nothing is
+        persisted.
+
+        A mailbox that refuses the login is a `200` with `ok: false` and
+        `stage: auth`, not a `4xx`: the request succeeded, the mailbox is what
+        failed.
+      tags: [Probe Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProbeMailboxInput' }
+      responses:
+        '200':
+          description: The check result, whether or not it succeeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MailboxTestResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/probe-mailboxes/{mailboxId}/test:
+    parameters:
+      - { $ref: '#/components/parameters/MailboxId' }
+    post:
+      operationId: testProbeMailbox
+      summary: Test a stored probe mailbox
+      description: |
+        Checks the stored credentials and records the outcome as the mailbox's
+        `health`, so a manual test updates the badge the monitoring loop writes.
+
+        Send `password` to try a new one before saving it. Such a test is not
+        recorded as health and never saves the password: it answers "would this
+        password work", which is not the same question as "is this mailbox
+        working", and a typo in the form must not mark a healthy mailbox
+        broken.
+      tags: [Probe Mailboxes]
+      x-sendplane-action: sender.write
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MailboxTestRequest' }
+      responses:
+        '200':
+          description: The check result, whether or not it succeeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MailboxTestResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '500': { $ref: '#/components/responses/InternalError' }
 
   /api/v1/probe-mailboxes/{mailboxId}:
@@ -2840,6 +2972,102 @@ components:
         another folder, so `after_process` may not be `move:<folder>` on a POP3
         mailbox.
 
+    MailboxStatus:
+      type: string
+      description: |
+        Whether sendplane can still reach a mailbox account. It is deliberately
+        not the green/yellow/red `HealthStatus` a probe verdict uses: a login
+        either works or it does not, and a rejected password is a different
+        problem from a deliverability one (ADR-0015).
+      enum: [unknown, ok, error]
+
+    MailboxStage:
+      type: string
+      description: |
+        How far a mailbox check got. `config` means it was never sent (an
+        unusable row, a password that would not decrypt), and the rest are the
+        steps in order. The stage is what separates "the server is down" from
+        "the password is wrong".
+      enum: [config, dial, tls, auth, folder, ok]
+
+    MailboxHealth:
+      type: object
+      readOnly: true
+      description: |
+        The last reachability check of the account, written by the bounce
+        poller, the probe collector, the `mailbox-check` leader loop and the
+        test endpoints (architecture 11.5).
+      required: [status]
+      properties:
+        status: { $ref: '#/components/schemas/MailboxStatus' }
+        stage: { $ref: '#/components/schemas/MailboxStage' }
+        reason:
+          type: string
+          description: The failure text, empty while `status` is `ok`.
+        checked_at: { type: string, format: date-time }
+        last_ok_at: { type: string, format: date-time }
+        consecutive_failures:
+          type: integer
+          format: int32
+          description: |
+            Failed checks since the last success. `mailbox.unhealthy` is
+            emitted when it reaches 2, so that a single blip is not a
+            notification.
+
+    MailboxTestRequest:
+      type: object
+      description: |
+        Optional body of a stored-mailbox test. It exists for one case: trying
+        a new password before saving it.
+      properties:
+        password:
+          type: string
+          writeOnly: true
+          description: |
+            Test this password instead of the stored one. It is not saved,
+            whatever the result.
+
+    MailboxTestFolder:
+      type: object
+      required: [exists]
+      properties:
+        exists:
+          type: boolean
+          description: |
+            False for a folder the server does not have, which is the usual
+            shape of a mistyped spam folder.
+        messages:
+          type: integer
+          format: int32
+          description: |
+            Messages the server reported (IMAP `EXISTS`, POP3 `STAT`). A probe
+            mailbox holding thousands is not being drained.
+
+    MailboxTestResult:
+      type: object
+      description: |
+        One credential check. A remote failure is reported here, not as an HTTP
+        error: "the password is wrong" is the answer to the question.
+      required: [ok, stage, latency_ms, folders]
+      properties:
+        ok: { type: boolean }
+        stage: { $ref: '#/components/schemas/MailboxStage' }
+        error:
+          type: string
+          description: |
+            The failure text, the server's own wording where there is one.
+            Empty when `ok`.
+        latency_ms: { type: integer, format: int64 }
+        folders:
+          type: object
+          description: What each inspected folder looked like, keyed by name.
+          additionalProperties: { $ref: '#/components/schemas/MailboxTestFolder' }
+        server:
+          type: string
+          description: |
+            What answered: the POP3 greeting, or the IMAP capability list.
+            Diagnostic only.
+
     BounceMailbox:
       type: object
       description: |
@@ -2870,6 +3098,7 @@ components:
             What happens to a handled message: `keep` (the default), `delete`
             or `move:<folder>` (IMAP only).
         enabled: { type: boolean }
+        health: { $ref: '#/components/schemas/MailboxHealth' }
         version: { type: integer, format: int64, readOnly: true }
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
@@ -2942,6 +3171,7 @@ components:
             Only `Authentication-Results` headers carrying this authserv-id are
             trusted (RFC 8601).
         enabled: { type: boolean }
+        health: { $ref: '#/components/schemas/MailboxHealth' }
         version: { type: integer, format: int64, readOnly: true }
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
@@ -3892,8 +4122,8 @@ components:
             One of `delivery.sent|deferred|failed|bounced|complained|suppressed`,
             `campaign.started|paused|completed|cancelled`,
             `transport.unhealthy|recovered`, `sender.health_changed`,
-            `recipient.unsubscribed`, `delivery.opened|clicked`,
-            `i18n.missing_key`.
+            `mailbox.unhealthy|recovered`, `recipient.unsubscribed`,
+            `delivery.opened|clicked`, `i18n.missing_key`.
         payload:
           description: Event body; the shape depends on `type`.
           type: object
