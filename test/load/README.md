@@ -120,3 +120,20 @@ SIGKILL 되면 "sent 인데 attempt 행이 없는" 배달이 몇 건 남습니�
 
 `created_at → sent_at` 은 §15.1 의 "claim → sent p95" 를 밖에서 근사한 값입니다. `created_at` 이
 인제스트 시각이라 캠페인 규모에서는 대기 시간이 지배하며, 추세용 지표로만 읽으세요.
+
+## 실측 예시 (로컬 10만 건)
+
+2026-09-21, `make load-test`(`--kill-sender`, 6코어 3개 sender)를 한 번 돌린 결과입니다. **한 번의 로컬 측정치**이고
+회귀 판정에 쓰는 숫자가 아닙니다(§15.1) — 재현하려면 위 "로컬에서 10만 건 돌리기"를 그대로 실행하세요.
+
+| 지표 | 값 |
+|---|---|
+| 인제스트 | 10.9s (9,155 rows/s, 예산 180s) |
+| 발송 구간 | 288.2s, 평균 346 msg/s |
+| sent / failed / suppressed | 98,915 / 1,085 / 0 (기대값과 정확히 일치) |
+| chaos-smtp accepted / tempfail / permfail / dropped | 98,915 / 5,256 / 1,085 / 517 |
+| SIGKILL 복구로 인한 중복 발송 | 0건 |
+| `delivery_attempt` 행 수 | 105,721 / 105,770 (49건 부족, 위 문단과 같은 원인) |
+| `created_at → sent_at` p50 / p95 (n=193) | 149.2s / 237.4s |
+| DB 크기 | 191.4 MiB |
+| 전체 소요 | 311.3s |

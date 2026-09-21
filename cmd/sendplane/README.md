@@ -81,7 +81,7 @@ API)과 `/t/`(트래킹)를 `/` 아래에 소유하고 있어서입니다. `/con
 
 콘솔의 API 주소는 기본적으로 same-origin(`/api/v1`)입니다 — 별도 설정 없이 같은
 `sendplane` 프로세스에 붙습니다. 자세한 프론트엔드 구성은
-[`web/README.md`](../web/README.md)를 참고하세요.
+[`web/README.md`](../../web/README.md)를 참고하세요.
 
 ## cmd/chaos-smtp
 

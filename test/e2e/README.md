@@ -132,4 +132,20 @@ i18n 제목과 트래킹 URL 확인은 시나리오 2(chaos-smtp, 10k)로 돌아
 [`.github/workflows/e2e.yml`](../../.github/workflows/e2e.yml) 가 PR 과 main push 에서 postgres 로,
 매일 02:40 UTC 에 postgres + mongo 로 돌립니다(§15 의 "mongo 는 nightly"). 잡 타임아웃은 20분이고,
 하니스의 `--budget`(기본 10분)이 그보다 먼저, 더 자세한 이유와 함께 실패합니다.
+
+## 실측 예시
+
+2026-09-21, `make e2e E2E_FLAGS=--kill-sender`(postgres)를 한 번 돌린 결과입니다. **한 번의 로컬 측정치**이고
+회귀 판정에 쓰는 숫자가 아닙니다 — 재현하려면 위 "돌리기"를 그대로 실행하세요.
+
+| 시나리오 | 결과 | 소요 |
+|---|---|---|
+| 1. bootstrap | PASS | 2.3s |
+| 3. transactional + idempotency | PASS | 4.1s |
+| 4. tracking and unsubscribe | PASS | 35.4s |
+| 5. bounce, complaint, forged DSN | PASS | 4.9s |
+| 2. bulk campaign (+ 8. lease recovery) | PASS | 1m54.3s |
+| 6. loopback probe | PASS | 21.1s |
+| 7. events | PASS | 8.5s |
+| 전체 | PASS, KNOWN-FAIL 0건 | 3m10.6s |
 로그는 성공·실패와 무관하게 항상 덤프합니다.

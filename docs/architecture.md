@@ -1,6 +1,7 @@
 # sendplane 아키텍처 설계
 
-> 상태: 초안 v2 (2026-09-20, 트래킹·수신거부·루프백 헬스체크 반영). 결정 근거는 [adr/](adr/) 참조, 구현 순서는 [roadmap.md](roadmap.md) 참조.
+> 상태: v3 (2026-09-21, 구현 반영). 결정 근거는 [adr/](adr/) 참조, 구현 순서는 [roadmap.md](roadmap.md) 참조.
+> 이 문서는 코드와 어긋난 부분을 실제 구현(`sendplane.go`, `options.go`, `host/*.go`, `internal/*/README.md`, `store/*/README.md`, `test/{load,e2e}/README.md`, `.github/workflows/*.yml`)에 맞춰 바로잡은 버전입니다.
 
 ## 0. 한 줄 요약
 
@@ -68,119 +69,134 @@ k8s에서는 역할별 Deployment. **모든 역할이 같은 Go 라이브러리�
 
 ```
 github.com/sendplane/sendplane
-├── sendplane.go            // New(), Options, Sendplane, SenderConfig  ← 공개 API
+├── sendplane.go            // New(), Handler(), RunControl(), RunSender()  ← 공개 API
+├── options.go              // Options, host 타입 별칭, Action 상수
+├── bounce.go / probe.go    // RunBounce/RunControl이 internal/bounce, internal/probe에 배선하는 어댑터
 ├── host/                   // 호스트가 주입하거나 받는 타입들 (공개, leaf)
 │                           //   Principal/Action/Authenticator/Authorizer/TenantResolver,
 │                           //   Hooks/Event/EventSink/OutboundMessage/RecipientContext,
-│                           //   SecretCipher, Limits, Metrics
+│                           //   SecretCipher, Limits, Metrics, ProbeConfig
 ├── store/                  // 리포지터리 인터페이스 + 모델 (공개: 커스텀 DB 구현용)
 │   ├── postgres/           // pgx 기반 구현 + migrations/
-│   ├── mongo/              // mongo-driver 기반 구현 + index bootstrap
-│   └── storetest/          // 적합성 스위트: storetest.Run(t, newStore)
+│   ├── mongo/              // 공식 mongo-driver/v2 기반 구현 + index bootstrap
+│   ├── memstore/           // 인메모리 구현(테스트 전용)
+│   └── storetest/          // 적합성 스위트: storetest.Run(t, newStore), 54개 서브테스트
 ├── cmd/
-│   ├── sendplane/          // 참조 바이너리 (--roles, 설정 파일 기반 auth/hook 구현, UI embed)
-│   └── chaos-smtp/         // 테스트용 실패 주입 SMTP 서버
+│   ├── sendplane/          // 참조 바이너리 (--roles, 설정 파일 기반 auth/hook 구현)
+│   │   └── console/        // web/apps/console/dist를 //go:embed하는 leaf 패키지(ADR-0010)
+│   └── chaos-smtp/         // 테스트용 결정적 실패 주입 SMTP 서버(internal/chaossmtp 래핑)
 ├── internal/
-│   ├── api/                // HTTP 핸들러, OpenAPI(api/openapi.yaml)와 1:1
-│   ├── control/            // 리더 루프들(scheduler, finalizer, dnscheck, retention, outbox)
-│   ├── ingest/             // NDJSON 수신자 스트리밍 인제스트
-│   ├── render/             // Liquid 엔진, i18n 태그, MJML 컴파일, text 자동생성
-│   ├── sender/             // claim loop, transport pool, rate limiter, retry policy, error classifier
-│   ├── bounce/             // IMAP/POP3 poller, DSN(RFC3464)/ARF(RFC5965) 파서, VERP
-│   ├── dnscheck/           // SPF/DKIM/DMARC/MX/PTR 체커
-│   └── events/             // 아웃박스 → EventSink 디스패치
+│   ├── api/                // HTTP 핸들러(chi + strict server), OpenAPI(api/openapi.yaml) 85개 오퍼레이션과 1:1
+│   ├── control/             // 리더 루프 7종 + TrackingBuffer + 캠페인 상태기계(ADR-0002, ADR-0003)
+│   ├── ingest/               // NDJSON 수신자 스트리밍 인제스트, CSV→NDJSON 변환
+│   ├── render/                // Liquid 엔진, i18n 태그, MJML 컴파일, HTML→text 자체 구현
+│   ├── sender/                 // claim loop, transport pool, rate limiter, retry policy, error classifier
+│   ├── bounce/                  // IMAP/POP3 poller, DSN(RFC3464)/ARF(RFC5965) 파서, VERP 상관관계
+│   ├── mailbox/                  // bounce·probe가 공유하는 IMAP/POP3 수신 클라이언트
+│   ├── probe/                     // 루프백 발신 헬스 체크 러너(ADR-0012)
+│   ├── dnscheck/                   // SPF/DKIM/DMARC/MX/PTR 진단 계층
+│   ├── tracking/                    // 무상태 서명 토큰(오픈/클릭/수신거부) + VERP 주소
+│   └── chaossmtp/                    // 결정적으로 실패하는 인프로세스 ESMTP 서버(테스트 인프라)
 ├── api/openapi.yaml        // 단일 진실 원천. Go 서버 타입과 TS 클라이언트를 여기서 생성
-├── web/                    // pnpm workspace (§13)
-├── deploy/helm/sendplane/
+├── web/                    // pnpm workspace: packages/api, packages/ui, apps/console (§13)
+├── deploy/
+│   ├── dev/                // 로컬 docker-compose(postgres/mongo) + 참조 이미지 Dockerfile
+│   └── helm/sendplane/     // control/sender/bounce/migrate 차트
+├── test/
+│   ├── load/               // 1M 수신자 부하 테스트 하니스(§15.1)
+│   └── e2e/                // compose 기반 종단 간 시나리오 하니스(§15)
 └── docs/
 ```
 
-공개 패키지는 `sendplane`(루트), `host`, `store` 셋뿐입니다. 나머지는 `internal/`로 막아 Hyrum's Law 표면을 최소화합니다.
+공개 패키지는 `sendplane`(루트), `host`, `store`(및 `store/postgres`, `store/mongo`)뿐입니다. `internal/*`는 Hyrum's Law 표면을 최소화하려고 막아 둡니다.
 
-`host`가 따로 있는 이유는 **import 사이클** 하나뿐입니다. 루트는 `Handler`/`RunControl`/`RunSender`를 구현하려고
-`internal/api`·`internal/control`·`internal/sender`를 import하는데, 그 패키지들도 호스트가 주입하는 타입(`Hooks`, `Limits`,
-`EventSink`, `Metrics` …)이 필요합니다. 그래서 그 타입들은 `store`만 import하는 leaf 패키지 `host`에 두고,
-루트가 **타입 별칭**으로 전부 재노출합니다(`type Hooks = host.Hooks`). 호스트는 계속 `sendplane.X`만 쓰면 되고,
+`host`가 따로 있는 이유는 **import 사이클** 하나뿐입니다. 루트는 `Handler`/`RunControl`/`RunSender`/`RunBounce`를 구현하려고
+`internal/api`·`internal/control`·`internal/sender`·`internal/bounce`·`internal/probe`를 import하는데, 그 패키지들도 호스트가 주입하는 타입(`Hooks`, `Limits`,
+`EventSink`, `Metrics`, `ProbeConfig` …)이 필요합니다. 그래서 그 타입들은 `store`만 import하는 leaf 패키지 `host`에 두고,
+루트(`options.go`)가 **타입 별칭**으로 전부 재노출합니다(`type Hooks = host.Hooks`). 호스트는 계속 `sendplane.X`만 쓰면 되고,
 `sendplane.Hooks`와 `host.Hooks`는 같은 타입이라 경계에서 변환이 필요 없습니다.
 
 ## 3. 임베딩 API (`sendplane.New`)
 
-```go
-package sendplane
+`Options`·`Hooks`·`SenderConfig`·`ProbeConfig`의 실제 선언은 `options.go`, `sendplane.go`, `host/*.go`에 있습니다. 아래는 그 요지입니다.
 
-// 아래 타입은 전부 host 패키지에 선언되어 있고 루트가 별칭으로 재노출합니다(§2.1).
-// 호스트 코드에서는 sendplane.X 로 쓰면 되고, host.X 와 동일한 타입입니다.
+```go
+package sendplane // options.go
 
 type Options struct {
-    Store   store.Provider   // 필수
-    Auth    Authenticator    // 필수. 요청 → Principal
-    Authz   Authorizer       // 선택. 기본: 인증되면 전부 허용
-    Tenants TenantResolver   // 선택. 기본: Principal.TenantID, 없으면 "default"
+    Store   store.Provider // 필수
+    Auth    Authenticator  // 필수. 요청 → Principal
+    Authz   Authorizer     // 선택. 기본: 인증된 principal은 전부 허용
+    Tenants TenantResolver // 선택. 기본: Principal.TenantID, 없으면 "default"
     Hooks   Hooks
-    Secrets SecretCipher     // SMTP 비밀번호 등 at-rest 암호화. 기본: AES-GCM(env key)
-    Limits  Limits           // 캠페인당 최대 수신자, 본문 크기, vars 크기 등
-    Logger  *slog.Logger
-    Meter   metric.MeterProvider // OpenTelemetry
+    Secrets SecretCipher // SMTP/IMAP 비밀번호, DKIM 키 at-rest 암호화
+    Limits  Limits       // 0인 필드는 DefaultLimits로 채워짐
+    // Probe는 루프백 헬스 프로브(§11)를 켠다. 기본 off: 프로브 메일박스가
+    // 없는데 트리거만 도는 것은 아예 없는 것보다 나쁘다.
+    Probe   ProbeConfig
+    Logger  *slog.Logger      // 기본: slog.Default()
     Clock   func() time.Time
+    Metrics Metrics           // sender가 방출하는 카운터/히스토그램. 기본: host.NopMetrics
 }
 
-type Principal struct {
-    ID       string
-    TenantID string            // TenantResolver가 없을 때 사용
-    Roles    []string          // 호스트 정의 문자열, sendplane은 해석하지 않음
-    Attrs    map[string]any
-}
-
-type Authenticator interface {
-    Authenticate(r *http.Request) (*Principal, error) // 실패 시 ErrUnauthenticated
-}
-
-// Action은 sendplane이 정의하는 폐쇄 집합. 호스트는 이걸 자기 RBAC에 매핑한다.
-type Action string
-const (
-    ActionTemplateRead  Action = "template.read"
-    ActionTemplateWrite Action = "template.write"
-    ActionCampaignRead  Action = "campaign.read"
-    ActionCampaignWrite Action = "campaign.write"
-    ActionCampaignSend  Action = "campaign.send"      // 관리와 발송 분리 (listmonk 교훈)
-    ActionMessageSend   Action = "message.send"       // transactional
-    ActionSenderWrite   Action = "sender.write"       // SMTP/도메인 설정
-    ActionDeliveryRead  Action = "delivery.read"
-    ActionEventRead     Action = "event.read"
-    // ...
+// 아래 타입은 전부 leaf 패키지 host에 선언되어 있고 루트가 별칭으로 재노출합니다(§2.1).
+// sendplane.Hooks와 host.Hooks는 같은 타입입니다.
+type (
+    Principal         = host.Principal
+    Authenticator      = host.Authenticator // Authenticate(r) (*Principal, error), 실패 시 ErrUnauthenticated
+    Action              = host.Action        // x-sendplane-action 값과 1:1인 폐쇄 집합(예: ActionCampaignSend, ActionMessageSend)
+    Resource             = host.Resource      // {Kind, ID, TenantID}
+    Authorizer            = host.Authorizer    // Authorize(ctx, p, a, r) error, 실패 시 ErrForbidden
+    TenantResolver         = host.TenantResolver
+    SecretCipher            = host.SecretCipher
+    ProbeConfig               = host.ProbeConfig // Enabled, HMACKey, Nameservers, Interval, Timeout
+    Hooks                      = host.Hooks
+    RecipientContext            = host.RecipientContext // 훅에 넘어가는 수신자별 데이터
+    OutboundMessage               = host.OutboundMessage  // BeforeSend가 보는 렌더된 메시지
+    UnsubscribeNotice              = host.UnsubscribeNotice
+    EventSink                       = host.EventSink
+    Limits                           = host.Limits
+    Metrics                           = host.Metrics
 )
-type Resource struct{ Kind, ID, TenantID string }
-type Authorizer interface {
-    Authorize(ctx context.Context, p *Principal, a Action, r Resource) error // ErrForbidden
-}
 
-type TenantResolver interface {
-    Resolve(ctx context.Context, r *http.Request, p *Principal) (tenantID string, err error)
-}
-
-type Hooks struct {
+type Hooks struct { // host/hooks.go
     // 수신거부 "목적지"(호스트 URL). 우선순위: 수신자 unsubscribe_url 변수 > 테넌트 URL 템플릿 > 이 훅.
-    // unsubscribe_mode=sendplane 이면 메일에는 sendplane 트래킹 URL이 들어가고 클릭 시 이 목적지로 리다이렉트된다(§9).
     UnsubscribeURL func(ctx context.Context, rc RecipientContext) (string, error)
-    // 원클릭(List-Unsubscribe-Post) 수신거부가 sendplane 엔드포인트로 들어왔을 때 호스트에 동기 통지. 없으면 이벤트(webhook)로만 전달.
+    // RFC 8058 원클릭 수신거부가 sendplane 엔드포인트로 들어왔을 때 동기 통지. nil이거나 실패하면 이벤트(webhook)로 재시도.
     Unsubscribed func(ctx context.Context, u UnsubscribeNotice) error
-    // 발송 직전 거부/수정. 호스트 측 suppression, 법적 차단 등. ErrSkip 반환 시 status=suppressed.
+    // 발송 직전 거부/수정. ErrSkip 반환 시 delivery는 suppressed.
     BeforeSend func(ctx context.Context, m *OutboundMessage) error
-    // delivery.sent/failed/bounced/complained, campaign.completed, domain.health_changed ...
     Events EventSink // 기본: 아웃박스 → 테넌트 설정의 webhook URL
 }
 
 func New(o Options) (*Sendplane, error)
-func (s *Sendplane) Handler() http.Handler                 // /api/v1 라우터. 호스트 mux에 mount
-func (s *Sendplane) RunControl(ctx context.Context) error  // 리더 루프
+func (s *Sendplane) Handler() http.Handler                 // /api/v1, /t/*, /healthz. 호스트 mux에 mount
+func (s *Sendplane) RunControl(ctx context.Context) error  // 리더 루프 + TrackingBuffer
 func (s *Sendplane) RunSender(ctx context.Context, c SenderConfig) error
-func (s *Sendplane) RunBounce(ctx context.Context) error
+func (s *Sendplane) RunBounce(ctx context.Context, c BounceConfig) error
+
+// SenderConfig configures one sender process (sendplane.go). WorkerID는 필수
+// (lease owner이자 heartbeat 행의 ID), 나머지는 전부 기본값이 있다.
+type SenderConfig struct {
+    WorkerID             string
+    Lanes                map[store.Lane]int // 기본 transactional 8, bulk 32
+    ClaimBatch           int
+    LeaseFor             time.Duration
+    PollInterval         time.Duration
+    CampaignRefresh      time.Duration // running-campaign 집합의 TTL(ADR-0002)
+    TenantConcurrency    int
+    DefaultRatePerSecond float64
+    MaxMsgsPerConn       int
+    EHLOName             string
+    TLSConfig            *tls.Config
+}
 ```
 
 - **Go 코드 없이도 통합 가능**해야 합니다(비-Go 호스트). 그래서 수신거부 URL은 "수신자 변수" 또는
   "테넌트 URL 템플릿(Liquid, 예: `https://app.example.com/u?e={{ recipient.email | url_encode }}&t={{ recipient.vars.unsub_token }}`)"
   으로도 줄 수 있고, 이벤트는 webhook으로 받을 수 있습니다. Go 훅은 escape hatch입니다.
 - 참조 바이너리(`cmd/sendplane`)는 `Authenticator`로 **정적 API Key(테넌트 매핑 포함) / JWT(JWKS)** 두 구현을 설정 파일로 제공합니다.
+- `Handler()`와 `RunControl()`은 프로세스 전체에서 공유하는 하나의 `*control.Control`을 처음 호출한 쪽이 만듭니다(`sendplane.controlPlane`, `sync.Once`). `Options.Probe.Enabled`가 켜져 있으면 이때 `probe-trigger`/`probe-collect` 리더 루프도 함께 등록됩니다.
 
 ## 4. 도메인 모델
 
@@ -226,6 +242,7 @@ pending ──(campaign start: running-set 진입)──► queued ──claim�
   `bounced`는 `sent` 이후 비동기 DSN으로만 진입(hard bounce). soft bounce는 `BounceEvent`로 기록하고 상태는 유지.
 - **재시도 카운트는 transient에만 소모**. transport 자체 문제(auth 실패, 연결 거부)는 attempt를 기록하되 `attempt_count`를 늘리지 않고 transport를 cooldown 시킴.
 - **수동 재시도**: `POST /campaigns/{id}/retry {filter}` 또는 `POST /deliveries/{id}/retry` → `retry_generation++`, `attempt_count` 유지, `queued`로 복귀. 이력이 끊기지 않음.
+- **`pending → queued` 화살표는 개념도입니다. 실제로는 행을 갱신하지 않습니다** (ADR-0002 보완, §7.2). `DeliveryRepo.Claim`은 `queued`/`deferred`뿐 아니라, 호출자가 넘긴 running 캠페인 집합에 속한 캠페인의 `pending` 행도 **그 자리에서 직접** `leased`로 올립니다(`store/postgres/delivery.go`의 `Claim`: `status IN (1,3) OR (status = 0 AND campaign_id = ANY(...))`). campaign 필터가 아예 없는 호출(`CampaignIDs == nil`)에는 `pending` 행이 전혀 섞이지 않습니다 — 그래서 캠페인이 `running`이 아닌 한 인제스트만 끝난 1M 행이 새어나가지 않습니다. `start`가 쓰는 행은 캠페인 하나뿐입니다.
 
 ### 4.2 에러 분류 (normalize)
 
@@ -244,31 +261,43 @@ pending ──(campaign start: running-set 진입)──► queued ──claim�
 ### 5.1 인터페이스 (요지)
 
 ```go
-package store
+package store // store/store.go
 
 type Provider interface {
     ForTenant(ctx context.Context, tenantID string) (Store, error)
-    ActiveTenants(ctx context.Context) ([]string, error) // sender 폴링 대상. shared 모드: DISTINCT tenant_id WHERE 작업 존재
+    // ActiveTenants: 비종료 delivery가 있거나 scheduled|running|paused 캠페인이 있는
+    // 테넌트. sender와 대부분의 리더 루프가 폴링 대상으로 쓴다. SystemTenantID는 절대 포함하지 않음.
+    ActiveTenants(ctx context.Context) ([]string, error)
+    // Tenants: 활성 여부와 무관하게 설정 행이나 설정성 행(transport/sender/도메인/
+    // bounce·probe mailbox/layout/template/campaign)이 있는 전체 테넌트. 바운스 폴러와
+    // control의 AllTenants 루프(§7.3, §10, §11.2, §12)가 이걸 쓴다 — 바운스와 프로브
+    // 판정은 테넌트가 이미 한가해진 뒤에 도착한다.
+    Tenants(ctx context.Context) ([]string, error)
     Migrate(ctx context.Context) error
     Close() error
 }
 
 type Store interface {
-    Tenant()      TenantSettingsRepo
-    Transports()  TransportRepo
-    Senders()     SenderRepo
-    Domains()     DomainRepo         // + DomainCheckRepo
-    Layouts()     LayoutRepo
-    Templates()   TemplateRepo       // + i18n bundle
-    Versions()    MessageVersionRepo
-    Campaigns()   CampaignRepo       // + RecipientChunkRepo
-    Deliveries()  DeliveryRepo
-    Attempts()    AttemptRepo
-    Suppressions() SuppressionRepo
-    Bounces()     BounceRepo
-    Outbox()      OutboxRepo
-    Locks()       LockRepo           // 리더 선출 / 싱글턴 잡 lease
-    Workers()     WorkerRepo         // sender heartbeat (rate 분배용)
+    TenantSettings()  TenantSettingsRepo
+    Transports()      TransportRepo
+    Senders()         SenderRepo
+    Domains()         DomainRepo
+    BounceMailboxes() BounceMailboxRepo // 테넌트 리소스, /api/v1/bounce-mailboxes (§10)
+    ProbeMailboxes()  ProbeMailboxRepo  // 테넌트 리소스, /api/v1/probe-mailboxes (§11.1)
+    ProbeRuns()       ProbeRunRepo
+    Layouts()         LayoutRepo
+    Templates()       TemplateRepo // + i18n bundle
+    Versions()        MessageVersionRepo
+    Campaigns()       CampaignRepo
+    RecipientChunks() RecipientChunkRepo
+    Deliveries()      DeliveryRepo
+    Attempts()        AttemptRepo
+    Suppressions()    SuppressionRepo
+    Bounces()         BounceRepo
+    Tracking()        TrackingRepo
+    Outbox()          OutboxRepo
+    Locks()           LockRepo   // 리더 선출 / 싱글턴 잡 lease
+    Workers()         WorkerRepo // sender heartbeat (rate 분배용)
 }
 
 // 큐 역할을 하는 핵심 메서드
@@ -279,21 +308,26 @@ type DeliveryRepo interface {
     ReleaseExpiredLeases(ctx, now time.Time, limit int) (int, error)
     CountByStatus(ctx, campaignID) (map[Status]int64, error)
     BulkTransition(ctx, campaignID, from []Status, to Status, limit int) (int, error) // cancel 등, 청크 반복
+    MarkBounced(ctx, id, now) (changed bool, err error)  // lease 없는 비동기 DSN 전이, status=sent CAS
+    MarkComplained(ctx, id, now) (changed bool, err error)
     ...
 }
 type ClaimRequest struct {
-    Lane        Lane      // transactional | bulk
-    CampaignIDs []ID      // bulk: running 캠페인 집합 (nil = 제한 없음)
+    Lane        Lane      // transactional | bulk | probe
+    CampaignIDs []string  // nil: pending 없이 queued/deferred만. len 0: campaign_id IS NULL만. 값 있음: 그 캠페인들의 pending도 포함(§4.1)
     Limit       int
     LeaseFor    time.Duration
     WorkerID    string
+    Now         time.Time // claim 기준 시각. queued/deferred는 NextAttemptAt <= Now인 것만, lease는 Now+LeaseFor까지
 }
 ```
+
+시간 해상도는 **밀리초**입니다: `store.TruncateTime`이 쓰기 직전 모든 `time.Time`을 밀리초로 절삭하고(반올림이 아니라 절삭), `Claim`의 `next_attempt_at <= now` 같은 비교 경계값도 같은 함수를 지나므로 같은 값에서 만든 시각끼리는 항상 정확히 일치합니다(`store/doc.go`). Postgres는 `timestamptz`를 그대로 절삭해 쓰고, Mongo는 BSON date의 네이티브 해상도가 이미 밀리초라 자연히 맞습니다.
 
 설계 규칙:
 - **다중 리포지터리 트랜잭션을 요구하지 않음.** 원자성이 필요한 곳은 조건부 갱신(CAS)과 멱등 삽입으로 해결한다(Mongo, 커스텀 DB 친화).
 - 모든 메서드는 `Store`가 이미 테넌트에 바인딩된 상태이므로 tenantID 인자를 받지 않는다. shared 구현이 내부적으로 `tenant_id` 조건을 강제 → 테넌트 누락 버그를 구조적으로 차단.
-- `storetest.Run(t, factory)`가 계약이다: 멱등 삽입, 동시 claim 시 중복 없음, lease 만료 회수, 상태 전이 CAS, 테넌트 격리(다른 테넌트 Store로는 `ErrNotFound`) 등을 두 구현에 동일하게 실행한다.
+- `storetest.Run(t, factory)`가 계약이다: 멱등 삽입, 동시 claim 시 중복 없음, lease 만료 회수, 상태 전이 CAS, 테넌트 격리(다른 테넌트 Store로는 `ErrNotFound`), 커서 페이지네이션 안정성 등 **54개 서브테스트**를 두 구현(및 memstore)에 동일하게 실행한다(ADR-0007).
 
 ### 5.2 Postgres 구현 요점
 
@@ -368,7 +402,7 @@ Postgres shared 모드에서 RLS(row-level security)는 선택 강화 항목으�
 - i18n 태그: `{% t "welcome.title" %}` / 인자 전달 `{% t "greeting" name: recipient.name %}` / 필터형 `{{ "welcome.title" | t }}`.
   번역 문자열 자체도 Liquid로 해석되므로 `"{{ name }}님, 환영합니다"` 처럼 변수 사용 가능.
 - **HTML 파트는 기본 이스케이프**: 바인딩의 문자열 값을 렌더 전에 재귀적으로 HTML 이스케이프. 신뢰된 HTML 조각은 API에서 `{"$html": "<b>..</b>"}` 형태로만 전달 가능. subject/text 파트는 이스케이프 없음. (ADR-0004)
-- 요청서의 `{user.name}` 단일 중괄호 대신 Liquid 이중 중괄호를 채택한 이유는 ADR-0004 참조. 이 결정은 확인이 필요합니다.
+- 요청서의 `{user.name}` 단일 중괄호 대신 Liquid 이중 중괄호를 채택한 이유는 ADR-0004 참조. 사용자 확인 완료(ADR-0004 상태 참조).
 
 ### 6.2 i18n 번들
 
@@ -437,9 +471,9 @@ GET  /campaigns/{id}/deliveries?status=failed&cursor=...
 
 ### 7.3 완료 판정과 통계
 
-control 리더 루프가 running 캠페인마다 `CountByStatus`를 주기(기본 10s, 캠페인 크기에 따라 증가)로 집계해 캠페인 행에 캐시. 미완료 상태(`pending/queued/leased/deferred`)가 0이면 `completed` + 이벤트. Delivery마다 카운터를 증가시키는 hot-row 갱신은 하지 않습니다.
+control 리더 루프가 running 캠페인마다 `CountByStatus`를 주기(기본 10s)로 집계해 캠페인 행에 캐시. 미완료 상태(`pending/queued/leased/deferred`)가 0이면 `completed` + 이벤트. Delivery마다 카운터를 증가시키는 hot-row 갱신은 하지 않습니다. `total == 0`은 완료로 보지 않습니다 — 보존기간이 이미 행을 지웠거나 인제스트와 경합한 캠페인이지 "할 일이 있었고 다 끝난" 캠페인이 아닙니다. delivery 수가 `WithLargeCampaign(rows, every)`의 `rows`(기본 10만)를 넘으면 `every`틱(기본 6)에 한 번만 `CountByStatus`를 돌려, 100만 행 `COUNT`가 이 패키지에서 실제 DB를 아프게 할 수 있는 유일한 쿼리가 되지 않게 합니다.
 
-완료 후에도 **트래킹 유니크만**은 계속 갱신합니다. 오픈·클릭·수신거부는 대부분 캠페인이 끝난 뒤에 들어오므로, 완료 시점에 쓴 값으로 굳으면 §9.3의 수신거부율이 사실상 영원히 0이 됩니다. 같은 finalizer 틱이 `completed` 캠페인을 페이지 단위로(틱당 상한 있음, 커서는 다음 틱으로 이어짐) 훑어 `CountUnique` → `UpdateStats`만 다시 씁니다 — `ByStatus`는 손대지 않습니다(끝난 캠페인의 상태 수는 확정입니다). 주기는 감쇠합니다: 완료 후 1시간은 매 틱, 그 뒤에는 10분마다, 완료 후 14일(`WithTrackingRefresh`)이 지나면 그만둡니다.
+완료 후에도 **트래킹 유니크만**은 계속 갱신합니다. 오픈·클릭·수신거부는 대부분 캠페인이 끝난 뒤에 들어오므로, 완료 시점에 쓴 값으로 굳으면 §9.3의 수신거부율이 사실상 영원히 0이 됩니다. 같은 finalizer 틱이 `completed` 캠페인을 페이지 단위로(`Batches.StatsRefreshScan`, 기본 2000건씩, 커서는 다음 틱으로 이어짐) 훑어 `CountUnique` → `UpdateStats`만 다시 씁니다 — `ByStatus`는 손대지 않습니다(끝난 캠페인의 상태 수는 확정입니다). 주기는 감쇠합니다: 완료 후 1시간은 매 틱, 그 뒤에는 10분마다(`Stats.ComputedAt` 기준), 완료 후 14일(`WithTrackingRefresh`)이 지나면 그만둡니다. 값이 안 바뀌어도 `ComputedAt`은 올립니다 — 안 올리면 다음 틱이 같은 캠페인을 다시 셉니다.
 
 그래서 finalizer는 `ActiveTenants`가 아니라 **모든 테넌트**를 틱합니다. 완료 판정 자체는 active 테넌트에서만 일어나지만, 갱신해야 할 그 캠페인의 테넌트는 대개 이미 한가합니다. 테넌트 목록은 리더가 30초 캐시로 공유합니다(`Provider.Tenants`는 비쌀 수 있습니다).
 
@@ -488,9 +522,29 @@ control이 인증 없는 공개 라우트를 제공합니다. 테넌트별 `trac
 | `GET /t/u/{token}` | 수신거부 클릭 기록 후 **호스트 목적지로 302** |
 | `POST /t/u/{token}` | RFC 8058 원클릭 수신거부. 기록 + 호스트 통지, 200 |
 
-- `token = kid ‖ base64url(delivery_id ‖ kind ‖ link_no ‖ HMAC(tenant_key, delivery_id‖kind‖link_no‖u))`. **상태 없이 검증**되고, 목적지 `u`가 서명에 포함되어 오픈 리다이렉트가 불가능합니다. 수신자별 링크를 DB에 저장하지 않습니다.
-- 서명 키는 테넌트별로 `SecretCipher`로 보관하고 `kid`로 회전합니다.
+- 실제 형식(`internal/tracking`, ADR-0011과의 차이는 아래 표)은 다음과 같습니다.
+
+  ```
+  token = kid "." base64url( body ‖ mac )
+
+  body = len(tenant_id) ‖ tenant_id ‖ len(delivery_id) ‖ delivery_id ‖ kind ‖ varint(link_no)
+         [ ‖ len(dest) ‖ dest ]          // kind == unsubscribe 일 때만 dest를 본문에 싣는다
+  mac  = HMAC-SHA256( secret,
+           "sendplane/tracking/v1\0" ‖ len(tenant_id) ‖ tenant_id
+           ‖ len(delivery_id) ‖ delivery_id
+           ‖ kind ‖ varint(link_no) ‖ len(dest) ‖ dest )[:16]   // 앞 16바이트(128비트)만
+  ```
+
+  **상태 없이 검증**되고, 목적지 `dest`는 kind와 무관하게 항상 MAC에 포함되어 오픈 리다이렉트가 불가능합니다(`/t/c/{token}?u=`는 서명자가 고른 `u`로만 리다이렉트). **테넌트 ID가 토큰 본문에 들어 있습니다** — 공개 라우트는 인증이 없고 서명 키는 테넌트별이라, 토큰에 테넌트가 없으면 검증이 모든 테넌트의 키를 훑어야 합니다. MAC이 테넌트 ID도 덮으므로 다른 테넌트로 바꿔치기할 수 없습니다. 수신자별 링크를 DB에 저장하지 않습니다.
+
+  | 항목 | 최초 설계 | 실제 구현 | 이유 |
+  |---|---|---|---|
+  | 구분자 | `kid ‖ base64url(...)` | `kid "." base64url(...)` | kid 길이가 가변이라 구분자 없이는 되돌릴 수 없음 |
+  | MAC 길이 | 전체 HMAC-SHA256(32바이트) | 앞 16바이트만 | 128비트면 위조가 무의미하고, 토큰이 모든 메일의 모든 링크에 들어가므로 길이를 아낌 |
+
+- 서명 키는 테넌트별로 `SecretCipher`로 **암호화하지 않고** 보관합니다(`store.SigningKey`) — 토큰을 검증하는 모든 공개 경로가 키를 그대로 읽어야 하고, 그 복제본에 cipher가 없을 수도 있기 때문입니다. `kid`로 회전하며, 옛 키를 `TrackingConfig.SigningKeys`에 남겨 두는 동안만 옛 링크가 유효합니다.
 - 보존기간이 지나 삭제된 delivery의 토큰은 검증은 통과하지만 기록은 버립니다.
+- VERP 주소(§10)도 같은 패키지가 만들지만 MAC 컨텍스트가 다릅니다(`"sendplane/verp/v1\0"`) — 테넌트가 같은 키를 두 용도에 재사용해도 서명이 섞이지 않습니다.
 
 ### 9.2 렌더 시 삽입 (sender)
 
@@ -544,7 +598,7 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
     enqueue Delivery(lane=probe, sender, to=mbox.address,
                      subject "[sendplane probe {run_id}]", header X-Sendplane-Probe: {run_id}/{hmac})
     # 일반 sender 경로로 발송 → 실제 transport, DKIM 서명, Return-Path, 링크 재작성까지 동일 조건
-  poll mbox (IMAP SEARCH HEADER X-Sendplane-Probe, 타임아웃 15분):
+  poll mbox (IMAP SEARCH HEADER X-Sendplane-Probe → 못 찾으면 SEARCH SUBJECT "[sendplane probe {run_id}]"로 폴백, 타임아웃 15분):
     미수신 → red("not delivered") (+ 바운스 메일박스에 run_id의 DSN이 있으면 사유 첨부)
     수신   → 파싱:
       Authentication-Results (RFC 8601): authserv-id가 mbox 설정값과 일치하는 헤더만 신뢰
@@ -562,6 +616,7 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
 - 프로세스 단위 설정은 `Options.Probe`(`host.ProbeConfig`: `Enabled`, `HMACKey`, `Nameservers`, `Interval`, `Timeout`)입니다. 꺼져 있으면 `POST /senders/{id}/probe`는 501입니다.
 - 여러 메일박스 결과의 "최악 값"이 요약 상태이고 상세는 메일박스별로 표시합니다.
 - 프로브 발송이 transport 상태(§8.3)도 갱신하므로 별도 SMTP 연결 테스트 버튼은 "프로브 즉시 실행"으로 대체합니다.
+- `POST /senders/{id}/probe`가 트리거할 프로브 메일박스가 하나도 없으면 루프백 자체를 건너뛰고, DNS 체커가 설정돼 있으면 **DNS 전용 run**으로 대체해 상태 사유에 "loopback 미구성"을 남깁니다(ErrNoMailbox, ADR-0012) — 아무 진단도 안 주는 것보다는 낫다는 판단입니다.
 
 ### 11.3 DNS 정적 검사 (진단 계층)
 
@@ -588,7 +643,8 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
 - 이벤트 타입: `delivery.sent|deferred|failed|bounced|complained|suppressed`, `campaign.started|paused|completed|cancelled`, `transport.unhealthy|recovered`, `sender.health_changed`, `recipient.unsubscribed`, `delivery.opened|clicked`, `i18n.missing_key`.
 - **구독 필터**는 `TenantSettings.EventTypes`(API `event_types`)입니다. 비어 있으면 **기본 집합** = `delivery.sent`·`delivery.opened`·`delivery.clicked`를 뺀 전부, 값이 있으면 그 목록이 곧 전부입니다. 필터는 두 번 걸립니다: **enqueue 할 때**(구독하지 않은 타입은 outbox 행 자체를 만들지 않습니다)와 **dispatch 할 때**(구독을 끄면 이미 쌓인 행도 나가지 않고, 그 행은 delivered로 정리됩니다).
 - `delivery.sent`/`delivery.failed`는 sender의 배치 `Complete` 이후 같은 스토어에 씁니다. 계약은 **delivery 하나당 outbox 행 하나**이고, 그래서 100만 수신자 캠페인을 구독하면 outbox 행·dispatch·HTTP POST가 100만 건입니다 — `delivery.sent`가 기본 집합에서 빠져 있는 이유가 그것입니다. 켜기 전에 그 비용을 계산하십시오.
-- outbox 디스패처는 두 개입니다: active 테넌트를 1초마다 도는 것(캠페인 전이의 지연을 짧게)과, **모든 테넌트**를 10초마다 도는 `outbox-sweep`. 바운스(며칠 뒤)·프로브 판정(1분 뒤)처럼 테넌트가 한가해진 뒤에 생기는 이벤트는 sweep이 아니면 다음 캠페인 때까지 pending으로 남습니다. `ClaimPending`이 lease를 잡으므로 둘이 같은 행을 두 번 보내지 않습니다.
+- outbox 디스패처는 두 개입니다: active 테넌트(+3틱 유예)를 1초마다 도는 것(캠페인 전이의 지연을 짧게)과, **모든 테넌트**(`Provider.Tenants`)를 10초마다 도는 `outbox-sweep`. 바운스(며칠 뒤)·프로브 판정(1분 뒤)처럼 테넌트가 한가해진 뒤에 생기는 이벤트는 sweep이 아니면 다음 캠페인 때까지 pending으로 남습니다. `ClaimPending`이 lease를 잡으므로 둘이 같은 행을 두 번 보내지 않습니다.
+- 디스패치 실패는 `1m·5m·30m·2h·12h`(마지막 값 반복) 백오프이고, **10회 실패 후 `failed`로 고정**(dead letter, `GET /events?status=failed` + `POST /events/{id}/replay`). `Hooks.Events`가 nil이면 두 디스패처 루프 자체를 등록하지 않습니다 — 아무도 소비하지 않는 행의 시도 횟수만 태우는 걸 막기 위해서입니다.
 - 메트릭(OpenTelemetry/Prometheus): 큐 깊이(lane/tenant), claim 지연, 렌더/SMTP 지연 히스토그램, 상태 전이 카운터, transport 상태, rate limiter 대기. HPA/KEDA는 큐 깊이 메트릭 사용.
 - 로그는 `slog`, 요청/딜리버리 ID 상관관계.
 
@@ -609,30 +665,33 @@ web/
 - 템플릿 편집 화면: 모드 탭(blocks/mjml/html), 우측 i18n 패널(키×로케일 표, 누락 강조, YAML import/export), 미리보기(로케일/샘플 vars 선택, 서버 렌더).
 - 운영 화면 우선순위: 캠페인 상세(상태별 카운트, 재시도 버튼) → Deliveries(필터/검색, attempt 타임라인) → Transports 헬스 → Sender 헬스(루프백 결과) → Events(페이로드/재전송) → Suppressions.
 
-## 14. 배포 (Helm)
+## 14. 배포 (Helm), 콘솔 임베드
 
-- 차트 `deploy/helm/sendplane`: `control`(Deployment, ≥2, PDB), `sender`(Deployment + HPA/KEDA, 큐 깊이 기반), `bounce`(Deployment, 1), `migrate`(pre-install/upgrade Job), ConfigMap(config.yaml), Secret(DSN, 암호화 키, API key), ServiceMonitor 선택.
+- 차트 `deploy/helm/sendplane`: `control`(Deployment, ≥2, PDB), `sender`(Deployment + HPA, CPU 기준), `bounce`(Deployment, 1), `migrate`(pre-install/upgrade Job), ConfigMap(config.yaml), Secret(DSN, 암호화 키, API key), ServiceMonitor 선택. 큐 깊이 기반 KEDA `ScaledObject`는 `templates/hpa-sender.yaml`에 **주석 처리된 예시로만** 있습니다 — 클러스터에 KEDA가 설치돼 있을 때 CPU HPA를 끄고 별도 적용하는 용도이고, 이 차트가 기본으로 만드는 실제 리소스는 아닙니다.
 - DB는 차트에 포함하지 않음(외부 Postgres/Mongo). 참조 바이너리는 설정 파일로 auth/webhook을 구성하므로 Go 없이도 배포 가능.
-- 이미지 하나(`sendplane`)를 `--roles`로 나눠 씀 → 버전 불일치 위험 제거.
+- 이미지 하나(`sendplane` + `chaos-smtp`, `deploy/dev/Dockerfile`)를 `--roles`로 나눠 씀 → 버전 불일치 위험 제거. 같은 Dockerfile이 **웹 빌드 스테이지**(`node:22-alpine`에서 `pnpm build`)를 먼저 돌려 `web/apps/console/dist`를 만들고, Go 빌드 스테이지가 그 결과를 `cmd/sendplane/console/dist`로 복사해 `//go:embed`합니다(ADR-0010) — 이미지 빌드에 Node가 필요하지만 로컬 `go build ./cmd/sendplane`은 커밋된 플레이스홀더 `dist/index.html` 덕분에 Node 없이도 됩니다.
+- 콘솔은 control 역할이 켜져 있을 때만 `config.yaml`의 `console.path`(기본 `/console`, 끌 수 있음)에 마운트됩니다. `sp.Handler()`가 이미 `/api/v1`과 `/t/`를 `/` 아래에 소유하므로 `/`가 아니라 `/console`입니다. `make console-sync`(`VITE_BASE=/console/ pnpm build` → `cmd/sendplane/console/dist`로 복사)로 로컬 빌드를 갱신합니다.
 
 ## 15. 테스트 · CI 전략
 
 | 워크플로우 | 트리거 | 내용 |
 |---|---|---|
-| `ci.yml` | PR/push | go vet/lint, 단위 테스트, **`storetest` 매트릭스(postgres:16, mongo:7 services)**, 프론트 lint/typecheck/unit, OpenAPI ↔ 생성물 drift 검사 |
-| `e2e.yml` | PR | docker compose: control+sender+bounce+chaos-smtp+pg+테스트 IMAP. 10k 캠페인 + transactional + 바운스 주입(chaos-smtp가 DSN을 IMAP에 넣음) + 트래킹(픽셀/클릭/원클릭 수신거부/호스트 통지 API → 캠페인 비율 검증) + 루프백 프로브(chaos-smtp가 `Authentication-Results`를 붙여 IMAP에 배달, pass/fail/spam 시나리오) → 상태/이벤트 검증. mongo는 nightly |
-| `load-1m.yml` | 수동 + nightly | 아래 |
+| `ci.yml` | PR, `main` push | `lint`(gofmt, go vet, golangci-lint) · `test`(**postgres:16/mongo:7 services 매트릭스**, `go test -race -count=1 ./...`, storetest 포함) · `web`(pnpm install → `pnpm gen` 후 drift 검사 → lint → typecheck → test → build → 콘솔을 `cmd/sendplane/console/dist`에 복사해 `go build ./cmd/sendplane`로 embed까지 컴파일 확인) — 3개 독립 잡 |
+| `e2e.yml` | PR, `main` push, 매일 02:40 UTC, 수동 | docker compose(control + sender×2 + bounce + chaos-smtp + postgres + GreenMail IMAP/SMTP)를 띄우고 `go run ./test/e2e --kill-sender`로 시나리오 8개(부트스트랩, 1만 건 벌크 캠페인, transactional, 트래킹/수신거부, 바운스/ARF/위조 DSN, 루프백 프로브, 웹훅 이벤트, sender SIGKILL 복구)를 실행. postgres는 PR/push마다, **mongo는 매일 02:40 UTC 스케줄에서만**(`docker-compose.mongo.yml` 오버레이) 추가. 잡 타임아웃 20분(하니스 자체 `--budget` 10분이 먼저 걸림) |
+| `load-1m.yml` | 매일 03:40 UTC, 수동(`recipients`/`kill_sender` 입력) | §15.1. 잡 타임아웃 45분 |
 
-### 14.1 1M 부하 테스트 설계
+### 15.1 1M 부하 테스트 설계
 
-- 러너: public repo `ubuntu-latest` 4 vCPU / 16 GB. 예산 **45분** 초과 시 실패(느려짐 회귀 감지).
-- 구성: postgres(service, 튜닝된 shared_buffers), control 1, sender 3(각 concurrency 64), `chaos-smtp` 1(인프로세스 Go SMTP 서버).
-- `chaos-smtp` 옵션: `--tempfail=0.05 --permfail=0.01 --drop=0.005 --ratelimit-burst=... --latency=2ms --seed=N`.
-  실패 여부는 `hash(seed, recipient, attempt_no)`로 **결정적**이므로 기대 결과(최종 sent/failed 수, 총 attempt 수)를 사전에 계산할 수 있습니다.
-- 단계: 1M NDJSON 인제스트(목표 <3분, 청크 50k×20, 청크 하나는 일부러 재전송해 멱등성 검증) → start → 폴링 → 종료.
-- 단언: `sent + failed + suppressed == 1,000,000`, 진행 중 상태 0, 기대 sent/failed ±0(결정적), 모든 failed의 `attempt_count == max_attempts` 또는 permanent, `DeliveryAttempt` 총합 == chaos-smtp가 받은 세션 수(중복 발송 = at-least-once 재시도 외에는 0), lease 만료로 복구된 건수 리포트.
-- 산출물: 처리량(msg/s), p95 claim→sent 지연, DB 크기, 위 카운트를 JSON으로 아티팩트 업로드 + PR 코멘트. 절대 수치는 러너 노이즈가 있으므로 **회귀 판정은 예산(45분)과 정합성 단언만**으로 하고 처리량은 추세 기록용.
-- 테스트 중 sender 하나를 중간에 SIGKILL 후 재시작(lease 회수 경로 검증)하는 단계를 포함.
+- 러너: `ubuntu-latest`. 예산 **45분** 초과 시 실패(느려짐 회귀 감지). `test/load/docker-compose.yml`(postgres + control 1 + sender 3 + chaos-smtp 1)을 `go run ./test/load`가 띄우고 운영합니다.
+- `chaos-smtp` 옵션 기본값: `--seed=42 --tempfail=0.05 --permfail=0.01 --drop=0.005`.
+  실패 여부는 `chaossmtp.Decide(seed, rates, rcpt, attemptNo)` = `SHA256(seed‖lower(rcpt)‖0x00‖attemptNo)`의 상위 53비트를 `[0,1)`로 정규화해 `tempfail→permfail→drop` 누적 구간에 떨구는 **순수 함수**로 **결정적**이므로, 스냅샷 없이 같은 함수를 호출해 기대 `sent`/`failed`/`attempts`를 미리 계산합니다(`test/load/expect.go`).
+- 단계: NDJSON 인제스트(목표 <3분, 청크 50k, 청크 하나는 같은 키/다른 키로 두 번 재전송해 멱등성 검증) → start → 5초 간격 폴링 → 완료 후 단언 → `report.json` + Markdown 요약.
+- 단언: `sent + failed + suppressed == N`, 진행 중 상태 0, `sent`/`failed`가 기대값과 **정확히 일치**, chaos-smtp `Accepted == sent`(SIGKILL 시에만 최대 0.01%까지 중복 허용), 실패 표본 200건이 전부 `attempt_count == max_attempts` 또는 permanent/policy, 인제스트 < 예산, 전체 < 45분, 캠페인에 추적 링크 ≥1.
+- 산출물(`report.json`, GitHub Step Summary): 처리량(msg/s), 인제스트 행/초, 상태별 카운트, 기대값, chaos-smtp 카운터, `duplicates_from_recovery`, `created_at→sent_at` p50/p95, DB 크기, 단계별 소요 시간. 절대 수치는 러너 노이즈가 있으므로 **회귀 판정은 예산(45분)과 정합성 단언만**으로 하고 처리량은 추세 기록용.
+- 테스트 중 sender 하나를 진행률 10% 지점에서 SIGKILL 후 재시작(lease 회수 경로 검증)하는 단계를 포함(`--kill-sender`, nightly 기본 on).
+
+**실측(로컬 100k 런, 이 문서 갱신 시점에 직접 실행)**: `make load-test`(10만 건, `--kill-sender`)로 인제스트 **9,155 rows/s**(10만 행 10.9초, 예산 180초), 캠페인 완료까지 발송 구간 288.2초(평균 **346 msg/s**), `sent=98,915 failed=1,085`가 기대값과 **정확히 일치**, SIGKILL 복구로 인한 중복 발송 **0건**, 전체 소요 311.3초. 출처: `test/load/README.md`의 "로컬에서 10만 건 돌리기" 절차 그대로 이 세션에서 실행한 결과(§15.1의 표와 함께 `test/load/README.md`에 기록) — 공용 CI 러너의 nightly 100만 건 수치와는 다를 수 있습니다(§15.1의 "추세 기록용" 원칙 그대로).
+`make e2e`(`--kill-sender`, postgres)는 시나리오 7개 전부 PASS, 총 소요 **3m10.6s**(주로 시나리오 2: 1만 건 벌크 캠페인 1m54.3s)였습니다. 출처: `test/e2e/README.md`에 기록한 같은 세션의 실행 결과.
 
 ## 16. 보안 · 격리 체크리스트
 
@@ -648,31 +707,42 @@ web/
 
 ## 17. 주요 기술 선택 요약
 
-| 영역 | 선택 | 대안/비고 |
+| 영역 | 선택(go.mod / web/package.json 기준) | 대안/비고 |
 |---|---|---|
-| HTTP | `net/http` + `chi` (경량, 호스트 mux에 마운트 용이) | echo/gin은 호스트와 충돌 가능성 |
-| OpenAPI | `oapi-codegen`(서버 타입) + `openapi-typescript`(클라이언트) | 스펙 우선 |
-| Postgres | `pgx/v5`, 마이그레이션 `golang-migrate` 임베드 | |
-| Mongo | 공식 `mongo-driver/v2` | |
-| Liquid | `osteele/liquid` | 단일 중괄호 커스텀 문법(ADR-0004에서 기각) |
-| MJML | `Boostport/mjml-go`(WASM, Node 불필요) | 컴파일은 publish 시에만 |
-| SMTP | `wneessen/go-mail` (메시지 빌더 + smtp 패키지 기반 자체 풀) | |
-| DKIM | `emersion/go-msgauth/dkim` | 릴레이 서명 시 비활성 |
-| IMAP/POP3 | `emersion/go-imap/v2`, `knadh/go-pop3` | |
-| DNS | `miekg/dns` | 루프백 프로브의 진단 계층 |
-| 트래킹 토큰 | HMAC-SHA256, base64url, key id 포함 | 상태 없는 검증 |
-| ID | UUIDv7 | 시간 정렬, 양 DB 호환 |
-| 프론트 | Vue 3 + Vite + TS, pnpm workspace, vue-i18n, GrapesJS-MJML | |
-| 관측 | OpenTelemetry, Prometheus exporter, slog | |
+| Go | 1.25.0 | |
+| HTTP | `net/http` + `go-chi/chi/v5` v5.3.2 (경량, 호스트 mux에 마운트 용이) | echo/gin은 호스트와 충돌 가능성 |
+| OpenAPI | `oapi-codegen/v2` v2.8.0(서버 타입, `tool` 디렉티브로 고정) + `openapi-typescript` v7.13.0(클라이언트) | 스펙 우선 |
+| Postgres | `jackc/pgx/v5` v5.11.0, 마이그레이션은 `migrations/*.sql`을 `embed`로 넣은 **자체 구현**(advisory lock으로 동시 기동 안전) | `golang-migrate` 등 외부 마이그레이션 라이브러리는 쓰지 않음 |
+| Mongo | 공식 `go.mongodb.org/mongo-driver/v2` v2.9.1 | 트랜잭션 미사용(standalone 호환, ADR-0007) |
+| 인증 | `golang-jwt/jwt/v5` v5.3.1 + `MicahParks/keyfunc/v3` v3.8.2(JWKS) | 참조 바이너리의 JWT 모드 |
+| Liquid | `osteele/liquid` v1.9.2 | 단일 중괄호 커스텀 문법은 ADR-0004에서 기각, 사용자 확인 완료 |
+| MJML | `Boostport/mjml-go` v0.16.0(WASM/wazero, Node 불필요, 자체 스레드 안전) | 컴파일은 publish 시에만(ADR-0009) |
+| HTML→text | 자체 구현(`internal/render/html2text.go`, `x/net/html` 토크나이저) | `jaytaylor/html2text`(foster parenting이 `{% if %}`를 이동시킴), `k3a/html2text`(정규식이라 MJML 산출물이 한 줄로 뭉개짐) 둘 다 기각(§6.3) |
+| SMTP | `wneessen/go-mail` v0.8.1 (메시지 빌더 + smtp 패키지 기반 자체 풀) | |
+| DKIM | `emersion/go-msgauth` v0.7.0(`dkim`) | 릴레이 서명 시 비활성 |
+| IMAP | `emersion/go-imap/v2` v2.0.0-beta.8 (+ `imapclient`, IDLE/UIDPLUS/MOVE) | |
+| POP3 | **자체 구현**(`internal/mailbox/pop3.go`, RFC 1939 + STLS) | `knadh/go-pop3`는 STARTTLS·context·커스텀 TLS 설정이 없어 기각 |
+| DNS | `miekg/dns` v1.1.73, 지정 네임서버 직접 질의 | 루프백 프로브의 진단 계층, SPF `check_host()` 부분 구현(매크로 미확장) |
+| 트래킹 토큰 | HMAC-SHA256(앞 16바이트만), `kid.`+base64url, 테넌트 ID를 페이로드에 포함 | 상태 없는 검증(§9.1) |
+| ID | UUIDv7 (`google/uuid`) | 시간 정렬, 양 DB 호환 |
+| YAML | `gopkg.in/yaml.v3` | i18n 번들 export의 결정적 순서 보장 |
+| 프론트 | Vue 3.5 + Vite 7 + TS 5.9, pnpm 10 workspace, vue-i18n 11, vue-router 4(콘솔만), GrapesJS 0.23 + grapesjs-mjml 1.0(에디터, 동적 import) | Node ≥22 |
+| 관측 | OpenTelemetry(`Metrics` 인터페이스로 주입), slog | Prometheus exporter는 호스트가 `Metrics` 구현체로 제공(엔진 자체는 특정 exporter에 묶이지 않음) |
 
-## 18. 열어 둔 것 (의도적 미결)
+## 18. 열어 둔 것 (2026-09-21 기준, 실제로 남아 있는 것)
 
-1. **템플릿 문법 확정**: Liquid(`{{ }}`) 채택 가정. 단일 중괄호 요구가 강하면 파서 교체 비용은 render 패키지에 국한됨.
-2. **suppression 내장 여부**: 기본 on으로 가정. 완전 제거 요구 시 `BeforeSend` 훅만 남김.
-3. **트래킹 이벤트 유실 허용치**: 1초 버퍼 배치 삽입(크래시 시 유실)으로 시작. 정확성 요구 시 동기 삽입 옵션.
-4. **ICU 복수형**, 테넌트 전역 공유 번들: 키 컨벤션으로 시작.
-5. **큐 백엔드 교체(NATS 등)**: `DeliveryRepo.Claim/Complete`가 경계. 현재는 DB-as-queue만 구현.
-6. **Postgres 파티셔닝/RLS**: 운영 데이터가 근거를 주면 도입.
-7. **첨부파일**: transactional 소형 첨부(base64, 총 10MB)만 Phase 2 후보. 캠페인 첨부는 비권장.
-8. **블록 편집기 최종 선택**: GrapesJS-MJML 스파이크 결과에 따라 확정.
-9. **프로브 메일박스 프로바이더 특이점**: Gmail/Outlook의 스팸 폴더 IMAP 이름과 `authserv-id` 값은 픽스처로 관리.
+Liquid 문법(ADR-0004)과 내장 suppression 기본 on(ADR-0008)은 사용자 확인을 거쳐 **결정됐습니다** — 더 이상 열린 항목이 아닙니다. GrapesJS-MJML 블록 에디터도 스파이크 후 ADR-0009로 확정되어 구현되어 있습니다. 아래는 구현을 끝낸 뒤에도 실제로 남아 있는 것들입니다.
+
+1. **`probe.Trigger`는 첫 메일박스의 run id만 돌려줍니다.** 한 트리거가 만든 run들은 `GroupID`를 공유하지만 `ProbeRunRepo.ListByGroup`이 없어 `POST /senders/{id}/probe`가 그룹 전체를 한 번에 조회해 주지 못합니다(`internal/probe/README.md`).
+2. **`SendingDomain.OutboundIPs`는 프로브가 갱신하지 않습니다.** 관측 아웃바운드 IP는 `ProbeRun.ObservedIP`에만 남고, 도메인 행까지 쓰려면 낙관적 갱신이 하나 더 필요합니다 — 그 소유권을 control에 둘지는 아직 미정입니다.
+3. **Helm 차트의 KEDA는 예시 코드일 뿐 실제 리소스가 아닙니다.** `templates/hpa-sender.yaml`의 큐 깊이 기반 `ScaledObject`는 주석 처리돼 있고, 이 차트가 기본으로 만드는 것은 CPU HPA뿐입니다. 큐 깊이 기반 오토스케일을 쓰려면 KEDA를 따로 설치하고 그 예시를 직접 적용해야 합니다.
+4. **mongo는 CI에서 nightly에만 돕니다** (`ci.yml`의 storetest 매트릭스는 매 PR, `e2e.yml`의 mongo 오버레이는 02:40 UTC 스케줄에서만). PR 단위로는 mongo 경로의 e2e 회귀를 못 잡습니다.
+5. **Helm 차트는 실제 k8s 클러스터에 배포해 본 적이 없습니다.** `helm template`/`helm lint` 수준 검증만 가능하고, HPA·PDB·ServiceMonitor가 실 클러스터에서 기대대로 동작하는지는 확인되지 않았습니다.
+6. **GitHub Actions 실행 이력이 없습니다.** `git remote`는 `github.com/sendplane/sendplane`를 가리키고 저장소 자체는 존재하지만(`gh repo view` 확인), 이 문서 갱신 시점까지 `gh run list`에 워크플로 실행이 한 건도 없습니다 — `ci.yml`/`e2e.yml`/`load-1m.yml`이 실제 GitHub 러너에서 통과하는지는 로컬 실행으로만 확인된 상태입니다.
+7. **store 계약에 없어서 못 하는 것들** (`internal/control/README.md`, `internal/bounce/README.md`): `TrackingEvent`에 유니크 여부를 남기는 필드가 없어 유니크 판정은 `CountUnique` 재계산에만 의존; 캠페인이 없는(transactional) delivery의 보존기간 삭제 경로가 없음; "pending 이벤트가 있는 테넌트"·"최근 완료된 캠페인"을 직접 조회할 방법이 없어 `outbox-sweep`과 finalizer의 커서 훑기로 대신함; `BounceType`에 auto-reply 값이, `BounceSource`에 "상관관계 실패" 값이 없어 각각 플래그와 `heuristic`으로 대신 표시.
+8. **낙관적 동시성의 `version`이 응답에서 읽기 전용**이라 편집 화면은 항상 "읽은 객체"를 들고 있어야 업데이트를 보낼 수 있습니다(`web/README.md` "아직 남은 것").
+9. **ICU 복수형**, 테넌트 전역 공유 i18n 번들: 키 컨벤션(`count.one`/`count.other`)으로 시작, 전용 지원은 없음.
+10. **큐 백엔드 교체(NATS 등)**: `DeliveryRepo.Claim/Complete`가 경계로 설계돼 있지만 현재는 DB-as-queue만 구현.
+11. **Postgres 파티셔닝/RLS**: 운영 데이터가 근거를 주면 도입.
+12. **첨부파일**: 아직 없음. transactional 소형 첨부(base64, 총 10MB)만 후보, 캠페인 첨부는 비권장.
+13. **프로브 메일박스 프로바이더 특이점**: Gmail/Outlook의 스팸 폴더 IMAP 이름과 `authserv-id` 값은 테스트 픽스처로만 관리되고, 새 프로바이더를 추가할 때마다 수동 검증이 필요.
