@@ -65,9 +65,11 @@ services:
       - "${E2E_GREENMAIL_API_PORT:-18581}:8080"
 
   # Port 2525 rather than 25: the image runs as nonroot and cannot bind a
-  # privileged port. --keep-messages=-1 keeps every accepted message, which is
-  # what architecture 15 asks for; see test/e2e/README.md for why the harness
-  # still reads rendered mail out of GreenMail instead.
+  # privileged port. --keep-messages=-1 keeps every accepted message and
+  # --keep-bodies keeps the bytes with them, which is what lets scenario 2 read
+  # back what a recipient actually received (GET /messages?rcpt=…&body=1). The
+  # cost is the whole campaign in memory: ~10k rendered messages here, so tens
+  # of megabytes. A longer run should bound it with --keep-messages=N.
   chaos-smtp:
     image: sendplane:dev
     entrypoint: ["/usr/local/bin/chaos-smtp"]
@@ -80,6 +82,7 @@ services:
       - --seed=42
       - --latency=2ms
       - --keep-messages=-1
+      - --keep-bodies
     ports:
       - "${E2E_CHAOS_PORT:-19190}:9090"
 

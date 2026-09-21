@@ -56,10 +56,20 @@ Run
 | `policy.go` | 재시도/백오프/지터, `IncrementAttempt`, auth → queued |
 | `ratelimit.go` | 토큰 버킷 + 워커 수 분할 + AIMD |
 | `pool.go` | transport별 커넥션 풀 |
-| `results.go` | `Complete` 배치 커밋 |
+| `results.go` | `Complete` 배치 커밋 + `delivery.sent`/`delivery.failed` outbox (§12) |
 | `health.go` | transport 서킷(cooldown/unhealthy) + `StatusUntil` 영속화/조정 |
 | `cache.go` | 테넌트별 TTL 캐시, 복호화된 비밀 캐시 |
 | `metrics.go` | 메트릭 이름 상수 (싱크는 `host.Metrics`) |
+
+## delivery 이벤트 (§12)
+
+배치 `Complete` 가 커밋된 **뒤에** 같은 스토어의 outbox에 씁니다 — 캠페인/바운스 이벤트와 같은 outbox 패턴이라
+저장소를 가로지르는 트랜잭션이 없습니다. `sent` → `delivery.sent`, `failed`(종단) → `delivery.failed`.
+그 외 상태는 이벤트가 없습니다: `deferred` 는 종단이 아니고, `suppressed`/`bounced` 는 그 판정을 내리는 쪽의 몫입니다.
+
+**테넌트가 구독한 것만** 씁니다(`TenantSettings.EventTypes`, 비어 있으면 기본 집합). `delivery.sent` 는
+기본 집합에서 빠져 있습니다 — 계약이 **delivery 하나당 행 하나**라서 100만 수신자 캠페인이면 행도 POST도 100만 건입니다.
+enqueue가 실패해도 delivery 결과는 이미 커밋돼 있으므로 로그만 남기고 넘어갑니다. 되돌리면 결과를 다시 쓰게 됩니다.
 
 ## 에러 분류 테이블 (§4.2)
 

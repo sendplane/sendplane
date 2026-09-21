@@ -2,6 +2,7 @@ package sender
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -492,4 +493,93 @@ func decodeBody(t *testing.T, raw string) string {
 	out := strings.ReplaceAll(raw, "=\r\n", "")
 	out = strings.ReplaceAll(out, "=3D", "=")
 	return out
+}
+
+// listOutbox returns the pending outbox events of the fixture tenant, oldest
+// first, which is the order Enqueue wrote them in.
+func listOutbox(t *testing.T, f *fixture) []store.OutboxEvent {
+	t.Helper()
+	var out []store.OutboxEvent
+	page := store.Page{Limit: store.MaxPageLimit}
+	for {
+		res, err := f.st.Outbox().List(context.Background(), store.OutboxPending, page)
+		if err != nil {
+			t.Fatalf("Outbox().List: %v", err)
+		}
+		out = append(out, res.Items...)
+		if res.NextCursor == "" {
+			return out
+		}
+		page.Cursor = res.NextCursor
+	}
+}
+
+func countByType(evs []store.OutboxEvent) map[string]int {
+	out := map[string]int{}
+	for _, e := range evs {
+		out[e.Type]++
+	}
+	return out
+}
+
+// GAP-2 of test/e2e/README.md: the send path writes delivery.sent and
+// delivery.failed to the outbox, filtered by the tenant's subscription. The
+// default set leaves delivery.sent out, because it is one row per recipient
+// (store.DefaultOffEventTypes).
+func TestDeliveryEventsFollowTheSubscription(t *testing.T) {
+	// Every address fails permanently, so both outcomes are reachable by
+	// choosing which delivery is suppressed rather than by chance.
+	f := newFixture(t, fixtureOptions{rates: chaossmtp.Rates{PermFailRate: 1}, seed: 1})
+	ids := f.insert(3)
+
+	stop := f.runSenders(1, nil)
+	ok := f.waitTerminal(ids, 30*time.Second)
+	stop()
+	if !ok {
+		t.Fatal("not every delivery finished")
+	}
+
+	byType := countByType(listOutbox(t, f))
+	if byType[EventDeliveryFailed] != len(ids) {
+		t.Errorf("%d delivery.failed events, want %d", byType[EventDeliveryFailed], len(ids))
+	}
+	if byType[EventDeliverySent] != 0 {
+		t.Errorf("%d delivery.sent events, want none in the default subscription", byType[EventDeliverySent])
+	}
+
+	// A tenant that asks for delivery.sent gets it, and asking for it
+	// explicitly is exact: delivery.failed is then no longer subscribed.
+	f2 := newFixture(t, fixtureOptions{settings: func(s *store.TenantSettings) {
+		s.EventTypes = []string{EventDeliverySent}
+	}})
+	ids2 := f2.insert(2)
+	stop2 := f2.runSenders(1, nil)
+	ok2 := f2.waitTerminal(ids2, 30*time.Second)
+	stop2()
+	if !ok2 {
+		t.Fatal("not every delivery finished")
+	}
+	evs := listOutbox(t, f2)
+	byType2 := countByType(evs)
+	if byType2[EventDeliverySent] != len(ids2) {
+		t.Errorf("%d delivery.sent events, want %d", byType2[EventDeliverySent], len(ids2))
+	}
+	if byType2[EventDeliveryFailed] != 0 {
+		t.Errorf("%d delivery.failed events, want none: the list is exact", byType2[EventDeliveryFailed])
+	}
+	var payload deliveryEventPayload
+	for _, e := range evs {
+		if e.Type != EventDeliverySent {
+			continue
+		}
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		if payload.DeliveryID == "" || payload.Email == "" || payload.MessageID == "" {
+			t.Fatalf("delivery.sent payload is missing identity: %+v", payload)
+		}
+		if payload.CampaignID != f2.campaignID || payload.Status != store.DeliverySent {
+			t.Fatalf("delivery.sent payload = %+v", payload)
+		}
+	}
 }

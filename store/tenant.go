@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -90,9 +91,45 @@ type TenantSettings struct {
 	DefaultLocale string
 	Tracking      TrackingConfig
 
+	// EventTypes is the tenant's outbox subscription (architecture 12).
+	// Empty means the default set: everything sendplane emits except the
+	// per-recipient firehose that a bulk campaign turns into one outbox row
+	// per recipient. A non-empty list is exact — only the types it names are
+	// enqueued, and only they are dispatched.
+	//
+	// The filter is applied twice on purpose: when the event is enqueued, so
+	// a tenant that never wanted delivery.sent never pays for the rows, and
+	// again when it is dispatched, so unsubscribing stops delivery of the
+	// rows already queued.
+	EventTypes []string
+
 	Version   int64
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// DefaultOffEventTypes are the event types an empty TenantSettings.EventTypes
+// does NOT subscribe to (architecture 12: "대량 캠페인에서 delivery 단위
+// 이벤트는 폭주하므로 테넌트별 구독 필터(기본: 실패류만)").
+//
+// All three are per-recipient events of a successful path, so a campaign with
+// a million recipients produces a million outbox rows, one HTTP POST batch
+// after another, for information the host usually reads out of the delivery
+// listing instead. A tenant that does want them says so explicitly.
+var DefaultOffEventTypes = []string{
+	"delivery.sent",
+	"delivery.opened",
+	"delivery.clicked",
+}
+
+// SubscribedTo reports whether this tenant wants outbox events of type typ.
+// A nil receiver, like an empty EventTypes, means the default set: everything
+// but DefaultOffEventTypes.
+func (s *TenantSettings) SubscribedTo(typ string) bool {
+	if s == nil || len(s.EventTypes) == 0 {
+		return !slices.Contains(DefaultOffEventTypes, typ)
+	}
+	return slices.Contains(s.EventTypes, typ)
 }
 
 // NewSigningKey mints a tracking token key: 32 random bytes and a short random

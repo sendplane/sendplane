@@ -17,6 +17,9 @@ type Intervals struct {
 	LeaseReaper time.Duration // default 30s
 	Retention   time.Duration // default 1h
 	Outbox      time.Duration // default 1s
+	// OutboxSweep is the slower pass that dispatches the events of tenants
+	// that are not active (see loopSpecs).
+	OutboxSweep time.Duration // default 10s
 }
 
 // Batches bounds how much work one tick of a loop does, so that a leader stays
@@ -34,6 +37,11 @@ type Batches struct {
 	// the number of those calls one retention tick makes per campaign.
 	RetentionChunk     int // default 5_000
 	RetentionMaxChunks int // default 200
+	// StatsRefreshScan bounds how many completed campaigns one finalizer tick
+	// looks at when refreshing tracking uniques. The walk resumes where the
+	// previous tick stopped, so a tenant with more completed campaigns than
+	// this is covered over several ticks rather than skipped.
+	StatsRefreshScan int // default 2_000
 	// OutboxClaim is the ClaimPending limit per tick.
 	OutboxClaim int // default 100
 }
@@ -65,6 +73,12 @@ type config struct {
 	trackFlushSize  int
 	trackMaxBuffer  int
 
+	// trackingRefreshWindow is how long after completion a campaign's cached
+	// tracking uniques keep being refreshed; tenantsRefresh is the TTL of the
+	// Provider.Tenants listing the allTenants loops share.
+	trackingRefreshWindow time.Duration
+	tenantsRefresh        time.Duration
+
 	// extraLoops are the leader loops registered from outside this package.
 	extraLoops []loopSpec
 }
@@ -81,6 +95,7 @@ func defaultConfig() config {
 			LeaseReaper: 30 * time.Second,
 			Retention:   time.Hour,
 			Outbox:      time.Second,
+			OutboxSweep: 10 * time.Second,
 		},
 		batches: Batches{
 			CampaignPage:       200,
@@ -89,17 +104,20 @@ func defaultConfig() config {
 			LeaseReapLimit:     5_000,
 			RetentionChunk:     5_000,
 			RetentionMaxChunks: 200,
+			StatsRefreshScan:   2_000,
 			OutboxClaim:        100,
 		},
-		outboxWorkers:      8,
-		outboxLease:        time.Minute,
-		outboxBackoff:      []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 12 * time.Hour},
-		outboxMaxAttempts:  10,
-		largeCampaignRows:  100_000,
-		largeCampaignEvery: 6,
-		trackFlushEvery:    time.Second,
-		trackFlushSize:     5_000,
-		trackMaxBuffer:     100_000,
+		outboxWorkers:         8,
+		outboxLease:           time.Minute,
+		outboxBackoff:         []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 12 * time.Hour},
+		outboxMaxAttempts:     10,
+		largeCampaignRows:     100_000,
+		largeCampaignEvery:    6,
+		trackFlushEvery:       time.Second,
+		trackFlushSize:        5_000,
+		trackMaxBuffer:        100_000,
+		trackingRefreshWindow: 14 * 24 * time.Hour,
+		tenantsRefresh:        30 * time.Second,
 	}
 }
 
@@ -151,6 +169,7 @@ func WithIntervals(iv Intervals) Option {
 		setDur(&c.intervals.LeaseReaper, iv.LeaseReaper)
 		setDur(&c.intervals.Retention, iv.Retention)
 		setDur(&c.intervals.Outbox, iv.Outbox)
+		setDur(&c.intervals.OutboxSweep, iv.OutboxSweep)
 	}
 }
 
@@ -163,13 +182,31 @@ func WithBatches(b Batches) Option {
 		setInt(&c.batches.LeaseReapLimit, b.LeaseReapLimit)
 		setInt(&c.batches.RetentionChunk, b.RetentionChunk)
 		setInt(&c.batches.RetentionMaxChunks, b.RetentionMaxChunks)
+		setInt(&c.batches.StatsRefreshScan, b.StatsRefreshScan)
 		setInt(&c.batches.OutboxClaim, b.OutboxClaim)
 	}
 }
 
+// Loop describes an extra leader loop registered with WithLoop.
+type Loop struct {
+	// Name identifies the loop in logs.
+	Name string
+	// Interval is how often it ticks.
+	Interval time.Duration
+	// NewTenant builds the loop for one tenant; the Store stays valid for the
+	// life of the instance.
+	NewTenant func(st store.Store, tenantID string) TickLoop
+	// AllTenants ticks every tenant Provider.Tenants knows of instead of only
+	// the active ones. Set it when the loop's work arrives after the tenant
+	// has gone quiet - the loopback probe is collected a minute after the
+	// probe delivery went terminal, by which time the tenant is idle unless
+	// it happens to be busy with something else.
+	AllTenants bool
+}
+
 // WithLoop registers an extra leader loop. It gets exactly the treatment the
 // built-in loops get: it runs on the replica holding the leader lease and
-// nowhere else, it is built once per active tenant and handed that tenant's
+// nowhere else, it is built once per ticked tenant and handed that tenant's
 // Store, and a tick that fails is logged without stopping the other tenants
 // or the other loops.
 //
@@ -178,15 +215,16 @@ func WithBatches(b Batches) Option {
 // the same message - but this package cannot import it without a cycle. The
 // root package registers it instead.
 //
-// A call with an empty name, a non-positive interval or a nil constructor is
-// ignored, so a caller can register a loop conditionally without branching.
-func WithLoop(name string, interval time.Duration, newTenant func(st store.Store, tenantID string) TickLoop) Option {
+// A loop with an empty name, a non-positive interval or a nil constructor is
+// ignored, so a caller can register one conditionally without branching.
+func WithLoop(l Loop) Option {
 	return func(c *config) {
-		if name == "" || interval <= 0 || newTenant == nil {
+		if l.Name == "" || l.Interval <= 0 || l.NewTenant == nil {
 			return
 		}
 		c.extraLoops = append(c.extraLoops, loopSpec{
-			name: name, interval: interval, newTenant: newTenant,
+			name: l.Name, interval: l.Interval, newTenant: l.NewTenant,
+			allTenants: l.AllTenants,
 		})
 	}
 }
@@ -235,6 +273,21 @@ func WithLargeCampaign(rows int64, every int) Option {
 			c.largeCampaignEvery = every
 		}
 	}
+}
+
+// WithTrackingRefresh sets how long after a campaign completed its cached
+// tracking uniques keep being refreshed by the finalizer (default 14 days).
+// Opens, clicks and unsubscribes almost always arrive after the campaign is
+// over, so without this the cached unique counts of architecture 9.3 would
+// freeze at whatever they were the moment the last delivery went terminal.
+func WithTrackingRefresh(window time.Duration) Option {
+	return func(c *config) { setDur(&c.trackingRefreshWindow, window) }
+}
+
+// WithTenantsRefresh sets how often the loops that tick every tenant
+// (Loop.AllTenants) refresh the Provider.Tenants listing. Default 30s.
+func WithTenantsRefresh(d time.Duration) Option {
+	return func(c *config) { setDur(&c.tenantsRefresh, d) }
 }
 
 // WithTracking tunes the tracking buffer: flush interval, the buffered count

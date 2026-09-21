@@ -301,6 +301,55 @@ func TestSettingsUnsubscribeOneClickAndBounceRetainRaw(t *testing.T) {
 	}
 }
 
+// The outbox subscription filter of architecture 12. An empty list is the
+// default set, not "no events", which is what makes delivery.failed arrive for
+// a tenant nobody configured and delivery.sent not (store.SubscribedTo).
+func TestSettingsEventTypes(t *testing.T) {
+	e := newEnv(t)
+	cur := decodeInto[TenantSettings](t, e.do(http.MethodGet, "/api/v1/settings", nil), http.StatusOK)
+	if cur.EventTypes == nil || len(*cur.EventTypes) != 0 {
+		t.Fatalf("event_types = %v, want empty by default", cur.EventTypes)
+	}
+
+	got := decodeInto[TenantSettings](t, e.do(http.MethodPut, "/api/v1/settings", TenantSettingsUpdate{
+		Version:    *cur.Version,
+		EventTypes: &[]string{"delivery.sent", "campaign.completed"},
+	}), http.StatusOK)
+	if got.EventTypes == nil || len(*got.EventTypes) != 2 || (*got.EventTypes)[0] != "delivery.sent" {
+		t.Fatalf("event_types did not come back: %v", got.EventTypes)
+	}
+	stored, err := e.st.TenantSettings().Get(t.Context())
+	if err != nil {
+		t.Fatalf("store get: %v", err)
+	}
+	if !stored.SubscribedTo("delivery.sent") || stored.SubscribedTo("delivery.bounced") {
+		t.Fatalf("stored subscription = %v, want exactly the two named types", stored.EventTypes)
+	}
+
+	// Omitting the field keeps the list, like every other settings field.
+	again := decodeInto[TenantSettings](t, e.do(http.MethodPut, "/api/v1/settings", TenantSettingsUpdate{
+		Version: *got.Version, DefaultLocale: ptr("ko"),
+	}), http.StatusOK)
+	if again.EventTypes == nil || len(*again.EventTypes) != 2 {
+		t.Fatalf("omitting event_types cleared it: %v", again.EventTypes)
+	}
+
+	// An explicit empty list goes back to the default set.
+	back := decodeInto[TenantSettings](t, e.do(http.MethodPut, "/api/v1/settings", TenantSettingsUpdate{
+		Version: *again.Version, EventTypes: &[]string{},
+	}), http.StatusOK)
+	if back.EventTypes == nil || len(*back.EventTypes) != 0 {
+		t.Fatalf("event_types = %v, want empty", back.EventTypes)
+	}
+	stored, err = e.st.TenantSettings().Get(t.Context())
+	if err != nil {
+		t.Fatalf("store get: %v", err)
+	}
+	if !stored.SubscribedTo("delivery.failed") || stored.SubscribedTo("delivery.sent") {
+		t.Fatalf("an empty list must mean the default set, got %v", stored.EventTypes)
+	}
+}
+
 func TestSettingsDurationsRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	cur := decodeInto[TenantSettings](t, e.do(http.MethodGet, "/api/v1/settings", nil), http.StatusOK)

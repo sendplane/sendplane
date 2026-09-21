@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/sendplane/sendplane/store"
@@ -29,9 +30,38 @@ type Leader struct {
 	cfg      config
 	loops    []loopSpec
 
+	// known caches Provider.Tenants for the loops that tick every tenant
+	// rather than the active ones (loopSpec.allTenants). The contract warns
+	// that the listing "may be expensive, so callers refresh it on an
+	// interval rather than per operation", and three loops on three
+	// intervals would otherwise each pay for it.
+	knownMu  sync.Mutex
+	known    []string
+	knownAt  time.Time
+	knownErr error
+
 	// onState, when set, is called with true when the loops start and false
 	// when they stop. Tests use it; production leaves it nil.
 	onState func(bool)
+}
+
+// knownTenants returns Provider.Tenants, refreshed at most every
+// cfg.tenantsRefresh. The cached list is returned alongside the error of a
+// failed refresh, so a loop keeps ticking the tenants it knew about while the
+// listing is unavailable.
+func (l *Leader) knownTenants(ctx context.Context) ([]string, error) {
+	l.knownMu.Lock()
+	defer l.knownMu.Unlock()
+	now := l.clock()
+	if !l.knownAt.IsZero() && now.Sub(l.knownAt) < l.cfg.tenantsRefresh {
+		return l.known, l.knownErr
+	}
+	ids, err := l.provider.Tenants(ctx)
+	l.knownAt, l.knownErr = now, err
+	if err == nil {
+		l.known = ids
+	}
+	return l.known, err
 }
 
 // newLeader builds a Leader with no loops registered.

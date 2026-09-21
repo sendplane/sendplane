@@ -125,13 +125,14 @@ func normalizeBasePath(p string) string {
 // the cleaned, slash-trimmed remainder to look up in the assets map (""
 // means the base path itself, i.e. the SPA's index).
 func stripBasePath(base, reqPath string) (rest string, ok bool) {
-	if base == "/" {
+	switch {
+	case base == "/":
 		rest = reqPath
-	} else if reqPath == base {
+	case reqPath == base:
 		rest = ""
-	} else if strings.HasPrefix(reqPath, base+"/") {
+	case strings.HasPrefix(reqPath, base+"/"):
 		rest = reqPath[len(base):]
-	} else {
+	default:
 		return "", false
 	}
 	cleaned := path.Clean("/" + rest)

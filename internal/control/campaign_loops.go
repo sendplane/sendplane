@@ -65,6 +65,14 @@ func (s *scheduler) Tick(ctx context.Context, now time.Time) error {
 // (architecture 7.3). Delivery rows never increment a counter on the campaign
 // row: that hot-row update is exactly what ADR-0003 rejected, so the aggregate
 // is recomputed here instead.
+//
+// It has a second job, for the same reason: a completed campaign's tracking
+// uniques keep moving after the last delivery went terminal. Recipients open
+// the mail, click and unsubscribe hours and days later, so the counts written
+// at the completing tick are almost always zero and the unsubscribe rate of
+// architecture 9.3 ("unsubscribed 유니크 / sent") would be permanently 0. So
+// every tick also refreshes the *tracking* half of the cached stats for the
+// campaigns that completed recently, on a decaying cadence.
 type finalizer struct {
 	st  store.Store
 	log *slog.Logger
@@ -75,9 +83,35 @@ type finalizer struct {
 	// so a campaign over cfg.largeCampaignRows is only recounted every
 	// cfg.largeCampaignEvery ticks.
 	skips map[string]int
+
+	// refreshCursor resumes the completed-campaign walk of refreshTracking.
+	// A tick looks at cfg.batches.StatsRefreshScan campaigns at most, so a
+	// tenant with a long history is covered over several ticks instead of
+	// paying for its whole archive every ten seconds.
+	refreshCursor string
 }
 
+// The decaying refresh cadence. Interaction with a campaign is front-loaded:
+// most opens happen in the first hour, so that hour is refreshed on every
+// tick and everything after it every statsRefreshCold, until the campaign
+// falls out of cfg.trackingRefreshWindow (default 14 days) and stops being
+// refreshed at all.
+const (
+	statsRefreshHot  = time.Hour
+	statsRefreshCold = 10 * time.Minute
+)
+
 func (f *finalizer) Tick(ctx context.Context, now time.Time) error {
+	err := f.tickRunning(ctx, now)
+	if rerr := f.refreshTracking(ctx, now); err == nil {
+		err = rerr
+	}
+	return err
+}
+
+// tickRunning is the completion half: recount every running campaign and
+// complete the ones with nothing left in flight.
+func (f *finalizer) tickRunning(ctx context.Context, now time.Time) error {
 	live := map[string]bool{}
 	err := eachCampaign(ctx, f.st, []store.CampaignStatus{store.CampaignRunning}, f.cfg.batches.CampaignPage,
 		func(c store.Campaign) error {
@@ -143,6 +177,103 @@ func (f *finalizer) Tick(ctx context.Context, now time.Time) error {
 		}
 	}
 	return err
+}
+
+// refreshTracking rewrites the tracking half of the cached stats for the
+// completed campaigns that are due (architecture 9.3). It never touches
+// ByStatus: the delivery counts of a completed campaign are final, and
+// recounting a million rows forever is exactly what the completion check
+// stops doing once a campaign is done.
+//
+// The walk is paged and bounded per tick, and resumes at the cursor the
+// previous tick stopped at, so the cost per tick is the same whether the
+// tenant has ten completed campaigns or a hundred thousand.
+func (f *finalizer) refreshTracking(ctx context.Context, now time.Time) error {
+	if f.cfg.trackingRefreshWindow <= 0 || f.cfg.batches.StatsRefreshScan <= 0 {
+		return nil
+	}
+	page := store.Page{Limit: f.cfg.batches.CampaignPage, Cursor: f.refreshCursor}
+	statuses := []store.CampaignStatus{store.CampaignCompleted}
+	for scanned := 0; scanned < f.cfg.batches.StatsRefreshScan; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		res, err := f.st.Campaigns().ListByStatus(ctx, statuses, page)
+		if err != nil {
+			// Start the next tick from the beginning rather than from a
+			// cursor a failing listing may have invalidated.
+			f.refreshCursor = ""
+			return err
+		}
+		for i := range res.Items {
+			scanned++
+			c := &res.Items[i]
+			if !statsRefreshDue(c, now, f.cfg.trackingRefreshWindow) {
+				continue
+			}
+			if err := f.refreshOne(ctx, c, now); err != nil {
+				f.refreshCursor = ""
+				return err
+			}
+		}
+		page.Cursor = res.NextCursor
+		if page.Cursor == "" {
+			break
+		}
+	}
+	// An empty cursor means the walk reached the end; the next tick starts
+	// over, which is how a campaign that completed since is picked up.
+	f.refreshCursor = page.Cursor
+	return nil
+}
+
+// statsRefreshDue decides whether a completed campaign's uniques are worth
+// recounting on this tick, from the campaign row alone: when it finished and
+// when its cached stats were last computed.
+func statsRefreshDue(c *store.Campaign, now time.Time, window time.Duration) bool {
+	finished := c.CompletedAt
+	if finished.IsZero() {
+		finished = c.UpdatedAt
+	}
+	if finished.IsZero() {
+		return false
+	}
+	age := now.Sub(finished)
+	if age > window {
+		return false
+	}
+	if age <= statsRefreshHot {
+		return true
+	}
+	last := c.Stats.ComputedAt
+	if last.IsZero() {
+		return true
+	}
+	return !now.Before(last.Add(statsRefreshCold))
+}
+
+// refreshOne writes back the campaign's cached stats with fresh tracking
+// uniques. ComputedAt advances even when no count changed: it is what the
+// cold cadence is measured from, so leaving it behind would make every later
+// tick recount.
+func (f *finalizer) refreshOne(ctx context.Context, c *store.Campaign, now time.Time) error {
+	tc, err := f.st.Tracking().CountUnique(ctx, c.ID)
+	if err != nil {
+		return err
+	}
+	stats := c.Stats
+	stats.UniqueOpens = tc.UniqueOpens
+	stats.UniqueClicks = tc.UniqueClicks
+	stats.Unsubscribed = tc.Unsubscribed
+	stats.UnsubscribeClicked = tc.UnsubscribeClicked
+	stats.ComputedAt = now
+	if err := f.st.Campaigns().UpdateStats(ctx, c.ID, stats); err != nil {
+		if raced(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // --- canceller ---------------------------------------------------------

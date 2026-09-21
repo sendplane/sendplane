@@ -15,14 +15,14 @@ import (
 
 // The campaign of scenario 4. It is small and goes through sender B
 // (GreenMail) rather than through the 10,000-recipient chaos-smtp campaign of
-// scenario 2, for one reason: the assertions here need the *rendered message*.
+// scenario 2 because the flows here need a mailbox the harness can read *and*
+// a delivery it can then follow through the API: the pixel, the click and the
+// one-click POST are all asserted against that one delivery's columns.
 //
-// chaos-smtp does record accepted messages (`--keep-messages=-1` in the
-// compose file) but cmd/chaos-smtp exposes only counters over HTTP — there is
-// no endpoint that serves chaossmtp.Server.Messages(). Reading the mail out of
-// a real IMAP mailbox is both possible today and closer to what architecture
-// 15 is actually testing, so the locale check the brief puts on the bulk
-// campaign lives here, on a campaign whose mail can be read.
+// The locale check lives in scenario 2, on the chaos campaign, where
+// architecture 15 wanted it — cmd/chaos-smtp serves its recorded messages now
+// (GAP-1 in README.md). These four recipients stay en/ko mixed anyway, so both
+// render paths run before anything is clicked.
 var trackingRecipients = []struct {
 	email  string
 	name   string
@@ -36,9 +36,6 @@ var trackingRecipients = []struct {
 
 func (r *runner) scenarioTracking(ctx context.Context) error {
 	if err := r.runTrackingCampaign(ctx); err != nil {
-		return err
-	}
-	if err := r.assertLocaleSubjects(ctx); err != nil {
 		return err
 	}
 	return r.assertTrackingFlows(ctx)
@@ -93,37 +90,11 @@ func (r *runner) runTrackingCampaign(ctx context.Context) error {
 	return nil
 }
 
-// assertLocaleSubjects is the i18n half of scenario 2, moved here (see the
-// comment on trackingRecipients): the ko recipients must have received the ko
-// subject and the en recipients the en one.
-func (r *runner) assertLocaleSubjects(ctx context.Context) error {
-	wantSubject := map[string]string{
-		"en": e2eBundle.Locales["en"]["subject"],
-		"ko": e2eBundle.Locales["ko"]["subject"],
-	}
-	for _, rc := range trackingRecipients {
-		msgs, err := r.gm.waitForMessage(ctx, rc.email, 1, r.opt.mailTimeout)
-		if err != nil {
-			r.fail("%s: %v", rc.email, err)
-			continue
-		}
-		got := msgs[0].decodedSubject()
-		if got != wantSubject[rc.locale] {
-			r.fail("%s (locale %s) received subject %q, want %q", rc.email, rc.locale, got, wantSubject[rc.locale])
-			continue
-		}
-		body, err := msgs[0].htmlPart()
-		if err != nil {
-			r.fail("%s: %v", rc.email, err)
-			continue
-		}
-		if !strings.Contains(body, html.EscapeString(rc.name)) && !strings.Contains(body, rc.name) {
-			r.fail("%s: the rendered body does not carry {{ recipient.name }} = %q", rc.email, rc.name)
-		}
-	}
-	r.logf("  locale subjects: en=%q ko=%q", wantSubject["en"], wantSubject["ko"])
-	return nil
-}
+// statsRefreshTimeout is how long the campaign aggregate may lag behind the
+// interactions. The finalizer ticks every 10s by default and refreshes a
+// campaign that completed within the last hour on every tick, so this is a
+// generous multiple of one tick.
+const statsRefreshTimeout = 90 * time.Second
 
 var trackURLRe = regexp.MustCompile(`https://[a-z0-9.\-]+/t/[ocu]/[^"'<>\s)]+`)
 
@@ -365,26 +336,42 @@ func (r *runner) assertTrackingRecorded(ctx context.Context, target, other deliv
 		}
 	}
 
-	// The campaign aggregate (architecture 9.3). The finalizer only recomputes
-	// campaigns whose status is running, so a campaign that completed before
-	// the first recipient opened the mail keeps the zeros it finished with.
-	// That is the normal case for every real campaign, which is why this
-	// assertion stays in as a KNOWN-FAIL rather than being softened.
-	var c campaign
-	if err := r.api.getJSON(ctx, "/api/v1/campaigns/"+r.trackCampaignID, &c); err != nil {
-		r.fail("re-reading the tracking campaign: %v", err)
-		return
-	}
+	// The campaign aggregate (architecture 9.3). Every interaction above
+	// happened *after* the campaign completed, which is the normal case for
+	// every real campaign: the finalizer keeps refreshing the tracking half of
+	// a completed campaign's cached stats for a while, so these numbers have
+	// to arrive. They are eventually consistent, not synchronous, so this
+	// polls for a finalizer tick rather than reading once.
 	want := campaignStats{UniqueOpens: 1, UniqueClicks: 1, Unsubscribed: 2, UnsubscribeClicked: 1}
-	got := campaignStats{}
-	if c.Stats != nil {
-		got = *c.Stats
-	}
-	if got.UniqueOpens != want.UniqueOpens || got.UniqueClicks != want.UniqueClicks ||
-		got.Unsubscribed != want.Unsubscribed || got.UnsubscribeClicked != want.UnsubscribeClicked {
-		r.knownFail("BUG-1",
-			"campaign stats are unique_opens=%d unique_clicks=%d unsubscribed=%d unsubscribe_clicked=%d, want 1/1/2/1",
-			got.UniqueOpens, got.UniqueClicks, got.Unsubscribed, got.UnsubscribeClicked)
+	deadline = time.Now().Add(statsRefreshTimeout)
+	var got campaignStats
+	for {
+		var c campaign
+		if err := r.api.getJSON(ctx, "/api/v1/campaigns/"+r.trackCampaignID, &c); err != nil {
+			r.fail("re-reading the tracking campaign: %v", err)
+			return
+		}
+		got = campaignStats{}
+		if c.Stats != nil {
+			got = *c.Stats
+		}
+		if got.UniqueOpens == want.UniqueOpens && got.UniqueClicks == want.UniqueClicks &&
+			got.Unsubscribed == want.Unsubscribed && got.UnsubscribeClicked == want.UnsubscribeClicked {
+			r.logf("  campaign stats: opens=%d clicks=%d unsubscribed=%d unsubscribe_clicked=%d",
+				got.UniqueOpens, got.UniqueClicks, got.Unsubscribed, got.UnsubscribeClicked)
+			return
+		}
+		if time.Now().After(deadline) {
+			r.fail("campaign stats are unique_opens=%d unique_clicks=%d unsubscribed=%d unsubscribe_clicked=%d "+
+				"after %s, want 1/1/2/1: the finalizer is not refreshing the tracking uniques of a completed campaign",
+				got.UniqueOpens, got.UniqueClicks, got.Unsubscribed, got.UnsubscribeClicked, statsRefreshTimeout)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
 	}
 }
 

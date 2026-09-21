@@ -522,3 +522,48 @@ func fetchChaosStats(ctx context.Context, hc *http.Client, base string) (chaosSt
 }
 
 func queryEscape(s string) string { return url.QueryEscape(s) }
+
+// chaosMessage is one entry of cmd/chaos-smtp's GET /messages: what the relay
+// actually received, which is the only way to assert on a rendered message
+// that went to chaos-smtp rather than to GreenMail.
+type chaosMessage struct {
+	From      string            `json:"from"`
+	Rcpts     []string          `json:"rcpts"`
+	MessageID string            `json:"message_id"`
+	Subject   string            `json:"subject"`
+	Size      int               `json:"size"`
+	Headers   map[string]string `json:"headers"`
+	Body      string            `json:"body"`
+}
+
+type chaosMessageList struct {
+	Total int            `json:"total"`
+	Items []chaosMessage `json:"items"`
+}
+
+// fetchChaosMessages reads the messages chaos-smtp remembered for one
+// recipient. withBody needs the server to have been started with
+// --keep-bodies (see test/e2e/docker-compose.yml).
+func fetchChaosMessages(ctx context.Context, hc *http.Client, base, rcpt string, limit int, withBody bool) ([]chaosMessage, error) {
+	u := fmt.Sprintf("%s/messages?rcpt=%s&limit=%d", strings.TrimRight(base, "/"), url.QueryEscape(rcpt), limit)
+	if withBody {
+		u += "&body=1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("chaos-smtp /messages: HTTP %d", resp.StatusCode)
+	}
+	var out chaosMessageList
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}

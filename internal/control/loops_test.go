@@ -390,3 +390,134 @@ func TestRetentionDisabled(t *testing.T) {
 		t.Fatalf("retention ran with RetentionDays=0: %v", counts)
 	}
 }
+
+// BUG-1 of test/e2e/README.md: a recipient opens the mail after the campaign
+// completed, and the cached uniques of architecture 9.3 have to follow. The
+// status counts must not be recounted: the campaign is over.
+func TestFinalizerRefreshesTrackingOfCompletedCampaigns(t *testing.T) {
+	_, st, clk, c := newFixture(t, host.Hooks{})
+	ctx := context.Background()
+
+	cam := seedCampaign(t, st, store.CampaignRunning)
+	ids := seedDeliveries(t, st, cam.ID, store.DeliverySent, 2)
+
+	loop := &finalizer{st: st, log: discardLogger(), cfg: &c.cfg, skips: map[string]int{}}
+	if err := loop.Tick(ctx, clk.Now()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	got := getCampaign(t, st, cam.ID)
+	if got.Status != store.CampaignCompleted {
+		t.Fatalf("status %s, want completed", got.Status)
+	}
+	if got.Stats.UniqueOpens != 0 {
+		t.Fatalf("unique_opens = %d before anyone opened anything", got.Stats.UniqueOpens)
+	}
+
+	// The open arrives five minutes after the campaign finished, which is the
+	// normal case for every real campaign.
+	clk.Advance(5 * time.Minute)
+	b := c.Tracking()
+	b.Record(trackingEvent(testTenant, ids[0], cam.ID, store.TrackingOpen, clk.Now()))
+	b.Record(trackingEvent(testTenant, ids[1], cam.ID, store.TrackingOpen, clk.Now()))
+	b.Record(trackingEvent(testTenant, ids[1], cam.ID, store.TrackingUnsubscribed, clk.Now()))
+	if err := b.Close(); err != nil {
+		t.Fatalf("tracking Close: %v", err)
+	}
+
+	if err := loop.Tick(ctx, clk.Now()); err != nil {
+		t.Fatalf("refresh Tick: %v", err)
+	}
+	got = getCampaign(t, st, cam.ID)
+	if got.Stats.UniqueOpens != 2 || got.Stats.Unsubscribed != 1 {
+		t.Fatalf("stats = %+v, want unique_opens 2 and unsubscribed 1", got.Stats)
+	}
+	if got.Stats.ByStatus[store.DeliverySent] != 2 {
+		t.Errorf("the refresh dropped the status counts: %+v", got.Stats.ByStatus)
+	}
+	if !got.Stats.ComputedAt.Equal(clk.Now()) {
+		t.Errorf("ComputedAt = %v, want %v", got.Stats.ComputedAt, clk.Now())
+	}
+	if got.Status != store.CampaignCompleted || !got.CompletedAt.Equal(baseTime) {
+		t.Errorf("the refresh moved the campaign: status %s completed_at %v", got.Status, got.CompletedAt)
+	}
+}
+
+// The cadence decays: every tick for the first hour, then every ten minutes,
+// and never once the campaign is older than the refresh window.
+func TestStatsRefreshDueDecays(t *testing.T) {
+	const window = 14 * 24 * time.Hour
+	completed := baseTime
+	cases := []struct {
+		name string
+		age  time.Duration
+		last time.Duration // ComputedAt relative to completion; -1 = never
+		want bool
+	}{
+		{"just completed", time.Second, 0, true},
+		{"inside the hot hour, computed a second ago", 30 * time.Minute, 30*time.Minute - time.Second, true},
+		{"cold, computed a minute ago", 2 * time.Hour, 2*time.Hour - time.Minute, false},
+		{"cold, computed eleven minutes ago", 2 * time.Hour, 2*time.Hour - 11*time.Minute, true},
+		{"cold, never computed", 2 * time.Hour, -1, true},
+		{"past the window", window + time.Hour, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &store.Campaign{CompletedAt: completed}
+			if tc.last >= 0 {
+				c.Stats.ComputedAt = completed.Add(tc.last)
+			}
+			if got := statsRefreshDue(c, completed.Add(tc.age), window); got != tc.want {
+				t.Errorf("statsRefreshDue = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The walk is bounded per tick and resumes where it stopped, so a tenant with
+// more completed campaigns than the scan budget is covered over several ticks
+// instead of being either skipped or paid for in full every ten seconds.
+func TestFinalizerRefreshWalkIsBoundedAndResumes(t *testing.T) {
+	_, st, clk, c := newFixture(t, host.Hooks{},
+		WithBatches(Batches{CampaignPage: 2, StatsRefreshScan: 2}))
+	ctx := context.Background()
+
+	const n = 5
+	var ids []string
+	for i := 0; i < n; i++ {
+		cam := seedCampaign(t, st, store.CampaignCompleted, func(c *store.Campaign) {
+			c.CompletedAt = clk.Now()
+		})
+		ids = append(ids, cam.ID)
+		d := seedDeliveries(t, st, cam.ID, store.DeliverySent, 1)
+		if err := st.Tracking().InsertEvents(ctx, []store.TrackingEvent{
+			trackingEvent(testTenant, d[0], cam.ID, store.TrackingOpen, clk.Now()),
+		}); err != nil {
+			t.Fatalf("InsertEvents: %v", err)
+		}
+	}
+
+	loop := &finalizer{st: st, log: discardLogger(), cfg: &c.cfg, skips: map[string]int{}}
+	refreshed := func() int {
+		n := 0
+		for _, id := range ids {
+			if getCampaign(t, st, id).Stats.UniqueOpens == 1 {
+				n++
+			}
+		}
+		return n
+	}
+	if err := loop.Tick(ctx, clk.Now()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := refreshed(); got != 2 {
+		t.Fatalf("%d campaigns refreshed on the first tick, want the 2 the budget allows", got)
+	}
+	for i := 0; i < 3; i++ {
+		if err := loop.Tick(ctx, clk.Now()); err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+	}
+	if got := refreshed(); got != n {
+		t.Fatalf("%d of %d campaigns refreshed after four ticks, want all of them", got, n)
+	}
+}

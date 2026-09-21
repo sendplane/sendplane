@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/sendplane/sendplane/store"
@@ -118,6 +119,24 @@ func (s *server) applySettings(ctx context.Context, cur *store.TenantSettings, i
 	if in.DefaultLocale != nil {
 		cur.DefaultLocale = *in.DefaultLocale
 	}
+	if in.EventTypes != nil {
+		types := make([]string, 0, len(*in.EventTypes))
+		for _, typ := range *in.EventTypes {
+			typ = strings.TrimSpace(typ)
+			if typ == "" {
+				return errInvalid("event_types must not contain an empty type")
+			}
+			types = append(types, typ)
+		}
+		// An empty array is not "subscribe to nothing" but "use the default
+		// set", the same as never having set the field (architecture 12).
+		// Storing nil rather than an empty slice keeps the two spellings from
+		// diverging in the backends.
+		if len(types) == 0 {
+			types = nil
+		}
+		cur.EventTypes = types
+	}
 	if in.Tracking != nil {
 		if err := s.applyTracking(ctx, cur, *in.Tracking); err != nil {
 			return err
@@ -184,6 +203,7 @@ func (s *server) applyTracking(ctx context.Context, cur *store.TenantSettings, i
 }
 
 func settingsOut(v *store.TenantSettings) TenantSettings {
+	types := append([]string{}, v.EventTypes...)
 	out := TenantSettings{
 		TenantId:               strPtr(v.TenantID),
 		RetentionDays:          i32(v.RetentionDays),
@@ -192,6 +212,7 @@ func settingsOut(v *store.TenantSettings) TenantSettings {
 		UnsubscribeUrlTemplate: strPtr(v.UnsubscribeURLTemplate),
 		UnsubscribeOneClick:    ptr(v.UnsubscribeOneClick),
 		DefaultLocale:          strPtr(v.DefaultLocale),
+		EventTypes:             &types,
 		Version:                ptr(v.Version),
 		CreatedAt:              timePtr(v.CreatedAt),
 		UpdatedAt:              timePtr(v.UpdatedAt),

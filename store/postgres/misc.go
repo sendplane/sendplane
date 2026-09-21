@@ -18,7 +18,7 @@ type settingsRepo struct {
 const settingsCols = `retry, retention_days, suppression_enabled,
 	bounce_retain_raw, unsubscribe_mode,
 	unsubscribe_url_template, unsubscribe_one_click, default_locale, tracking,
-	version, created_at, updated_at`
+	event_types, version, created_at, updated_at`
 
 func (r *settingsRepo) Get(ctx context.Context) (*store.TenantSettings, error) {
 	if err := r.p.check(); err != nil {
@@ -26,12 +26,12 @@ func (r *settingsRepo) Get(ctx context.Context) (*store.TenantSettings, error) {
 	}
 	const q = "SELECT " + settingsCols + " FROM tenant_settings WHERE tenant_id = $1"
 	var v store.TenantSettings
-	var retry, tracking []byte
+	var retry, tracking, eventTypes []byte
 	var mode string
 	err := r.p.pool.QueryRow(ctx, q, r.tenant).Scan(&retry, &v.RetentionDays,
 		&v.SuppressionEnabled, &v.BounceRetainRaw, &mode, &v.UnsubscribeURLTemplate,
 		&v.UnsubscribeOneClick, &v.DefaultLocale,
-		&tracking, &v.Version, &v.CreatedAt, &v.UpdatedAt)
+		&tracking, &eventTypes, &v.Version, &v.CreatedAt, &v.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("tenant settings %s: %w", r.tenant, mapErr(err))
 	}
@@ -39,6 +39,9 @@ func (r *settingsRepo) Get(ctx context.Context) (*store.TenantSettings, error) {
 	v.UnsubscribeMode = store.UnsubscribeMode(mode)
 	v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
 	if err := jsonOut(retry, &v.Retry); err != nil {
+		return nil, err
+	}
+	if err := jsonOut(eventTypes, &v.EventTypes); err != nil {
 		return nil, err
 	}
 	return &v, jsonOut(tracking, &v.Tracking)
@@ -59,6 +62,10 @@ func (r *settingsRepo) Create(ctx context.Context, v *store.TenantSettings) erro
 	if err != nil {
 		return err
 	}
+	eventTypes, err := jsonIn(v.EventTypes)
+	if err != nil {
+		return err
+	}
 	v.TenantID = r.tenant
 	now := r.p.now()
 	if v.CreatedAt.IsZero() {
@@ -69,12 +76,12 @@ func (r *settingsRepo) Create(ctx context.Context, v *store.TenantSettings) erro
 	const q = `INSERT INTO tenant_settings (tenant_id, retry, retention_days,
 	    suppression_enabled, bounce_retain_raw, unsubscribe_mode,
 	    unsubscribe_url_template, unsubscribe_one_click, default_locale,
-	    tracking, version, created_at, updated_at)
-	  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
+	    tracking, event_types, version, created_at, updated_at)
+	  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 	_, err = r.p.pool.Exec(ctx, q, r.tenant, retry, v.RetentionDays,
 		v.SuppressionEnabled, v.BounceRetainRaw, string(v.UnsubscribeMode),
 		v.UnsubscribeURLTemplate,
-		v.UnsubscribeOneClick, v.DefaultLocale, tracking, v.Version,
+		v.UnsubscribeOneClick, v.DefaultLocale, tracking, eventTypes, v.Version,
 		tsInNN(v.CreatedAt), tsInNN(v.UpdatedAt))
 	return mapErr(err)
 }
@@ -94,20 +101,24 @@ func (r *settingsRepo) Update(ctx context.Context, v *store.TenantSettings) erro
 	if err != nil {
 		return err
 	}
+	eventTypes, err := jsonIn(v.EventTypes)
+	if err != nil {
+		return err
+	}
 	v.TenantID = r.tenant
 	const q = `UPDATE tenant_settings SET retry = $2, retention_days = $3,
 	    suppression_enabled = $4, bounce_retain_raw = $5, unsubscribe_mode = $6,
 	    unsubscribe_url_template = $7, unsubscribe_one_click = $8,
-	    default_locale = $9, tracking = $10,
-	    version = version + 1, updated_at = $11
-	  WHERE tenant_id = $1 AND version = $12
+	    default_locale = $9, tracking = $10, event_types = $11,
+	    version = version + 1, updated_at = $12
+	  WHERE tenant_id = $1 AND version = $13
 	  RETURNING created_at, updated_at, version`
 	var created, updated time.Time
 	var version int64
 	err = r.p.pool.QueryRow(ctx, q, r.tenant, retry, v.RetentionDays,
 		v.SuppressionEnabled, v.BounceRetainRaw, string(v.UnsubscribeMode),
 		v.UnsubscribeURLTemplate,
-		v.UnsubscribeOneClick, v.DefaultLocale, tracking, r.p.now(), v.Version).
+		v.UnsubscribeOneClick, v.DefaultLocale, tracking, eventTypes, r.p.now(), v.Version).
 		Scan(&created, &updated, &version)
 	if err != nil {
 		var exists bool

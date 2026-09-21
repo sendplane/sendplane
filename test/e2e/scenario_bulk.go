@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -12,10 +14,11 @@ import (
 // in two chunks and sent through chaos-smtp, asserted against counts derived
 // from chaossmtp.Decide rather than from a recorded snapshot (expect.go).
 //
-// The locale half of the brief's scenario 2 — "the ko recipients received the
-// ko subject" — is asserted in scenario 4 instead, on a campaign whose mail
-// can actually be read back; see the comment on trackingRecipients. The
-// locales are still mixed here so the render path runs both.
+// The locale half — "the ko recipients received the ko subject" — is asserted
+// here, on the messages chaos-smtp recorded (`--keep-messages=-1
+// --keep-bodies` in the compose file, read through its GET /messages). It used
+// to live in scenario 4 on a GreenMail campaign only because cmd/chaos-smtp
+// exposed counters and nothing else (GAP-1 in README.md).
 func (r *runner) bulkEmail(i int) string {
 	return fmt.Sprintf("u%06d@%s", i, bulkDomain)
 }
@@ -110,7 +113,102 @@ func (r *runner) scenarioBulkCampaign(ctx context.Context) error {
 	// Every failure must be explained by the policy: either it ran out of
 	// attempts or the relay refused it permanently (architecture 15.1).
 	r.assertFailedSample(ctx, camp.ID)
+	r.assertRenderedBulkMail(ctx)
 	return nil
+}
+
+// assertRenderedBulkMail reads messages back out of chaos-smtp and checks what
+// the recipients actually received: the subject in their own locale, their own
+// name substituted into the body, and the tracking URLs of architecture 9.2 on
+// the tenant tracking domain.
+//
+// One accepted message per locale is enough — the render path is the same for
+// all 10,000 — so the harness takes a page of recent messages, picks one en
+// and one ko recipient out of it, and fetches those two with their bodies.
+func (r *runner) assertRenderedBulkMail(ctx context.Context) {
+	recent, err := fetchChaosMessages(ctx, r.hc, r.opt.chaosStats, "", 200, false)
+	if err != nil {
+		r.fail("reading chaos-smtp /messages: %v", err)
+		return
+	}
+	if len(recent) == 0 {
+		r.fail("chaos-smtp remembered no message; is --keep-messages=-1 still set in the compose file?")
+		return
+	}
+	// Newest last, so this ends up with two recipients that really were
+	// accepted, whatever chaossmtp.Decide did to their neighbours.
+	sample := map[string]string{}
+	for _, m := range recent {
+		for _, rcpt := range m.Rcpts {
+			if i, ok := bulkIndexOf(rcpt); ok {
+				sample[bulkLocale(i)] = rcpt
+			}
+		}
+	}
+	for _, locale := range []string{"en", "ko"} {
+		rcpt, ok := sample[locale]
+		if !ok {
+			r.fail("no accepted %s recipient among the %d most recent chaos-smtp messages", locale, len(recent))
+			continue
+		}
+		msgs, err := fetchChaosMessages(ctx, r.hc, r.opt.chaosStats, rcpt, 1, true)
+		if err != nil {
+			r.fail("reading the message chaos-smtp recorded for %s: %v", rcpt, err)
+			continue
+		}
+		if len(msgs) == 0 {
+			r.fail("chaos-smtp has no message for %s any more", rcpt)
+			continue
+		}
+		raw := gmMessage{Raw: msgs[0].Body}
+		if raw.Raw == "" {
+			r.fail("chaos-smtp returned no body for %s; --keep-bodies is not set on the container", rcpt)
+			continue
+		}
+		want := e2eBundle.Locales[locale]["subject"]
+		if got := raw.decodedSubject(); got != want {
+			r.fail("%s (locale %s) received subject %q, want %q", rcpt, locale, got, want)
+			continue
+		}
+		body, err := raw.htmlPart()
+		if err != nil {
+			r.fail("%s: %v", rcpt, err)
+			continue
+		}
+		i, _ := bulkIndexOf(rcpt)
+		if name := fmt.Sprintf("E2E %d", i); !strings.Contains(body, name) {
+			r.fail("%s: the rendered body does not carry {{ recipient.name }} = %q", rcpt, name)
+		}
+		urls, err := extractTrackingURLs(raw)
+		if err != nil {
+			r.fail("%s: %v", rcpt, err)
+			continue
+		}
+		if !strings.HasPrefix(urls.pixel, "https://"+r.opt.trackingDomain+"/t/o/") {
+			r.fail("%s: the pixel URL %q is not on the tenant tracking domain", rcpt, urls.pixel)
+		}
+		if !strings.HasPrefix(urls.click, "https://"+r.opt.trackingDomain+"/t/c/") {
+			r.fail("%s: the click URL %q is not on the tenant tracking domain", rcpt, urls.click)
+		}
+		if !strings.Contains(urls.listUnsub, "/t/u/") {
+			r.fail("%s: List-Unsubscribe is %q, want the sendplane /t/u/ URL", rcpt, urls.listUnsub)
+		}
+		r.logf("  %s (%s): subject=%q, tracking URLs on %s", rcpt, locale, raw.decodedSubject(), r.opt.trackingDomain)
+	}
+}
+
+// bulkIndexOf recovers the recipient number from a bulk address, which is what
+// says whether it was an en or a ko recipient (bulkEmail/bulkLocale).
+func bulkIndexOf(addr string) (int, bool) {
+	local, domain, ok := strings.Cut(strings.TrimSpace(addr), "@")
+	if !ok || !strings.EqualFold(domain, bulkDomain) || !strings.HasPrefix(local, "u") {
+		return 0, false
+	}
+	i, err := strconv.Atoi(local[1:])
+	if err != nil {
+		return 0, false
+	}
+	return i, true
 }
 
 func (r *runner) ingest(ctx context.Context, campaignID string) error {

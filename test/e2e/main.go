@@ -233,6 +233,13 @@ func (r *runner) fail(format string, a ...any) {
 
 // knownFail records an assertion that is right and that the product currently
 // does not satisfy. bug is the entry in test/e2e/README.md's known-issue table.
+//
+// Nothing calls it right now - the four entries that table used to have are
+// all fixed - and it stays anyway, because it is the mechanism the README
+// documents and --strict switches: the next assertion that is right before
+// the product is marks itself with this instead of being deleted or softened.
+//
+//nolint:unused // the KNOWN-FAIL mechanism of the README, kept for the next one.
 func (r *runner) knownFail(bug, format string, a ...any) {
 	msg := fmt.Sprintf("[%s] %s", bug, fmt.Sprintf(format, a...))
 	if r.opt.strict {

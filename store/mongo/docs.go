@@ -621,6 +621,7 @@ type settingsDoc struct {
 	UnsubscribeOneClick    bool              `bson:"unsubscribe_one_click"`
 	DefaultLocale          string            `bson:"default_locale"`
 	Tracking               trackingConfigDoc `bson:"tracking"`
+	EventTypes             []string          `bson:"event_types"`
 }
 
 func encSettings(v *store.TenantSettings) *settingsDoc {
@@ -646,6 +647,7 @@ func encSettings(v *store.TenantSettings) *settingsDoc {
 			Domain: v.Tracking.Domain, Opens: v.Tracking.Opens,
 			Clicks: v.Tracking.Clicks, SigningKeys: keys,
 		},
+		EventTypes: v.EventTypes,
 	}
 }
 
@@ -672,7 +674,8 @@ func decSettings(d *settingsDoc) *store.TenantSettings {
 			Domain: d.Tracking.Domain, Opens: d.Tracking.Opens,
 			Clicks: d.Tracking.Clicks, SigningKeys: keys,
 		},
-		Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
+		EventTypes: d.EventTypes,
+		Version:    d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 	}
 }
 

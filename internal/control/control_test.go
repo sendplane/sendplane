@@ -142,3 +142,44 @@ func TestControlRunFlushesTracking(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 }
+
+// An event enqueued for a tenant that has gone quiet still has to reach the
+// host: a DSN arrives days after the campaign and a probe verdict a minute
+// after the probe mail, and neither makes the tenant active again. The
+// per-tick grace window cannot cover that, so the loop list carries a second,
+// slower dispatcher over every known tenant.
+func TestOutboxSweepCoversIdleTenants(t *testing.T) {
+	sink := &recordingSink{}
+	p, st, _, c := newFixture(t, host.Hooks{Events: sink})
+	ctx := context.Background()
+
+	// A tenant with a finished campaign: known, but not active.
+	seedCampaign(t, st, store.CampaignCompleted)
+	seedDeliveries(t, st, "", store.DeliverySent, 1)
+	active, err := p.ActiveTenants(ctx)
+	if err != nil {
+		t.Fatalf("ActiveTenants: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("ActiveTenants = %v, want none; the test needs an idle tenant", active)
+	}
+
+	var sweep *loopSpec
+	for i := range c.leader.loops {
+		if c.leader.loops[i].name == "outbox-sweep" {
+			sweep = &c.leader.loops[i]
+		}
+	}
+	if sweep == nil {
+		t.Fatal("no outbox-sweep loop is registered")
+	}
+	if !sweep.allTenants {
+		t.Fatal("the outbox sweep does not tick every tenant, so an idle tenant's events never leave")
+	}
+
+	enqueue(t, st, "sender.health_changed", 1)
+	c.leader.tickTenants(ctx, *sweep, newTenantSet())
+	if got := len(sink.got()); got != 1 {
+		t.Fatalf("the sweep dispatched %d events for the idle tenant, want 1", got)
+	}
+}

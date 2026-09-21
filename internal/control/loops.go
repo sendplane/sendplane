@@ -36,6 +36,20 @@ type loopSpec struct {
 	// left Provider.ActiveTenants. Zero for every loop but the outbox; see
 	// tenantSet.
 	linger int
+	// allTenants ticks every tenant Provider.Tenants knows of, not only the
+	// active ones. It is for the loops whose work arrives *after* the tenant
+	// went quiet: the loopback probe is judged a minute after the probe mail
+	// went terminal, retention deletes rows of campaigns that finished weeks
+	// ago, and a recipient opens a newsletter long after the campaign
+	// completed. Those loops would otherwise only ever run for a tenant that
+	// happens to be busy with something else (the bounce poller iterates
+	// Provider.Tenants for exactly this reason; see bounce.go).
+	//
+	// The active set is still ticked, and immediately: the known-tenant list
+	// is refreshed on its own interval (Leader.knownTenants) because a
+	// Provider may compute it expensively, and a loop must not wait for that
+	// refresh to reach a tenant that has work right now.
+	allTenants bool
 }
 
 // tenantSet is one loop's state between ticks: the per-tenant loop instances,
@@ -105,9 +119,30 @@ func (l *Leader) tickTenants(ctx context.Context, spec loopSpec, set *tenantSet)
 			set.linger[tenantID] = spec.linger
 		}
 	}
+	if spec.allTenants {
+		known, err := l.knownTenants(ctx)
+		if err != nil {
+			// The active half is still worth ticking: a failed listing
+			// delays the idle tenants by one interval, it does not stop the
+			// loop.
+			if ctx.Err() == nil {
+				l.log.Error("control: cannot list tenants", "loop", spec.name, "err", err)
+			}
+		}
+		for _, tenantID := range known {
+			if tenantID == store.SystemTenantID {
+				// The contract says Tenants never returns it; a custom
+				// Provider that does anyway must not get a loop ticking a
+				// tenant that does not exist.
+				continue
+			}
+			live[tenantID] = true
+		}
+	}
 
-	// A loop with no grace window ticks exactly the active tenants; one with a
-	// grace window also ticks the tenants still counting down.
+	// live is what this loop ticks now (the active tenants, plus every known
+	// tenant for an allTenants loop); a loop with a grace window also ticks
+	// the tenants still counting down.
 	ids := make([]string, 0, len(tenants)+len(set.linger))
 	seen := make(map[string]bool, len(ids))
 	for tenantID := range live {

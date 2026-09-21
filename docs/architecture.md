@@ -439,6 +439,10 @@ GET  /campaigns/{id}/deliveries?status=failed&cursor=...
 
 control 리더 루프가 running 캠페인마다 `CountByStatus`를 주기(기본 10s, 캠페인 크기에 따라 증가)로 집계해 캠페인 행에 캐시. 미완료 상태(`pending/queued/leased/deferred`)가 0이면 `completed` + 이벤트. Delivery마다 카운터를 증가시키는 hot-row 갱신은 하지 않습니다.
 
+완료 후에도 **트래킹 유니크만**은 계속 갱신합니다. 오픈·클릭·수신거부는 대부분 캠페인이 끝난 뒤에 들어오므로, 완료 시점에 쓴 값으로 굳으면 §9.3의 수신거부율이 사실상 영원히 0이 됩니다. 같은 finalizer 틱이 `completed` 캠페인을 페이지 단위로(틱당 상한 있음, 커서는 다음 틱으로 이어짐) 훑어 `CountUnique` → `UpdateStats`만 다시 씁니다 — `ByStatus`는 손대지 않습니다(끝난 캠페인의 상태 수는 확정입니다). 주기는 감쇠합니다: 완료 후 1시간은 매 틱, 그 뒤에는 10분마다, 완료 후 14일(`WithTrackingRefresh`)이 지나면 그만둡니다.
+
+그래서 finalizer는 `ActiveTenants`가 아니라 **모든 테넌트**를 틱합니다. 완료 판정 자체는 active 테넌트에서만 일어나지만, 갱신해야 할 그 캠페인의 테넌트는 대개 이미 한가합니다. 테넌트 목록은 리더가 30초 캐시로 공유합니다(`Provider.Tenants`는 비쌀 수 있습니다).
+
 ## 8. Sender
 
 ### 8.1 루프
@@ -504,7 +508,7 @@ Liquid 렌더가 끝난 HTML에 대해:
 - 수신거부는 두 단계입니다: `unsubscribe_clicked`(GET 리다이렉트, 스캐너 가능성)와 `unsubscribed`(원클릭 POST 또는 호스트 API 통지, 확정). **캠페인 수신거부율 = unsubscribed 유니크 / sent**, clicked는 참고 지표. Keila가 겪은 "스캐너가 수신거부 링크를 미리 열어 버리는" 문제를 이 구분과 호스트 측 확인 페이지로 흡수합니다.
 - 봇 판정: 발송 후 N초(기본 3s) 이내 클릭, 알려진 스캐너 UA/ASN, 한 delivery의 모든 링크가 수 초 내 순차 클릭된 패턴이면 `suspected_bot=true`. 기본 집계에서 제외하되 원본 보존.
 - 오픈은 Apple Mail Privacy Protection 등으로 과대 추정됨을 UI에 명시하고 클릭 기반 지표를 우선 노출합니다.
-- 캠페인 통계 캐시(§7.3)에 `unique_opens, unique_clicks, unsubscribed, unsubscribe_clicked`와 비율(분모 `sent`)을 추가합니다.
+- 캠페인 통계 캐시(§7.3)에 `unique_opens, unique_clicks, unsubscribed, unsubscribe_clicked`와 비율(분모 `sent`)을 추가합니다. 이 네 값은 캠페인이 `completed` 된 뒤에도 finalizer가 감쇠 주기로 다시 계산합니다(§7.3) — 수신자가 메일을 여는 시점은 거의 항상 완료 후입니다.
 - 이벤트: `delivery.opened|clicked`(기본 구독 off), `recipient.unsubscribed`(기본 on, 호스트가 자기 DB를 갱신하는 주 경로). `Hooks.Unsubscribed`가 있으면 원클릭 처리 중 동기 호출하고 실패 시 이벤트로 재시도합니다.
 
 ### 9.4 개인정보
@@ -554,6 +558,7 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
 
 - 프로브 delivery는 `lane=probe`로 캠페인 통계·트래킹(오픈 픽셀·링크 재작성·수신거부)·suppression에서 제외됩니다. `X-Sendplane-Probe`는 `Delivery.Vars["probe_token"]`에서 나옵니다.
 - 두 루프(트리거 5분, 회수 1분)는 control 리더에만 등록됩니다(`control.WithLoop`). 메일박스 접속은 루트가 `internal/mailbox`를 `probe.MailboxOpener`로 감싸고, 받은편지함과 스팸함에 각각 커넥션을 엽니다.
+- 두 루프 모두 `control.Loop.AllTenants` 입니다. 프로브 delivery는 1~2초면 종단 상태가 되어 테넌트가 곧바로 `ActiveTenants`에서 빠지므로, active 테넌트만 도는 회수 루프는 **테넌트가 마침 다른 일을 하고 있을 때만** 판정을 끝냅니다. 같은 이유로 `retention`·`finalizer`·`outbox-sweep`도 전체 테넌트를 돕니다.
 - 프로세스 단위 설정은 `Options.Probe`(`host.ProbeConfig`: `Enabled`, `HMACKey`, `Nameservers`, `Interval`, `Timeout`)입니다. 꺼져 있으면 `POST /senders/{id}/probe`는 501입니다.
 - 여러 메일박스 결과의 "최악 값"이 요약 상태이고 상세는 메일박스별로 표시합니다.
 - 프로브 발송이 transport 상태(§8.3)도 갱신하므로 별도 SMTP 연결 테스트 버튼은 "프로브 즉시 실행"으로 대체합니다.
@@ -581,7 +586,9 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
 
 - 이벤트는 **아웃박스 패턴**: 상태 전이와 같은 스토어에 `EventOutbox` 삽입 → control 리더 루프가 `EventSink`로 배달(webhook: HMAC 서명, 재시도, 실패 시 dead-letter 조회/재전송 API). 호스트 측 Go `EventSink` 구현이면 동기 호출.
 - 이벤트 타입: `delivery.sent|deferred|failed|bounced|complained|suppressed`, `campaign.started|paused|completed|cancelled`, `transport.unhealthy|recovered`, `sender.health_changed`, `recipient.unsubscribed`, `delivery.opened|clicked`, `i18n.missing_key`.
-  대량 캠페인에서 delivery 단위 이벤트는 폭주하므로 테넌트별 구독 필터(기본: 실패류만)와 배치 페이로드를 지원.
+- **구독 필터**는 `TenantSettings.EventTypes`(API `event_types`)입니다. 비어 있으면 **기본 집합** = `delivery.sent`·`delivery.opened`·`delivery.clicked`를 뺀 전부, 값이 있으면 그 목록이 곧 전부입니다. 필터는 두 번 걸립니다: **enqueue 할 때**(구독하지 않은 타입은 outbox 행 자체를 만들지 않습니다)와 **dispatch 할 때**(구독을 끄면 이미 쌓인 행도 나가지 않고, 그 행은 delivered로 정리됩니다).
+- `delivery.sent`/`delivery.failed`는 sender의 배치 `Complete` 이후 같은 스토어에 씁니다. 계약은 **delivery 하나당 outbox 행 하나**이고, 그래서 100만 수신자 캠페인을 구독하면 outbox 행·dispatch·HTTP POST가 100만 건입니다 — `delivery.sent`가 기본 집합에서 빠져 있는 이유가 그것입니다. 켜기 전에 그 비용을 계산하십시오.
+- outbox 디스패처는 두 개입니다: active 테넌트를 1초마다 도는 것(캠페인 전이의 지연을 짧게)과, **모든 테넌트**를 10초마다 도는 `outbox-sweep`. 바운스(며칠 뒤)·프로브 판정(1분 뒤)처럼 테넌트가 한가해진 뒤에 생기는 이벤트는 sweep이 아니면 다음 캠페인 때까지 pending으로 남습니다. `ClaimPending`이 lease를 잡으므로 둘이 같은 행을 두 번 보내지 않습니다.
 - 메트릭(OpenTelemetry/Prometheus): 큐 깊이(lane/tenant), claim 지연, 렌더/SMTP 지연 히스토그램, 상태 전이 카운터, transport 상태, rate limiter 대기. HPA/KEDA는 큐 깊이 메트릭 사용.
 - 로그는 `slog`, 요청/딜리버리 ID 상관관계.
 

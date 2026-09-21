@@ -13,7 +13,8 @@ import (
 
 func newDispatcher(t *testing.T, st store.Store, sink host.EventSink, c *Control, clk *fakeClock) *outboxDispatcher {
 	t.Helper()
-	return &outboxDispatcher{st: st, sink: sink, log: discardLogger(), cfg: &c.cfg, clock: clk.Now}
+	return &outboxDispatcher{st: st, tenant: testTenant, sink: sink,
+		log: discardLogger(), cfg: &c.cfg, clock: clk.Now}
 }
 
 func enqueue(t *testing.T, st store.Store, typ string, n int) {
@@ -181,5 +182,47 @@ func TestBackoffFor(t *testing.T) {
 	}
 	if got := backoffFor(nil, 3); got != time.Minute {
 		t.Errorf("backoffFor(nil) = %s, want 1m", got)
+	}
+}
+
+// The dispatcher is the second half of the subscription filter (architecture
+// 12): a tenant that unsubscribes stops receiving the rows that were already
+// queued, and those rows are retired instead of being retried until they
+// dead-letter.
+func TestOutboxDispatcherHonoursTheSubscription(t *testing.T) {
+	sink := &recordingSink{}
+	_, st, clk, c := newFixture(t, host.Hooks{Events: sink})
+	ctx := context.Background()
+
+	settings, err := store.LoadTenantSettings(ctx, st, testTenant, baseTime)
+	if err != nil {
+		t.Fatalf("LoadTenantSettings: %v", err)
+	}
+	settings.EventTypes = []string{EventCampaignCompleted}
+	if err := st.TenantSettings().Update(ctx, settings); err != nil {
+		t.Fatalf("settings Update: %v", err)
+	}
+
+	enqueue(t, st, EventCampaignCompleted, 2)
+	enqueue(t, st, "delivery.sent", 3)
+
+	d := newDispatcher(t, st, sink, c, clk)
+	if err := d.Tick(ctx, baseTime); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	got := sink.got()
+	if len(got) != 2 {
+		t.Fatalf("sink got %d events, want the 2 subscribed ones", len(got))
+	}
+	for _, e := range got {
+		if e.Type != EventCampaignCompleted {
+			t.Errorf("dispatched an unsubscribed event %q", e.Type)
+		}
+	}
+	if n := len(listOutbox(t, st, store.OutboxPending)); n != 0 {
+		t.Errorf("%d events are still pending; the unsubscribed ones must be retired", n)
+	}
+	if n := len(listOutbox(t, st, store.OutboxDelivered)); n != 5 {
+		t.Errorf("%d events are delivered, want all 5 retired one way or the other", n)
 	}
 }

@@ -2517,6 +2517,15 @@ export interface components {
             /** @description Fallback locale, e.g. `en`. */
             default_locale?: string;
             /**
+             * @description Outbox event types this tenant subscribes to; empty = default set.
+             *     The default set is every type sendplane emits except
+             *     `delivery.sent`, `delivery.opened` and `delivery.clicked`, which a
+             *     bulk campaign produces one event per recipient of (architecture
+             *     12). A non-empty list is exact: only the types it names are
+             *     enqueued, and only they are dispatched.
+             */
+            event_types?: string[];
+            /**
              * Format: int32
              * @description How long deliveries, tracking events, bounces and probe runs are kept.
              */
@@ -2551,6 +2560,8 @@ export interface components {
         TenantSettingsInput: {
             bounce_retain_raw?: boolean;
             default_locale?: string;
+            /** @description Outbox event subscription; empty = default set (see `TenantSettings`). */
+            event_types?: string[];
             /** Format: int32 */
             retention_days?: number;
             retry?: components["schemas"]["RetryPolicy"];

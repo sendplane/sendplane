@@ -8,7 +8,7 @@
 
 | | 어디서 도나 | 무엇이 보장하나 |
 |---|---|---|
-| 리더 루프 6종 | **리플리카 1대** | `LockRepo` lease (`_system` 테넌트의 `control-leader`) |
+| 리더 루프 7종 | **리플리카 1대** | `LockRepo` lease (`_system` 테넌트의 `control-leader`) |
 | `TrackingBuffer` | **모든 리플리카** | 픽셀/리다이렉트 핸들러가 받은 이벤트를 자기 메모리에 쌓음 |
 
 리더는 `ttl/3`마다 갱신하고, **갱신이 실패하면 루프를 먼저 멈춘 뒤** 다시 획득을 시도합니다.
@@ -16,18 +16,33 @@ lease를 잃은 리플리카가 쓰기를 계속하는 구간을 없애기 위�
 
 ## 루프
 
-각 루프는 `Tick(ctx, now) error` 하나짜리 타입이고, 리더가 `ActiveTenants()`를 돌며
-테넌트별 인스턴스에 틱을 겁니다. 모든 루프는 **멱등이고 청크 단위**입니다 — 100만 행 중간에서
-죽어도 다음 틱이 이어서 합니다.
+각 루프는 `Tick(ctx, now) error` 하나짜리 타입이고, 리더가 테넌트를 돌며 테넌트별 인스턴스에 틱을 겁니다.
+대부분은 `ActiveTenants()`를, **전체 열(全) 루프**는 `Tenants()`까지 봅니다(아래 "테넌트 집합").
+모든 루프는 **멱등이고 청크 단위**입니다 — 100만 행 중간에서 죽어도 다음 틱이 이어서 합니다.
 
-| 루프 | 기본 주기 | 하는 일 |
-|---|---|---|
-| `scheduler` | 5s | `scheduled` 중 `ScheduleAt <= now` → `running` (+`campaign.started`). `draft`는 절대 자동 시작하지 않음 |
-| `finalizer` | 10s | `running`마다 `CountByStatus` → `UpdateStats`. `pending/queued/leased/deferred`가 0이면 `completed` + `campaign.completed` |
-| `canceller` | 2s | `cancelled` 캠페인의 `pending/queued/deferred`를 틱당 10k씩 `cancelled`로. `leased`는 sender가 끝내도록 둠 |
-| `leaseReaper` | 30s | `ReleaseExpiredLeases(now, 5000)` — ADR-0002의 at-least-once 복구 경로 |
-| `retention` | 1h | `RetentionDays` 지난 완료/취소 캠페인의 delivery + 테넌트의 tracking/bounce/디스패치된 outbox 행을 5k 청크로 삭제 |
-| `outboxDispatcher` | 1s | `ClaimPending` → `EventSink.Emit` → `MarkDelivered` / `MarkFailed`. 워커 풀 기본 8 |
+| 루프 | 기본 주기 | 테넌트 | 하는 일 |
+|---|---|---|---|
+| `scheduler` | 5s | active | `scheduled` 중 `ScheduleAt <= now` → `running` (+`campaign.started`). `draft`는 절대 자동 시작하지 않음 |
+| `finalizer` | 10s | **전체** | `running`마다 `CountByStatus` → `UpdateStats`, 미완료 0이면 `completed` + `campaign.completed`. 추가로 최근 완료 캠페인의 **트래킹 유니크만** 다시 계산 |
+| `canceller` | 2s | active | `cancelled` 캠페인의 `pending/queued/deferred`를 틱당 10k씩 `cancelled`로. `leased`는 sender가 끝내도록 둠 |
+| `leaseReaper` | 30s | active | `ReleaseExpiredLeases(now, 5000)` — ADR-0002의 at-least-once 복구 경로 |
+| `retention` | 1h | **전체** | `RetentionDays` 지난 완료/취소 캠페인의 delivery + 테넌트의 tracking/bounce/디스패치된 outbox 행을 5k 청크로 삭제 |
+| `outboxDispatcher` | 1s | active(+3틱 유예) | `ClaimPending` → 구독 필터 → `EventSink.Emit` → `MarkDelivered` / `MarkFailed`. 워커 풀 기본 8 |
+| `outbox-sweep` | 10s | **전체** | 같은 디스패처를 한가한 테넌트까지. 바운스·프로브 판정처럼 **일이 끝난 뒤** 생기는 이벤트용 |
+
+### finalizer의 완료 후 트래킹 갱신 (§7.3, §9.3)
+
+수신자가 메일을 여는 시점은 거의 항상 캠페인 완료 **후**입니다. 완료 틱에 쓴 유니크 값으로 굳어 버리면
+§9.3의 "수신거부율 = unsubscribed 유니크 / sent"는 영원히 0입니다. 그래서 매 틱이 `completed` 캠페인을
+페이지 단위로 훑어 `CountUnique` → `UpdateStats`만 다시 씁니다.
+
+- `ByStatus`는 **건드리지 않습니다.** 끝난 캠페인의 상태 수는 확정이고, 100만 행을 영원히 다시 세는 것이야말로
+  완료 판정이 멈추게 하려던 일입니다.
+- 주기는 감쇠합니다: 완료 후 1시간은 매 틱, 그 뒤에는 10분마다(`Stats.ComputedAt` 기준),
+  `WithTrackingRefresh`(기본 14일)가 지나면 아예 대상에서 빠집니다.
+- 한 틱이 보는 캠페인 수는 `Batches.StatsRefreshScan`(기본 2000)으로 묶고, 커서는 다음 틱으로 이어집니다.
+  이력이 10만 개인 테넌트라도 틱당 비용은 같습니다.
+- 값이 안 바뀌어도 `ComputedAt`은 올립니다. 그게 다음 주기의 기준이라 안 올리면 매 틱 다시 세게 됩니다.
 
 ### finalizer의 적응형 주기
 
@@ -37,10 +52,19 @@ delivery 수가 `WithLargeCampaign(rows, every)`의 `rows`(기본 10만)를 넘�
 `total == 0`은 완료로 보지 않습니다. 보존기간이 이미 행을 지웠거나 인제스트와 경합한 캠페인이지,
 "할 일이 있었고 다 끝난" 캠페인이 아닙니다.
 
-### outbox 백오프
+### outbox 백오프와 구독 필터
 
 `1m · 5m · 30m · 2h · 12h`(마지막 값 반복), **10회 실패 후 `failed` 고정 = dead letter**.
-`Hooks.Events`가 nil이면 이 루프를 **등록하지 않습니다**. 아무도 소비하지 않는 행의 시도 횟수만 태우기 때문입니다.
+`Hooks.Events`가 nil이면 이 루프들을 **등록하지 않습니다**. 아무도 소비하지 않는 행의 시도 횟수만 태우기 때문입니다.
+
+디스패치 전에 `TenantSettings.EventTypes`로 한 번 더 거릅니다(§12). 비어 있으면 기본 집합
+(`delivery.sent`·`opened`·`clicked`를 뺀 전부)입니다. 구독하지 않은 행은 `MarkDelivered`로 정리합니다 —
+처리는 끝난 것이고, 남겨 두면 다음 틱이 다시 claim할 뿐입니다. 설정 읽기가 실패하면 **전부 보냅니다**:
+이미 호스트에게 진 빚이라 한 틱 필터를 잃는 쪽이 조용히 안 보내는 쪽보다 낫습니다.
+
+`outbox-sweep`이 따로 있는 이유는 유예(linger)가 **틱 수**로 세기 때문입니다. DSN은 며칠 뒤,
+프로브 판정은 1분 뒤에 이벤트를 만들고 그때 테넌트는 이미 active가 아닙니다. 두 디스패처가 같은 행을
+두 번 보내지는 않습니다 — `ClaimPending`이 lease를 잡습니다.
 
 ## TrackingBuffer (§9.3)
 
@@ -92,8 +116,13 @@ memstore + 고정 시계를 씁니다. 리더 테스트만 실제 시간을 씁�
 `outbox`만 `linger`(3틱)를 씁니다: 캠페인을 `completed`로 옮기는 그 전이가 `campaign.completed`를 enqueue하면서
 동시에 테넌트를 active 집합에서 빼기 때문에, 유예가 없으면 그 이벤트가 다음 캠페인 때까지 pending으로 남습니다.
 이건 창(window)이지 보장이 아닙니다 — dispatch가 실패한 이벤트는 outbox 백오프를 타고, 그 사이 테넌트가 계속
-idle이면 다음 캠페인 때 나갑니다. 완전히 idle한 테넌트의 outbox까지 비우려면 스토어가 "pending 이벤트가 있는 테넌트"를
-열거할 수 있어야 하는데, 계약에 그런 것은 없습니다.
+idle이면 다음 캠페인 때 나갑니다. 완전히 idle한 테넌트의 outbox는 `outbox-sweep`이 `Provider.Tenants()`로 훑습니다.
+
+`loopSpec.allTenants`(외부 등록은 `control.Loop.AllTenants`)를 켠 루프는 active 집합 **∪** `Tenants()`를 돕니다.
+일이 끝난 **뒤에** 도착하는 일거리가 있는 루프들이 그렇습니다 — 프로브 판정(§11.2), 만료된 보존기간,
+뒤늦은 오픈/클릭, 한가해진 뒤 생긴 이벤트. `internal/bounce`가 처음부터 `Provider.Tenants`를 쓰는 것과 같은 이유입니다.
+active 집합은 **항상 즉시** 포함합니다: `Tenants()`는 비쌀 수 있어 리더가 30초 캐시
+(`WithTenantsRefresh`)로 공유하는데, 지금 일이 있는 테넌트가 그 캐시를 기다리면 안 됩니다.
 
 ## retention이 지우는 것
 
@@ -108,7 +137,10 @@ BounceEvent(§16), 그리고 **이미 디스패치된** outbox 행. pending outb
    유니크 판정은 `CountUnique`(distinct delivery)에만 의존합니다.
 2. **캠페인 없는(transactional) delivery의 보존기간 경로가 없습니다.** `DeleteBefore("")`로 지울 수는 있지만
    "언제 끝났는지"의 기준이 될 캠페인이 없어 지금은 건드리지 않습니다.
-3. **"pending 이벤트가 있는 테넌트"를 열거할 수 없습니다.** 위의 outbox linger가 그 대용입니다.
+3. **"pending 이벤트가 있는 테넌트"를 열거할 수 없습니다.** `outbox-sweep`이 전체 테넌트를 훑는 것이 그 대용입니다 —
+   그런 조회가 생기면 sweep은 사라져야 할 루프입니다.
+4. **"최근 완료된 캠페인"을 직접 찾을 수 없습니다.** `ListByStatus(completed)`는 ID(=생성) 순이라 finalizer의
+   트래킹 갱신은 커서를 이어 가며 훑습니다. 완료 시각 역순 조회가 생기면 그 훑기는 사라져야 합니다.
 
 ## 루트 패키지와의 연결
 

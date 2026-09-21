@@ -43,7 +43,7 @@ Compose 플러그인(`docker compose`) 대신 단독 바이너리만 있는 머�
 | `--seed` `--tempfail` `--permfail` `--drop` | 42 / 0.05 / 0.01 / 0.005 | **compose 파일의 chaos-smtp 설정과 반드시 같아야** 기대값이 맞습니다 |
 | `--max-attempts` | 4 | 테넌트 재시도 정책. 런 시작 시 테넌트 설정에 그대로 씁니다 |
 | `--budget` | 10m | 전체 예산. 초과하면 런 실패 |
-| `--probe-timeout` | 3m | 시나리오 6이 프로브 판정을 기다리는 시간. `BUG-2` 가 살아 있는 동안은 이 시간을 통째로 기다렸다가 KNOWN-FAIL 이 됩니다 |
+| `--probe-timeout` | 3m | 시나리오 6이 프로브 판정을 기다리는 시간. 회수 루프는 1분 주기라 보통 ~65초 안에 끝납니다 |
 | `--kill-sender` | false | 시나리오 2 진행 중 sender 한 대를 SIGKILL 후 재기동(시나리오 8) |
 | `--only` | (전체) | `--only=4,5` 처럼 시나리오 번호 선택. 1(부트스트랩)은 항상 돕니다 |
 | `--strict` | false | KNOWN-FAIL 도 실패로 취급 |
@@ -57,7 +57,7 @@ Compose 플러그인(`docker compose`) 대신 단독 바이너리만 있는 머�
 | `control` | API + 리더 루프(스케줄러/파이널라이저/아웃박스/프로브 트리거·수집/lease 회수) |
 | `sender` ×2 | `transactional 8 / bulk 32 / probe 1` 레인 |
 | `bounce` | 바운스 메일박스 폴러(5초 간격, IDLE 끔) |
-| `chaos-smtp` | 결정적 실패 SMTP(시나리오 2). `--keep-messages=-1` |
+| `chaos-smtp` | 결정적 실패 SMTP(시나리오 2). `--keep-messages=-1 --keep-bodies` 로 받은 메시지를 `GET /messages` 에 노출 |
 | `greenmail` | 테스트 IMAP/SMTP. 계정은 **배달·로그인 시 자동 생성** |
 
 하니스 자신은 호스트에서 돌면서 **웹훅 수신기**(기본 `0.0.0.0:18585`)를 띄웁니다. control 컨테이너는
@@ -87,12 +87,12 @@ Compose 플러그인(`docker compose`) 대신 단독 바이너리만 있는 머�
 | # | 이름 | 하는 일 |
 |---|---|---|
 | 1 | bootstrap | `/healthz`·GreenMail·chaos-smtp 대기 → 테넌트 설정(트래킹 on/도메인 `t.e2e.test`, `unsubscribe_mode=sendplane`, suppression on, 짧은 백오프) → transport A(chaos)·B(greenmail), sending domain(VERP), sender A·B → 바운스/프로브 메일박스 → i18n(en/ko) MJML 템플릿 publish |
-| 2 | bulk campaign | 10,000 수신자(en/ko 혼합)를 NDJSON 2청크로 인제스트 → start → completed. `sent`/`failed` 가 `chaossmtp.Decide` 로 유도한 값과 **정확히** 일치, 진행 중 상태 0, chaos-smtp `Accepted == sent`, 실패 표본이 전부 `max_attempts` 소진 또는 permanent |
+| 2 | bulk campaign | 10,000 수신자(en/ko 혼합)를 NDJSON 2청크로 인제스트 → start → completed. `sent`/`failed` 가 `chaossmtp.Decide` 로 유도한 값과 **정확히** 일치, 진행 중 상태 0, chaos-smtp `Accepted == sent`, 실패 표본이 전부 `max_attempts` 소진 또는 permanent. 끝으로 chaos-smtp `GET /messages?rcpt=…&body=1` 로 **ko 수신자가 ko 제목**을 받았는지, 본문에 이름이 치환됐는지, 트래킹 URL이 테넌트 도메인인지 확인 |
 | 3 | transactional | `POST /messages` 2명 + 커스텀 헤더 → 둘 다 `sent`, 헤더가 실제 메일에 실림, 같은 `Idempotency-Key` 재전송이 **같은 delivery id** 를 돌려주고 메일은 다시 안 나감 |
-| 4 | tracking | 4명(en 2 / ko 2) 캠페인 → **ko 수신자가 ko 제목을 받았는지** 확인 → 렌더된 메일에서 픽셀/클릭/수신거부 URL 추출 → 픽셀 200 gif(`no-store`), 클릭 302(서명된 목적지), 수신거부 GET 302(호스트 목적지), 원클릭 POST 200, 위조 토큰 400 → `POST /campaigns/{id}/unsubscribes` 로 두 번째 수신자 수신거부 → delivery의 `first_opened_at`/`first_clicked_at`/`unsubscribed_at`, `GET /campaigns/{id}/links` 의 `unique_clicks`, 캠페인 통계 |
+| 4 | tracking | 4명(en 2 / ko 2) 캠페인 → 렌더된 메일에서 픽셀/클릭/수신거부 URL 추출 → 픽셀 200 gif(`no-store`), 클릭 302(서명된 목적지), 수신거부 GET 302(호스트 목적지), 원클릭 POST 200, 위조 토큰 400 → `POST /campaigns/{id}/unsubscribes` 로 두 번째 수신자 수신거부 → delivery의 `first_opened_at`/`first_clicked_at`/`unsubscribed_at`, `GET /campaigns/{id}/links` 의 `unique_clicks`, 캠페인 통계 |
 | 5 | bounce | sender B로 3통 발송 → GreenMail에서 실제 `Return-Path`(VERP)·`X-Sendplane-ID`·`Message-ID` 를 읽어 **DSN/ARF/위조 DSN을 합성** → GreenMail SMTP로 `bounce@sendplane.test` 에 투입 → `bounced` / `complained` / (위조는) `sent` 유지 + `verified=false` 이벤트, suppression 등록, 그 주소로의 재발송이 `suppressed` |
-| 6 | loopback probe | `POST /senders/{B}/probe` → 프로브 메일이 `probe@sendplane.test` 에 도착(+`X-Sendplane-Probe` 헤더, 제목의 run id) → 수집 루프가 판정 → `delivered=true`, `folder=inbox`, **`yellow`** (아래 참고), sender health 가 같은 값. **지금은 `BUG-2` 때문에 수집 단계가 KNOWN-FAIL 입니다** — 벌크 캠페인이 끝난 뒤(테넌트가 한가할 때) 일부러 트리거합니다 |
-| 7 | events | 웹훅 수신기에 `campaign.started`·`campaign.completed`·`delivery.bounced`·`delivery.complained`·`recipient.unsubscribed` 가 **HMAC 서명이 맞는 상태로** 도착, `GET /events/dead-letter` 와 `GET /events?status=failed` 가 비어 있음. `sender.health_changed` 는 시나리오 6의 프로브가 실제로 수집됐을 때만 요구합니다(`BUG-2`) |
+| 6 | loopback probe | `POST /senders/{B}/probe` → 프로브 메일이 `probe@sendplane.test` 에 도착(+`X-Sendplane-Probe` 헤더, 제목의 run id) → 수집 루프가 판정 → `delivered=true`, `folder=inbox`, **`yellow`** (아래 참고), sender health 가 같은 값. 벌크 캠페인이 끝난 뒤(**테넌트가 한가할 때**) 일부러 트리거합니다 — 그때도 판정이 끝나야 한다는 게 요점입니다 |
+| 7 | events | 웹훅 수신기에 `campaign.started`·`campaign.completed`·`delivery.bounced`·`delivery.complained`·`delivery.failed`·`recipient.unsubscribed`·`sender.health_changed` 가 **HMAC 서명이 맞는 상태로** 도착, `GET /events/dead-letter` 와 `GET /events?status=failed` 가 비어 있음. `delivery.failed` 는 벌크 캠페인의 기대 실패 수와 **정확히** 일치하고, `delivery.sent` 는 기본 구독에 없으므로 **한 건도 오면 안 됩니다** |
 | 8 | lease recovery | `--kill-sender` 일 때 시나리오 2 진행 중 sender 한 대를 SIGKILL 후 재기동. `sent`/`failed` 는 그대로 정확하고 중복은 chaos-smtp `Accepted` 에만 나타남 |
 
 ### 왜 프로브 판정이 green 이 아니라 yellow 인가
@@ -103,31 +103,29 @@ GreenMail 은 메일을 INBOX 에 넣어 주지만 **`Authentication-Results` �
 ADR-0012 의 핵심이고, 시나리오 6은 그 문자열까지 그대로 단언합니다. green 을 보려면 AR 을 붙이는 MTA
 (Postfix+OpenDKIM/OpenDMARC)를 스택에 넣어야 하고, 그건 이 테스트의 범위가 아닙니다.
 
-### 왜 i18n 제목 확인이 시나리오 2가 아니라 4에 있는가
+### 왜 트래킹 상호작용은 GreenMail 캠페인에서 하는가
 
-`docs/architecture.md` §15 는 "chaos-smtp 가 기록한 메시지를 본다"를 전제하지만,
-`cmd/chaos-smtp` 는 **카운터만** HTTP 로 노출합니다(`GET /stats`). `chaossmtp.Server.Messages()` 를 돌려주는
-엔드포인트가 없어서 `--keep-messages=-1` 로 기록해 둔 메시지를 밖에서 읽을 방법이 지금은 없습니다.
-그래서 "렌더된 메일"이 필요한 단언(로케일 제목, 트래킹 URL)은 **GreenMail 로 보내는 작은 캠페인**에서 합니다.
-`--keep-messages=-1` 은 compose 에 그대로 남겨 뒀습니다 — `cmd/chaos-smtp` 에 `/messages` 가 생기면
-그날 바로 쓸 수 있습니다(아래 GAP-1).
+i18n 제목과 트래킹 URL 확인은 시나리오 2(chaos-smtp, 10k)로 돌아갔습니다 — `cmd/chaos-smtp` 가
+`chaossmtp.Server.Messages()` 를 `GET /messages` 로 내보내면서 §15 가 전제하던 "chaos-smtp 가 기록한
+메시지를 본다"가 가능해졌기 때문입니다(옛 `GAP-1`).
+
+시나리오 4가 여전히 GreenMail 로 작은 캠페인을 보내는 이유는 다릅니다: 픽셀·클릭·원클릭 POST 는
+**그 delivery 행을 API 로 다시 읽어** `first_opened_at` 등을 확인해야 하고, 그러려면 수신자와 delivery 를
+하나씩 짚을 수 있는 작은 캠페인이 필요합니다.
 
 ## 알려진 실패 (KNOWN-FAIL)
 
 하니스가 `KNOWN-FAIL` 로 찍는 것은 **단언이 옳고 제품이 아직 그렇지 않은** 경우입니다. 단언은 그대로 두고
 런은 실패시키지 않습니다 — 버그가 고쳐지면 그 줄이 저절로 초록이 됩니다. `--strict` 로 실패 처리할 수 있습니다.
 
-| 태그 | 증상 | 원인 |
+**지금은 하나도 없습니다.** 예전에 여기 있던 것들:
+
+| 태그 | 증상 | 어떻게 고쳤나 |
 |---|---|---|
-| `BUG-1` | 캠페인이 `completed` 된 뒤에 들어온 오픈/클릭/수신거부가 `CampaignStats.unique_opens` 등에 **영원히 반영되지 않음** | `internal/control/campaign_loops.go:81` 의 파이널라이저가 `store.CampaignRunning` 캠페인만 순회하고, `:121-137` 에서 완료 시점 통계를 한 번 쓴 뒤 상태를 `completed` 로 바꿉니다. 이후 어떤 루프도 그 캠페인의 통계를 다시 계산하지 않고 `internal/api/campaigns.go:191` 은 캐시된 행을 그대로 돌려줍니다. 수신자가 메일을 여는 시점은 **거의 항상 캠페인 완료 후**이므로 §9.3 의 "캠페인 수신거부율 = unsubscribed 유니크 / sent" 는 실질적으로 항상 0입니다. delivery 행의 `first_opened_at`/`first_clicked_at`/`unsubscribed_at` 과 `GET /campaigns/{id}/links` 는 정상이라 기록 자체는 남습니다 |
-| `BUG-2` | 한가한 테넌트의 **루프백 프로브가 영원히 `pending`** 으로 남음. 판정도, 타임아웃(red)도, `sender.health_changed` 이벤트도 나오지 않음 | 모든 control 리더 루프는 `internal/control/loops.go:94` 의 `provider.ActiveTenants(ctx)` 가 돌려준 테넌트만 틱합니다. `store/postgres/postgres.go:121` 의 정의상 "비종단 delivery 또는 미완료 campaign 이 있는 테넌트"이고, `probe.go:196-205` 가 `control.WithLoop` 으로 등록하는 `probe-trigger`/`probe-collect` 에는 `internal/control/options.go` 의 `WithLoop` 이 `linger` 를 주지 않습니다(`loops.go:104`, 유예가 있는 루프는 outbox 하나뿐 — `control.go:138`). 프로브 delivery 는 1~2초 만에 `sent`(종단)가 되므로 그 직후 테넌트는 비활성이 되고, 1분 뒤 도는 `probe-collect` 는 그 테넌트를 아예 보지 않습니다. `internal/bounce` 는 같은 "일이 끝난 한참 뒤에 도착한다" 성질 때문에 일부러 `Provider.Tenants` 를 쓰는데(README) 프로브에는 그 처리가 없습니다. 결과적으로 §11 의 6시간 주기 헬스 체크는 **테넌트가 마침 다른 일을 하고 있을 때만** 완료됩니다 |
-
-## 테스트 인프라 갭 (제품 버그 아님)
-
-| 태그 | 내용 |
-|---|---|
-| `GAP-1` | `cmd/chaos-smtp` 가 `chaossmtp.Server.Messages()` 를 노출하지 않습니다. `--keep-messages` 로 기록은 되지만 읽을 방법이 없어, 렌더 결과 검증은 GreenMail 경로로 우회했습니다 |
-| `GAP-2` | `delivery.sent` / `delivery.failed` 는 `api/openapi.yaml` 의 `OutboxEvent` 설명에 있지만 아웃박스에 쓰는 코드가 없습니다. 시나리오 7은 실제로 발행되는 이벤트만 단언합니다 |
+| `BUG-1` | 캠페인이 `completed` 된 뒤에 들어온 오픈/클릭/수신거부가 `CampaignStats.unique_opens` 등에 영원히 반영되지 않음 | finalizer 가 최근 완료 캠페인의 **트래킹 유니크만** 감쇠 주기(완료 후 1시간은 매 틱, 그 뒤 10분마다, 14일까지)로 다시 계산합니다. `ByStatus` 는 그대로 두고, 훑기는 틱당 상한 + 이어지는 커서입니다(§7.3) |
+| `BUG-2` | 한가한 테넌트의 루프백 프로브가 영원히 `pending` | 리더 루프에 `AllTenants` 가 생겨 `probe-trigger`/`probe-collect`(그리고 `retention`·`finalizer`·새 `outbox-sweep`)가 `Provider.Tenants` 까지 돕니다. active 집합은 그대로 매 틱 포함하고, 전체 목록만 30초 캐시입니다 |
+| `GAP-1` | `cmd/chaos-smtp` 가 기록한 메시지를 읽을 방법이 없음 | `GET /messages?rcpt=&limit=&body=1` + `--keep-bodies` 플래그 |
+| `GAP-2` | `delivery.sent`/`delivery.failed` 를 아무도 쓰지 않음 | sender 의 배치 `Complete` 가 **구독한 경우에만** outbox 에 씁니다. 구독은 `TenantSettings.EventTypes`(API `event_types`, 비면 기본 집합 = `delivery.sent|opened|clicked` 를 뺀 전부)이고 디스패처도 같은 필터를 겁니다 |
 
 ## CI
 

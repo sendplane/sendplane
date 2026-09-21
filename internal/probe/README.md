@@ -82,12 +82,21 @@ runner := probe.New(probe.Options{
    ```go
    type probeLoop struct{ r *probe.Runner; st store.Store }
    func (l probeLoop) Tick(ctx context.Context, now time.Time) error { return l.r.Tick(ctx, l.st, now) }
+
+   control.WithLoop(control.Loop{
+       Name: "probe-collect", Interval: time.Minute, AllTenants: true,
+       NewTenant: func(st store.Store, _ string) control.TickLoop { return probeLoop{r: runner, st: st} },
+   })
    ```
 
    | 루프 | 주기(제안) | 하는 일 |
    |---|---|---|
    | `probeTrigger` | 5m | `Runner.Tick` — 만기 sender 트리거 |
    | `probeCollect` | 1m | `Runner.CollectWith` — 메일박스 회수·판정 |
+
+   둘 다 **`control.Loop.AllTenants`** 로 등록해야 합니다. 프로브 delivery는 1~2초면 `sent`(종단)가 되어
+   테넌트가 곧바로 `Provider.ActiveTenants`에서 빠지므로, active 테넌트만 도는 회수 루프는 **테넌트가 마침
+   다른 일을 하고 있을 때만** 판정을 끝냅니다. `internal/bounce`가 `Provider.Tenants`를 쓰는 것과 같은 이유입니다.
 
 2. **메일박스 어댑터**: 루트의 [`probe.go`](../../probe.go) 가 `internal/mailbox` 의 `Client` 를
    `probe.MailboxOpener` 로 감쌉니다(`probeOpener`/`probeFetcher`). `probe` 는 `internal/mailbox` 를

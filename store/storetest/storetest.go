@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -260,6 +261,13 @@ func testTenantSettings(t *testing.T, p store.Provider) {
 
 	eq(t, "one-click default", got.UnsubscribeOneClick, false)
 	eq(t, "bounce raw retention default", got.BounceRetainRaw, false)
+	// An empty subscription is the default set, not "no events": the API and
+	// both loops read it that way (store.TenantSettings.SubscribedTo), so a
+	// backend that turned nil into [] or [] into nil would be fine, but one
+	// that invented a value would not.
+	eq(t, "event types default", len(got.EventTypes), 0)
+	eq(t, "delivery.failed subscribed by default", got.SubscribedTo("delivery.failed"), true)
+	eq(t, "delivery.sent off by default", got.SubscribedTo("delivery.sent"), false)
 	// A default row carries a usable tracking key: opens, clicks and one-click
 	// unsubscribe all sign with one (store.DefaultTenantSettings).
 	eq(t, "default signing keys", len(got.Tracking.SigningKeys), 1)
@@ -274,6 +282,7 @@ func testTenantSettings(t *testing.T, p store.Provider) {
 	got.BounceRetainRaw = true
 	got.Tracking.Domain = "t.example.com"
 	got.Tracking.SigningKeys = []store.SigningKey{{KID: "k1", Secret: []byte("s"), CreatedAt: time.Now().UTC()}}
+	got.EventTypes = []string{"delivery.sent", "campaign.completed"}
 	must(t, "Update", r.Update(ctx, got))
 	eq(t, "Update version", got.Version, int64(2))
 
@@ -288,6 +297,9 @@ func testTenantSettings(t *testing.T, p store.Provider) {
 	eq(t, "bounce raw retention", after.BounceRetainRaw, true)
 	eq(t, "tracking domain", after.Tracking.Domain, "t.example.com")
 	eq(t, "signing keys", len(after.Tracking.SigningKeys), 1)
+	eq(t, "event types", strings.Join(after.EventTypes, ","), "delivery.sent,campaign.completed")
+	eq(t, "explicit subscription", after.SubscribedTo("delivery.sent"), true)
+	eq(t, "explicit subscription excludes the rest", after.SubscribedTo("delivery.failed"), false)
 }
 
 // Tenants reports a tenant that is configured but idle: that is exactly the

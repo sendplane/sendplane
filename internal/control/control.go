@@ -101,6 +101,12 @@ func (c *Control) loopSpecs() []loopSpec {
 		{
 			name:     "finalizer",
 			interval: c.cfg.intervals.Finalizer,
+			// Every tenant, not only the active ones: the completion half
+			// only ever finds work in an active tenant, but the tracking
+			// refresh exists precisely for campaigns that finished and whose
+			// recipients are opening the mail now, by which time the tenant
+			// has usually gone quiet (finalizer.refreshTracking).
+			allTenants: true,
 			newTenant: func(st store.Store, tenantID string) tickLoop {
 				return &finalizer{st: st, log: c.tenantLog("finalizer", tenantID), cfg: &c.cfg, skips: map[string]int{}}
 			},
@@ -123,23 +129,46 @@ func (c *Control) loopSpecs() []loopSpec {
 		{
 			name:     "retention",
 			interval: c.cfg.intervals.Retention,
+			// Every tenant: rows expire on the clock, not on activity. A
+			// tenant that stopped sending months ago is exactly the one whose
+			// deliveries, tracking events and expired suppressions nobody
+			// would otherwise ever delete.
+			allTenants: true,
 			newTenant: func(st store.Store, tenantID string) tickLoop {
 				return &retention{st: st, tenant: tenantID, log: c.tenantLog("retention", tenantID), cfg: &c.cfg}
 			},
 		},
 	}
 	if c.hooks.Events != nil {
+		dispatcher := func(name string) func(store.Store, string) tickLoop {
+			return func(st store.Store, tenantID string) tickLoop {
+				return &outboxDispatcher{st: st, tenant: tenantID, sink: c.hooks.Events,
+					log: c.tenantLog(name, tenantID), cfg: &c.cfg, clock: c.clock}
+			}
+		}
 		specs = append(specs, loopSpec{
 			name:     "outbox",
 			interval: c.cfg.intervals.Outbox,
 			// The only loop with a grace window: the transition that enqueues
 			// campaign.completed is the same one that takes the tenant out of
 			// ActiveTenants (see tenantSet).
-			linger: outboxLingerTicks,
-			newTenant: func(st store.Store, tenantID string) tickLoop {
-				return &outboxDispatcher{st: st, sink: c.hooks.Events,
-					log: c.tenantLog("outbox", tenantID), cfg: &c.cfg, clock: c.clock}
-			},
+			linger:    outboxLingerTicks,
+			newTenant: dispatcher("outbox"),
+		}, loopSpec{
+			// The same dispatcher over every tenant, ten times slower. Some
+			// events are produced long after the tenant went quiet - a DSN
+			// arrives days after the campaign (internal/bounce), a probe
+			// verdict a minute after the probe mail (architecture 11.2) - and
+			// the grace window above is measured in ticks, so those events
+			// would sit pending until the tenant sent something again.
+			//
+			// Two dispatchers never deliver the same event twice: ClaimPending
+			// leases what it hands out, so the rows one of them took are not
+			// claimable by the other.
+			name:       "outbox-sweep",
+			interval:   c.cfg.intervals.OutboxSweep,
+			allTenants: true,
+			newTenant:  dispatcher("outbox-sweep"),
 		})
 	} else {
 		c.log.Warn("control: no EventSink configured, the event outbox will not be dispatched")

@@ -426,7 +426,7 @@ func (s *Sender) handle(ctx context.Context, j job) {
 	if res.DeliveryID == "" {
 		return
 	}
-	j.t.batcher.add(res)
+	j.t.batcher.add(res, &j.d)
 }
 
 // refreshTenants reloads the active tenant list (ADR-0006).
@@ -463,7 +463,7 @@ func (s *Sender) tenant(ctx context.Context, id string) *tenantState {
 		return nil
 	}
 	t = newTenantState(id, st, s.cfg.TenantCacheTTL)
-	t.batcher = newBatcher(st, s.cfg.ResultBatchSize, s.cfg.ResultFlushInterval, s.cfg.Logger, s.cfg.Metrics)
+	t.batcher = newBatcher(t, s.cfg.ResultBatchSize, s.cfg.ResultFlushInterval, s.cfg.Logger, s.cfg.Metrics, s.cfg.Clock)
 
 	s.mu.Lock()
 	if existing, ok := s.tenants[id]; ok {

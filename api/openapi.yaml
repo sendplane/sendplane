@@ -2613,6 +2613,16 @@ components:
             header is always set, since sendplane owns the endpoint (ADR-0011).
         default_locale: { type: string, description: 'Fallback locale, e.g. `en`.' }
         tracking: { $ref: '#/components/schemas/TrackingConfig' }
+        event_types:
+          type: array
+          items: { type: string }
+          description: |
+            Outbox event types this tenant subscribes to; empty = default set.
+            The default set is every type sendplane emits except
+            `delivery.sent`, `delivery.opened` and `delivery.clicked`, which a
+            bulk campaign produces one event per recipient of (architecture
+            12). A non-empty list is exact: only the types it names are
+            enqueued, and only they are dispatched.
         version: { type: integer, format: int64, readOnly: true }
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
@@ -2631,6 +2641,10 @@ components:
           description: Only meaningful under `unsubscribe_mode=host` (see `TenantSettings`).
         default_locale: { type: string }
         tracking: { $ref: '#/components/schemas/TrackingConfig' }
+        event_types:
+          type: array
+          items: { type: string }
+          description: Outbox event subscription; empty = default set (see `TenantSettings`).
 
     TenantSettingsUpdate:
       description: Tenant settings replacement carrying the read version.

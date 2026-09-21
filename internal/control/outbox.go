@@ -20,11 +20,12 @@ const maxOutboxErrLen = 1024
 // throughput is never the bottleneck, and a single dispatcher keeps the
 // at-least-once duplicates down to lease expiry.
 type outboxDispatcher struct {
-	st    store.Store
-	sink  host.EventSink
-	log   *slog.Logger
-	cfg   *config
-	clock func() time.Time
+	st     store.Store
+	tenant string
+	sink   host.EventSink
+	log    *slog.Logger
+	cfg    *config
+	clock  func() time.Time
 }
 
 func (d *outboxDispatcher) Tick(ctx context.Context, now time.Time) error {
@@ -32,6 +33,10 @@ func (d *outboxDispatcher) Tick(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	if len(events) == 0 {
+		return nil
+	}
+	events = d.subscribed(ctx, events, now)
 	if len(events) == 0 {
 		return nil
 	}
@@ -64,6 +69,40 @@ func (d *outboxDispatcher) Tick(ctx context.Context, now time.Time) error {
 	close(queue)
 	wg.Wait()
 	return nil
+}
+
+// subscribed drops the claimed events the tenant is not subscribed to
+// (architecture 12). The producers already filter on the same settings, so
+// this is the second half of that check: a tenant that unsubscribes must stop
+// receiving the rows that were queued while it still was subscribed, and a row
+// nobody wants must not sit pending until it dead-letters.
+//
+// A dropped event is marked delivered. It was handled - by deciding not to
+// send it - and leaving it claimed would only make the next tick claim it
+// again. Retention deletes it with the rest.
+//
+// A settings read that fails dispatches everything: the events are already
+// owed to the host, and losing the subscription filter for one tick is a far
+// smaller problem than silently not delivering.
+func (d *outboxDispatcher) subscribed(ctx context.Context, events []store.OutboxEvent, now time.Time) []store.OutboxEvent {
+	settings, err := store.LoadTenantSettings(ctx, d.st, d.tenant, now)
+	if err != nil {
+		d.log.Error("control: cannot read the event subscription, dispatching everything", "err", err)
+		return events
+	}
+	out := events[:0]
+	for _, ev := range events {
+		if settings.SubscribedTo(ev.Type) {
+			out = append(out, ev)
+			continue
+		}
+		d.log.Debug("control: dropping an unsubscribed outbox event", "event", ev.ID, "type", ev.Type)
+		if err := d.st.Outbox().MarkDelivered(ctx, ev.ID, store.TruncateTime(d.clock())); err != nil {
+			d.log.Error("control: cannot retire an unsubscribed outbox event",
+				"event", ev.ID, "type", ev.Type, "err", err)
+		}
+	}
+	return out
 }
 
 // dispatch delivers one event and records the outcome. Every failure path ends

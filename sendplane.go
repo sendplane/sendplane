@@ -193,15 +193,24 @@ func (s *Sendplane) probeLoopOptions() []control.Option {
 		return nil
 	}
 	opener := probeOpener{secrets: s.opts.Secrets}
+	// AllTenants on both: a probe delivery goes terminal within seconds, so
+	// the tenant is out of Provider.ActiveTenants long before the collect loop
+	// next fires, and a health check that only completed for tenants that
+	// happen to be sending something else is not a health check at all
+	// (internal/probe/README.md, architecture 11.2).
 	return []control.Option{
-		control.WithLoop("probe-trigger", probeTriggerInterval,
-			func(st store.Store, _ string) control.TickLoop {
+		control.WithLoop(control.Loop{
+			Name: "probe-trigger", Interval: probeTriggerInterval, AllTenants: true,
+			NewTenant: func(st store.Store, _ string) control.TickLoop {
 				return probeTrigger{r: r, st: st}
-			}),
-		control.WithLoop("probe-collect", probeCollectInterval,
-			func(st store.Store, _ string) control.TickLoop {
+			},
+		}),
+		control.WithLoop(control.Loop{
+			Name: "probe-collect", Interval: probeCollectInterval, AllTenants: true,
+			NewTenant: func(st store.Store, _ string) control.TickLoop {
 				return probeCollect{r: r, st: st, opener: opener}
-			}),
+			},
+		}),
 	}
 }
 

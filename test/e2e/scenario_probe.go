@@ -17,12 +17,13 @@ import (
 // would mean a verdict was reached without evidence, which is what ADR-0012
 // exists to prevent.
 //
-// The scenario runs after the bulk campaign on purpose. A probe triggered
-// while other traffic is in flight can be collected by accident (see BUG-2 in
-// README.md): the collect loop only ticks for tenants in
-// Provider.ActiveTenants, so whether a probe is ever judged currently depends
-// on whether the tenant happens to have unrelated work queued at the moment
-// the loop fires. Triggering it when the tenant is idle is the honest test.
+// The scenario runs after the bulk campaign on purpose, with the tenant idle.
+// A probe delivery is terminal within a second or two, so by the time the
+// collect loop next fires the tenant has left Provider.ActiveTenants: a
+// collect loop that only ticked the active set would judge a probe exactly
+// when the tenant happened to have unrelated work queued (BUG-2 in README.md).
+// The two probe loops are registered with control.Loop.AllTenants for that
+// reason, and triggering the probe when the tenant is idle is what tests it.
 const probeNoARReason = "신뢰할 수 있는 Authentication-Results 헤더가 없습니다"
 
 func (r *runner) scenarioProbe(ctx context.Context) error {
@@ -76,9 +77,8 @@ func (r *runner) collectProbe(ctx context.Context) error {
 			break
 		}
 		if time.Now().After(deadline) {
-			r.knownFail("BUG-2",
-				"probe run %s is still pending after %s: the collect loop never ran for this tenant, "+
-					"so the loopback health check of architecture 11 never finishes for an idle tenant",
+			r.fail("probe run %s is still pending after %s: the collect loop never ran for this tenant, "+
+				"so the loopback health check of architecture 11 never finishes for an idle tenant",
 				short(r.probeRunID), r.opt.probeTimeout)
 			return nil
 		}

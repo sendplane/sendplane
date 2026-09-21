@@ -201,3 +201,122 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool) {
 	}
 	t.Fatalf("condition not met within %s", d)
 }
+
+// seedIdleTenant gives the provider a tenant whose work is all finished: it is
+// known (Provider.Tenants) but not active (Provider.ActiveTenants). That is the
+// tenant of BUG-2 in test/e2e/README.md — the probe mail went terminal seconds
+// after it was sent, and the loop that has to judge it runs a minute later.
+func seedIdleTenant(t *testing.T, p *memstore.Provider, tenantID string) {
+	t.Helper()
+	st, err := p.ForTenant(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("ForTenant: %v", err)
+	}
+	cam := seedCampaign(t, st, store.CampaignCompleted)
+	seedDeliveries(t, st, cam.ID, store.DeliverySent, 1)
+
+	ctx := context.Background()
+	active, err := p.ActiveTenants(ctx)
+	if err != nil {
+		t.Fatalf("ActiveTenants: %v", err)
+	}
+	for _, id := range active {
+		if id == tenantID {
+			t.Fatalf("%s is active; the test needs an idle tenant", tenantID)
+		}
+	}
+}
+
+// A loop registered with AllTenants ticks a tenant whose work is all finished;
+// one without it does not. Everything else about the two is identical.
+func TestAllTenantsLoopsTickIdleTenants(t *testing.T) {
+	p := memstore.New()
+	t.Cleanup(func() { _ = p.Close() })
+	seedIdleTenant(t, p, "idle-tenant")
+	seedActiveTenant(t, p, "busy-tenant")
+
+	cfg := defaultConfig()
+	cfg.owner = "replica-a"
+	cfg.leaderTTL = testTTL
+	cfg.leaderRetry = testRetry
+	l := newLeader(p, discardLogger(), time.Now, cfg)
+
+	var allTicks, activeTicks atomic.Int64
+	var allTenants, activeOnly sync.Map
+	l.register(loopSpec{
+		name:       "every-tenant",
+		interval:   5 * time.Millisecond,
+		allTenants: true,
+		newTenant: func(_ store.Store, tenantID string) tickLoop {
+			return &countingLoop{ticks: &allTicks, tenants: &allTenants, tenant: tenantID}
+		},
+	}, loopSpec{
+		name:     "active-only",
+		interval: 5 * time.Millisecond,
+		newTenant: func(_ store.Store, tenantID string) tickLoop {
+			return &countingLoop{ticks: &activeTicks, tenants: &activeOnly, tenant: tenantID}
+		},
+	})
+
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = l.Run(ctx) }()
+	waitFor(t, time.Second, func() bool {
+		_, ok := allTenants.Load("idle-tenant")
+		return ok && activeTicks.Load() > 2
+	})
+	stop()
+	<-done
+
+	if _, ok := allTenants.Load("busy-tenant"); !ok {
+		t.Error("the AllTenants loop skipped the active tenant")
+	}
+	if _, ok := activeOnly.Load("idle-tenant"); ok {
+		t.Error("the active-only loop ticked the idle tenant; the test proves nothing")
+	}
+	if _, ok := activeOnly.Load("busy-tenant"); !ok {
+		t.Error("the active-only loop skipped the active tenant")
+	}
+}
+
+// The known-tenant listing is refreshed on an interval, not on every tick: the
+// Provider contract warns that it may be expensive.
+func TestKnownTenantsIsCached(t *testing.T) {
+	p := memstore.New()
+	t.Cleanup(func() { _ = p.Close() })
+	seedIdleTenant(t, p, "idle-tenant")
+
+	counting := &countingProvider{Provider: p}
+	clk := newClock()
+	cfg := defaultConfig()
+	cfg.tenantsRefresh = time.Minute
+	l := newLeader(counting, discardLogger(), clk.Now, cfg)
+
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if _, err := l.knownTenants(ctx); err != nil {
+			t.Fatalf("knownTenants: %v", err)
+		}
+	}
+	if n := counting.calls.Load(); n != 1 {
+		t.Fatalf("Provider.Tenants called %d times, want 1 inside the refresh interval", n)
+	}
+	clk.Advance(2 * time.Minute)
+	if _, err := l.knownTenants(ctx); err != nil {
+		t.Fatalf("knownTenants: %v", err)
+	}
+	if n := counting.calls.Load(); n != 2 {
+		t.Fatalf("Provider.Tenants called %d times after the interval passed, want 2", n)
+	}
+}
+
+// countingProvider counts Tenants calls and delegates everything else.
+type countingProvider struct {
+	store.Provider
+	calls atomic.Int64
+}
+
+func (p *countingProvider) Tenants(ctx context.Context) ([]string, error) {
+	p.calls.Add(1)
+	return p.Provider.Tenants(ctx)
+}

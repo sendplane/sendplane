@@ -1877,6 +1877,14 @@ type TenantSettings struct {
 	// DefaultLocale Fallback locale, e.g. `en`.
 	DefaultLocale *string `json:"default_locale,omitempty"`
 
+	// EventTypes Outbox event types this tenant subscribes to; empty = default set.
+	// The default set is every type sendplane emits except
+	// `delivery.sent`, `delivery.opened` and `delivery.clicked`, which a
+	// bulk campaign produces one event per recipient of (architecture
+	// 12). A non-empty list is exact: only the types it names are
+	// enqueued, and only they are dispatched.
+	EventTypes *[]string `json:"event_types,omitempty"`
+
 	// RetentionDays How long deliveries, tracking events, bounces and probe runs are kept.
 	RetentionDays *int32 `json:"retention_days,omitempty"`
 
@@ -1916,7 +1924,10 @@ type TenantSettings struct {
 type TenantSettingsInput struct {
 	BounceRetainRaw *bool   `json:"bounce_retain_raw,omitempty"`
 	DefaultLocale   *string `json:"default_locale,omitempty"`
-	RetentionDays   *int32  `json:"retention_days,omitempty"`
+
+	// EventTypes Outbox event subscription; empty = default set (see `TenantSettings`).
+	EventTypes    *[]string `json:"event_types,omitempty"`
+	RetentionDays *int32    `json:"retention_days,omitempty"`
 
 	// Retry Backoff schedule for transient failures (architecture 4.2).
 	Retry              *RetryPolicy `json:"retry,omitempty"`
@@ -1939,7 +1950,10 @@ type TenantSettingsInput struct {
 type TenantSettingsUpdate struct {
 	BounceRetainRaw *bool   `json:"bounce_retain_raw,omitempty"`
 	DefaultLocale   *string `json:"default_locale,omitempty"`
-	RetentionDays   *int32  `json:"retention_days,omitempty"`
+
+	// EventTypes Outbox event subscription; empty = default set (see `TenantSettings`).
+	EventTypes    *[]string `json:"event_types,omitempty"`
+	RetentionDays *int32    `json:"retention_days,omitempty"`
 
 	// Retry Backoff schedule for transient failures (architecture 4.2).
 	Retry              *RetryPolicy `json:"retry,omitempty"`
