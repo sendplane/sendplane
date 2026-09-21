@@ -442,6 +442,10 @@
     "signingKeys": "Signing keys",
     "keyId": "Key ID",
     "defaultLocale": "Default locale",
-    "saved": "Settings saved."
+    "saved": "Settings saved.",
+    "events": "Events",
+    "eventsNote": "An empty selection subscribes to the default set: every event type except delivery.sent, delivery.opened and delivery.clicked.",
+    "eventsReset": "Reset to default",
+    "eventTypeSentHint": "Writes one event per delivery, so a bulk campaign can produce a very large number of these."
   }
 }

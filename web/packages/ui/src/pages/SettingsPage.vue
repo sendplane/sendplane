@@ -22,6 +22,32 @@ const toast = useToast()
 const saving = ref(false)
 const current = ref<TenantSettings | undefined>()
 
+// Every `OutboxEvent.type` the API can emit (api/openapi.yaml). Kept in sync
+// by hand since the schema only documents the enum in a description string.
+const EVENT_TYPES = [
+  'delivery.sent',
+  'delivery.deferred',
+  'delivery.failed',
+  'delivery.bounced',
+  'delivery.complained',
+  'delivery.suppressed',
+  'campaign.started',
+  'campaign.paused',
+  'campaign.completed',
+  'campaign.cancelled',
+  'transport.unhealthy',
+  'transport.recovered',
+  'sender.health_changed',
+  'recipient.unsubscribed',
+  'delivery.opened',
+  'delivery.clicked',
+  'i18n.missing_key',
+] as const
+
+// The set an empty `event_types` resolves to (architecture 12): everything
+// except the per-recipient events a bulk campaign produces one of each.
+const NON_DEFAULT_EVENT_TYPES = new Set(['delivery.sent', 'delivery.opened', 'delivery.clicked'])
+
 const draft = ref({
   backoff: '',
   max_attempts: 5,
@@ -35,6 +61,7 @@ const draft = ref({
   tracking_domain: '',
   tracking_opens: true,
   tracking_clicks: true,
+  event_types: [] as string[],
 })
 
 const settings = useAsync((signal) => client.get('/api/v1/settings', { signal }))
@@ -55,6 +82,7 @@ watch(settings.data, (value) => {
     tracking_domain: value.tracking?.domain ?? '',
     tracking_opens: value.tracking?.opens !== false,
     tracking_clicks: value.tracking?.clicks !== false,
+    event_types: [...(value.event_types ?? [])],
   }
 })
 
@@ -85,6 +113,28 @@ const oneClickRelevant = computed(() => draft.value.unsubscribe_mode === 'host')
 
 const signingKeys = computed(() => current.value?.tracking?.signing_keys ?? [])
 
+// An empty `event_types` means "the default set" (see `NON_DEFAULT_EVENT_TYPES`),
+// so an unedited draft shows that set as checked without writing it out.
+function isEventTypeChecked(type: string): boolean {
+  if (draft.value.event_types.length === 0) return !NON_DEFAULT_EVENT_TYPES.has(type)
+  return draft.value.event_types.includes(type)
+}
+
+function toggleEventType(type: string, checked: boolean) {
+  const base =
+    draft.value.event_types.length === 0
+      ? EVENT_TYPES.filter((t) => !NON_DEFAULT_EVENT_TYPES.has(t))
+      : draft.value.event_types
+  const next = new Set(base)
+  if (checked) next.add(type)
+  else next.delete(type)
+  draft.value.event_types = EVENT_TYPES.filter((t) => next.has(t))
+}
+
+function resetEventTypesToDefault() {
+  draft.value.event_types = []
+}
+
 async function save() {
   if (current.value?.version === undefined) return
   saving.value = true
@@ -108,6 +158,7 @@ async function save() {
           opens: draft.value.tracking_opens,
           clicks: draft.value.tracking_clicks,
         },
+        event_types: draft.value.event_types,
       },
     })
     await settings.reload()
@@ -221,7 +272,7 @@ async function save() {
       </div>
     </SpCard>
 
-    <SpCard :title="t('settings.tracking')">
+    <SpCard :title="t('settings.tracking')" class="sp-page__block">
       <div class="sp-form-grid">
         <SpField
           v-slot="{ id, describedBy }"
@@ -251,6 +302,25 @@ async function save() {
         </dl>
       </template>
     </SpCard>
+
+    <SpCard :title="t('settings.events')">
+      <template #actions>
+        <SpButton size="sm" @click="resetEventTypesToDefault">
+          {{ t('settings.eventsReset') }}
+        </SpButton>
+      </template>
+      <p class="sp-settings__note">{{ t('settings.eventsNote') }}</p>
+      <div class="sp-form-grid">
+        <SpCheckbox
+          v-for="type in EVENT_TYPES"
+          :key="type"
+          :model-value="isEventTypeChecked(type)"
+          :label="type"
+          :hint="type === 'delivery.sent' ? t('settings.eventTypeSentHint') : undefined"
+          @update:model-value="(checked) => toggleEventType(type, checked)"
+        />
+      </div>
+    </SpCard>
   </div>
 </template>
 
@@ -258,5 +328,11 @@ async function save() {
 .sp-settings__subhead {
   margin: var(--sp-space-4) 0 var(--sp-space-2);
   font-size: var(--sp-font-size);
+}
+
+.sp-settings__note {
+  margin: 0 0 var(--sp-space-3);
+  color: var(--sp-text-muted);
+  font-size: var(--sp-font-size-sm);
 }
 </style>

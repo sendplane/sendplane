@@ -25,6 +25,30 @@ function checkboxByLabel(wrapper: VueWrapper, labelText: string) {
   return container.find('input[type="checkbox"]')
 }
 
+// Mirrors SettingsPage's own list (api/openapi.yaml `OutboxEvent.type`).
+const ALL_EVENT_TYPES = [
+  'delivery.sent',
+  'delivery.deferred',
+  'delivery.failed',
+  'delivery.bounced',
+  'delivery.complained',
+  'delivery.suppressed',
+  'campaign.started',
+  'campaign.paused',
+  'campaign.completed',
+  'campaign.cancelled',
+  'transport.unhealthy',
+  'transport.recovered',
+  'sender.health_changed',
+  'recipient.unsubscribed',
+  'delivery.opened',
+  'delivery.clicked',
+  'i18n.missing_key',
+]
+const DEFAULT_EVENT_TYPES = ALL_EVENT_TYPES.filter(
+  (t) => !['delivery.sent', 'delivery.opened', 'delivery.clicked'].includes(t),
+)
+
 function build(overrides: Partial<TenantSettings> = {}) {
   const get = vi.fn(async () => ({ ...settings, ...overrides }))
   const put = vi.fn(async () => ({ ...settings, ...overrides, version: 4 }))
@@ -75,5 +99,90 @@ describe('SettingsPage', () => {
 
     const oneClick = checkboxByLabel(wrapper, 'RFC 8058 one-click')
     expect((oneClick.element as HTMLInputElement).disabled).toBe(true)
+  })
+
+  it('renders the event type checkboxes from an explicit server list', async () => {
+    const { wrapper } = build({ event_types: ['campaign.started', 'delivery.bounced'] })
+    await flush()
+
+    expect((checkboxByLabel(wrapper, 'campaign.started').element as HTMLInputElement).checked).toBe(
+      true,
+    )
+    expect((checkboxByLabel(wrapper, 'delivery.bounced').element as HTMLInputElement).checked).toBe(
+      true,
+    )
+    // Not in the explicit list, so unchecked even though it's part of the default set.
+    expect((checkboxByLabel(wrapper, 'campaign.paused').element as HTMLInputElement).checked).toBe(
+      false,
+    )
+    expect((checkboxByLabel(wrapper, 'delivery.sent').element as HTMLInputElement).checked).toBe(
+      false,
+    )
+  })
+
+  it('shows the default set checked when event_types is empty', async () => {
+    const { wrapper } = build({ event_types: [] })
+    await flush()
+
+    expect((checkboxByLabel(wrapper, 'delivery.sent').element as HTMLInputElement).checked).toBe(
+      false,
+    )
+    expect((checkboxByLabel(wrapper, 'delivery.opened').element as HTMLInputElement).checked).toBe(
+      false,
+    )
+    expect((checkboxByLabel(wrapper, 'delivery.clicked').element as HTMLInputElement).checked).toBe(
+      false,
+    )
+    expect((checkboxByLabel(wrapper, 'campaign.started').element as HTMLInputElement).checked).toBe(
+      true,
+    )
+  })
+
+  it('editing a checkbox from the default set and saving sends the explicit array', async () => {
+    const { wrapper, put } = build({ event_types: [] })
+    await flush()
+
+    await checkboxByLabel(wrapper, 'campaign.started').setValue(false)
+
+    const save = wrapper.findAll('button').find((b) => b.text() === 'Save')!
+    await save.trigger('click')
+    await flush()
+
+    expect(put).toHaveBeenCalledWith(
+      '/api/v1/settings',
+      expect.objectContaining({
+        body: expect.objectContaining({
+          event_types: DEFAULT_EVENT_TYPES.filter((t) => t !== 'campaign.started'),
+        }),
+      }),
+    )
+  })
+
+  it('reset to default clears the array', async () => {
+    const { wrapper, put } = build({ event_types: ['campaign.started'] })
+    await flush()
+
+    const reset = wrapper.findAll('button').find((b) => b.text() === 'Reset to default')!
+    await reset.trigger('click')
+    await flush()
+
+    // Cleared draft falls back to showing the default set.
+    expect((checkboxByLabel(wrapper, 'campaign.started').element as HTMLInputElement).checked).toBe(
+      true,
+    )
+    expect((checkboxByLabel(wrapper, 'campaign.paused').element as HTMLInputElement).checked).toBe(
+      true,
+    )
+
+    const save = wrapper.findAll('button').find((b) => b.text() === 'Save')!
+    await save.trigger('click')
+    await flush()
+
+    expect(put).toHaveBeenCalledWith(
+      '/api/v1/settings',
+      expect.objectContaining({
+        body: expect.objectContaining({ event_types: [] }),
+      }),
+    )
   })
 })
