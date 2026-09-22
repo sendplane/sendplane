@@ -19,9 +19,7 @@ const settings: TenantSettings = {
 }
 
 function checkboxByLabel(wrapper: VueWrapper, labelText: string) {
-  const container = wrapper
-    .findAll('.sp-check')
-    .find((c) => c.find('label').text() === labelText)!
+  const container = wrapper.findAll('.sp-check').find((c) => c.find('label').text() === labelText)!
   return container.find('input[type="checkbox"]')
 }
 
@@ -51,13 +49,15 @@ const DEFAULT_EVENT_TYPES = ALL_EVENT_TYPES.filter(
   (t) => !['delivery.sent', 'delivery.opened', 'delivery.clicked'].includes(t),
 )
 
+function fieldByLabel(wrapper: VueWrapper, label: string) {
+  return wrapper.findAll('.sp-field').find((field) => field.find('label').text().includes(label))!
+}
+
 function build(overrides: Partial<TenantSettings> = {}) {
   const get = vi.fn(async () => ({ ...settings, ...overrides }))
   const put = vi.fn(async () => ({ ...settings, ...overrides, version: 4 }))
   const client = fakeClient({ get, put })
-  const wrapper = mount(
-    withProvider(SettingsPage, { client, locale: 'en', navigate: vi.fn() }),
-  )
+  const wrapper = mount(withProvider(SettingsPage, { client, locale: 'en', navigate: vi.fn() }))
   return { wrapper, get, put }
 }
 
@@ -198,5 +198,57 @@ describe('SettingsPage', () => {
         body: expect.objectContaining({ event_types: [] }),
       }),
     )
+  })
+})
+
+describe('SettingsPage platform defaults (ADR-0017)', () => {
+  const fromPlatform: Partial<TenantSettings> = {
+    tracking: {
+      domain: 't.platform.example',
+      domain_source: 'platform',
+      opens: true,
+      clicks: true,
+    },
+    unsubscribe_url_template: 'https://platform.example/u',
+    unsubscribe_url_template_source: 'platform',
+  }
+
+  it('marks a platform-sourced value instead of prefilling it as the tenant\u2019s', async () => {
+    const { wrapper } = build(fromPlatform)
+    await flush()
+
+    const tracking = fieldByLabel(wrapper, 'Tracking domain')
+    expect(tracking.text()).toContain('Using the platform default')
+    expect(tracking.text()).toContain('t.platform.example')
+    // The field stays empty, and the default is only a placeholder: saving must
+    // not freeze the operator's value as a tenant copy.
+    expect((tracking.find('input').element as HTMLInputElement).value).toBe('')
+    expect(tracking.find('input').attributes('placeholder')).toBe('t.platform.example')
+    // Clearing the field is how you go back, so the hint says so.
+    expect(tracking.text()).toContain('clear the field')
+
+    const unsubscribe = fieldByLabel(wrapper, 'Host URL template')
+    expect(unsubscribe.text()).toContain('Using the platform default')
+    expect(unsubscribe.text()).toContain('https://platform.example/u')
+    expect((unsubscribe.find('input').element as HTMLInputElement).value).toBe('')
+  })
+
+  it('does not demand a tracking domain that the platform already supplies', async () => {
+    const { wrapper } = build({ ...fromPlatform, unsubscribe_mode: 'sendplane' })
+    await flush()
+
+    const tracking = fieldByLabel(wrapper, 'Tracking domain')
+    expect(tracking.find('[role="alert"]').exists()).toBe(false)
+  })
+
+  it('shows a tenant-set value as the tenant\u2019s, with no marker', async () => {
+    const { wrapper } = build({
+      tracking: { domain: 't.acme.test', domain_source: 'tenant', opens: true, clicks: true },
+    })
+    await flush()
+
+    const tracking = fieldByLabel(wrapper, 'Tracking domain')
+    expect((tracking.find('input').element as HTMLInputElement).value).toBe('t.acme.test')
+    expect(tracking.text()).not.toContain('Using the platform default')
   })
 })

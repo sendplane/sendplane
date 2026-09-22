@@ -12,10 +12,11 @@ import SpField from '../components/SpField.vue'
 import SpInput from '../components/SpInput.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpSelect from '../components/SpSelect.vue'
+import SpSharedBadge from '../components/SpSharedBadge.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useCursorList } from '../composables/useCursorList.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime } from '../lib/format.js'
 
@@ -24,7 +25,7 @@ type MailboxProtocol = components['schemas']['MailboxProtocol']
 type MailboxTestResult = components['schemas']['MailboxTestResult']
 
 const { client, t, locale } = useSendplane()
-const toast = useToast()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const list = useCursorList<BounceMailbox>((params, signal) =>
@@ -271,7 +272,11 @@ async function testStored(mailbox: BounceMailbox) {
         </p>
         <div class="sp-form-grid__actions">
           <SpButton @click="editing = null">{{ t('common.cancel') }}</SpButton>
-          <SpButton :loading="formTesting" :disabled="!canTestForm || formTesting" @click="testForm">
+          <SpButton
+            :loading="formTesting"
+            :disabled="!canTestForm || formTesting"
+            @click="testForm"
+          >
             {{ t('mailboxTest.run') }}
           </SpButton>
           <SpButton
@@ -305,6 +310,10 @@ async function testStored(mailbox: BounceMailbox) {
       @next="list.next()"
       @previous="list.previous()"
     >
+      <template #[`cell-name`]="{ row }">
+        {{ (row as BounceMailbox).name }}
+        <SpSharedBadge v-if="(row as BounceMailbox).shared" class="sp-row__badge" />
+      </template>
       <template #[`cell-endpoint`]="{ row }">
         {{ (row as BounceMailbox).host }}:{{ (row as BounceMailbox).port }}
       </template>
@@ -337,12 +346,18 @@ async function testStored(mailbox: BounceMailbox) {
           >
             {{ t('mailboxTest.retest') }}
           </SpButton>
-          <SpButton size="sm" variant="ghost" @click="startEdit(row as BounceMailbox)">
-            {{ t('common.edit') }}
-          </SpButton>
-          <SpButton size="sm" variant="ghost" @click="remove(row as BounceMailbox)">
-            {{ t('common.delete') }}
-          </SpButton>
+          <!--
+            A shared mailbox can still be tested: reachability is runtime state
+            on the `_system` shadow row, not configuration. Editing it is not.
+          -->
+          <template v-if="!(row as BounceMailbox).shared">
+            <SpButton size="sm" variant="ghost" @click="startEdit(row as BounceMailbox)">
+              {{ t('common.edit') }}
+            </SpButton>
+            <SpButton size="sm" variant="ghost" @click="remove(row as BounceMailbox)">
+              {{ t('common.delete') }}
+            </SpButton>
+          </template>
         </div>
       </template>
     </SpTable>
@@ -355,6 +370,10 @@ async function testStored(mailbox: BounceMailbox) {
   margin: 0;
   color: var(--sp-text-muted);
   font-size: var(--sp-font-size-sm);
+}
+
+.sp-row__badge {
+  margin-left: var(--sp-space-1);
 }
 
 .sp-mailbox-health-times {

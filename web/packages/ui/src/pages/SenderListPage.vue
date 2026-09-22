@@ -6,16 +6,17 @@ import SpButton from '../components/SpButton.vue'
 import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpLink from '../components/SpLink.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
+import SpSharedBadge from '../components/SpSharedBadge.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useCursorList } from '../composables/useCursorList.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime } from '../lib/format.js'
 
-const { client, t, locale, navigate } = useSendplane()
-const toast = useToast()
+const { client, t, locale, navigate, systemTenant } = useSendplane()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const list = useCursorList<Sender>((params, signal) =>
@@ -25,6 +26,7 @@ const list = useCursorList<Sender>((params, signal) =>
 const columns = computed<TableColumn[]>(() => [
   { key: 'name', label: t('common.name'), width: 'minmax(150px, 2fr)' },
   { key: 'from', label: t('sender.fromEmail'), width: 'minmax(180px, 2fr)', mono: true },
+  { key: 'uses', label: t('sender.uses'), width: '150px', secondary: true },
   { key: 'health', label: t('sender.health'), width: '120px' },
   { key: 'reason', label: t('sender.healthReason'), width: 'minmax(140px, 2fr)', secondary: true },
   { key: 'checked', label: t('sender.checkedAt'), width: '190px', secondary: true },
@@ -51,7 +53,7 @@ async function remove(sender: Sender) {
         <SpButton :loading="list.loading.value" @click="list.reload()">
           {{ t('common.refresh') }}
         </SpButton>
-        <SpButton variant="primary" @click="navigate({ name: 'sender.new' })">
+        <SpButton v-if="!systemTenant" variant="primary" @click="navigate({ name: 'sender.new' })">
           {{ t('sender.new') }}
         </SpButton>
       </template>
@@ -79,8 +81,12 @@ async function remove(sender: Sender) {
         <SpLink :to="{ name: 'sender', params: { senderId: (row as Sender).id! } }">
           {{ (row as Sender).name }}
         </SpLink>
+        <SpSharedBadge v-if="(row as Sender).shared" class="sp-sender__badge" />
       </template>
       <template #[`cell-from`]="{ row }">{{ (row as Sender).from_email }}</template>
+      <template #[`cell-uses`]="{ row }">
+        {{ ((row as Sender).uses ?? []).join(', ') || '—' }}
+      </template>
       <template #[`cell-health`]="{ row }">
         <SpStatusBadge
           kind="health"
@@ -93,10 +99,23 @@ async function remove(sender: Sender) {
         {{ formatDateTime((row as Sender).health_checked_at, locale) }}
       </template>
       <template #[`cell-actions`]="{ row }">
-        <SpButton size="sm" variant="ghost" @click="remove(row as Sender)">
+        <!-- A shared sender is configuration: a delete here would only 403. -->
+        <SpButton
+          v-if="!(row as Sender).shared"
+          size="sm"
+          variant="ghost"
+          @click="remove(row as Sender)"
+        >
           {{ t('common.delete') }}
         </SpButton>
+        <span v-else>—</span>
       </template>
     </SpTable>
   </div>
 </template>
+
+<style scoped>
+.sp-sender__badge {
+  margin-left: var(--sp-space-1);
+}
+</style>

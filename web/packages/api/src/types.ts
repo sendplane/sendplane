@@ -68,6 +68,19 @@ export type MessageRequest = S['MessageRequest']
 export type MessageResult = S['MessageResult']
 export type Vars = S['Vars']
 export type ServiceHealth = S['ServiceHealth']
+export type Whoami = S['Whoami']
+export type TenantVars = S['TenantVars']
+export type SettingSource = S['SettingSource']
+export type MessageRecipient = S['MessageRecipient']
+export type MessageResultItem = S['MessageResultItem']
+/**
+ * An entity ID: either a UUIDv7 sendplane minted, or `sys:<name>` for a
+ * platform resource resolved from the operator's configuration (ADR-0017).
+ * It is an opaque string; nothing client-side may validate it as a UUID.
+ */
+export type ResourceId = S['ResourceId']
+/** What a shared sender may be used for (`Sender.uses`). */
+export type SenderUse = NonNullable<Sender['uses']>[number]
 
 // List envelopes, for callers that hold a page rather than its items.
 export type TransportList = S['TransportList']
@@ -143,3 +156,22 @@ export const TRANSPORT_STATUSES = [
   'cooldown',
   'unhealthy',
 ] as const satisfies readonly TransportStatus[]
+
+export const SENDER_USES = [
+  'campaign',
+  'transactional',
+  'probe',
+] as const satisfies readonly SenderUse[]
+
+/**
+ * The operator's own scope. It sees platform transports, domains, mailboxes and
+ * their state, and it cannot create campaigns or send messages (ADR-0017).
+ */
+export const SYSTEM_TENANT_ID = '_system'
+
+/**
+ * Header a privileged caller switches tenant with. sendplane itself never
+ * reads it: honouring it is the host `TenantResolver`'s decision, which is what
+ * `Whoami.can_switch_tenant` reports.
+ */
+export const TENANT_HEADER = 'X-Sendplane-Tenant'

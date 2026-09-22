@@ -8,17 +8,18 @@ import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpField from '../components/SpField.vue'
 import SpInput from '../components/SpInput.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
+import SpSharedBadge from '../components/SpSharedBadge.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
 import SpTextarea from '../components/SpTextarea.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useCursorList } from '../composables/useCursorList.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, splitLines } from '../lib/format.js'
 
 const { client, t, locale } = useSendplane()
-const toast = useToast()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const list = useCursorList<SendingDomain>((params, signal) =>
@@ -209,6 +210,10 @@ async function remove(domain: SendingDomain) {
       @next="list.next()"
       @previous="list.previous()"
     >
+      <template #[`cell-domain`]="{ row }">
+        {{ (row as SendingDomain).domain }}
+        <SpSharedBadge v-if="(row as SendingDomain).shared" class="sp-row__badge" />
+      </template>
       <template #[`cell-selector`]="{ row }">{{
         (row as SendingDomain).dkim_selector || '—'
       }}</template>
@@ -229,7 +234,8 @@ async function remove(domain: SendingDomain) {
         {{ formatDateTime((row as SendingDomain).health_checked_at, locale) }}
       </template>
       <template #[`cell-actions`]="{ row }">
-        <div class="sp-actions-row">
+        <!-- Shared domains come from the operator's config; both writes 403. -->
+        <div v-if="!(row as SendingDomain).shared" class="sp-actions-row">
           <SpButton size="sm" variant="ghost" @click="startEdit(row as SendingDomain)">
             {{ t('common.edit') }}
           </SpButton>
@@ -237,7 +243,14 @@ async function remove(domain: SendingDomain) {
             {{ t('common.delete') }}
           </SpButton>
         </div>
+        <span v-else>—</span>
       </template>
     </SpTable>
   </div>
 </template>
+
+<style scoped>
+.sp-row__badge {
+  margin-left: var(--sp-space-1);
+}
+</style>

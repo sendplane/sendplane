@@ -11,13 +11,13 @@ import SpInput from '../components/SpInput.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpSelect from '../components/SpSelect.vue'
 import SpTextarea from '../components/SpTextarea.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, splitLines } from '../lib/format.js'
 
 const { client, t, locale } = useSendplane()
-const toast = useToast()
+const toast = useApiToast()
 
 const saving = ref(false)
 const current = ref<TenantSettings | undefined>()
@@ -77,16 +77,43 @@ watch(settings.data, (value) => {
     retention_days: value.retention_days ?? 90,
     suppression_enabled: value.suppression_enabled !== false,
     unsubscribe_mode: value.unsubscribe_mode ?? 'sendplane',
-    unsubscribe_url_template: value.unsubscribe_url_template ?? '',
+    // A `platform` source means the value returned is the operator's default,
+    // not this tenant's. Prefilling it would make the next save freeze a copy
+    // of it here (the overlay strips it again, but the field would stop saying
+    // "default"), so the draft stays empty and shows the default as a
+    // placeholder instead (architecture 5.4).
+    unsubscribe_url_template:
+      value.unsubscribe_url_template_source === 'platform'
+        ? ''
+        : (value.unsubscribe_url_template ?? ''),
     unsubscribe_one_click: value.unsubscribe_one_click === true,
     bounce_retain_raw: value.bounce_retain_raw === true,
     default_locale: value.default_locale ?? 'en',
-    tracking_domain: value.tracking?.domain ?? '',
+    tracking_domain:
+      value.tracking?.domain_source === 'platform' ? '' : (value.tracking?.domain ?? ''),
     tracking_opens: value.tracking?.opens !== false,
     tracking_clicks: value.tracking?.clicks !== false,
     event_types: [...(value.event_types ?? [])],
   }
 })
+
+// --- platform defaults (ADR-0017) -----------------------------------------
+
+/** The operator's default, shown as a placeholder while the field is empty. */
+const platformTrackingDomain = computed(() =>
+  current.value?.tracking?.domain_source === 'platform' ? current.value.tracking.domain : undefined,
+)
+const platformUnsubscribeUrl = computed(() =>
+  current.value?.unsubscribe_url_template_source === 'platform'
+    ? current.value.unsubscribe_url_template
+    : undefined,
+)
+const trackingDomainFromPlatform = computed(
+  () => Boolean(platformTrackingDomain.value) && !draft.value.tracking_domain,
+)
+const unsubscribeUrlFromPlatform = computed(
+  () => Boolean(platformUnsubscribeUrl.value) && !draft.value.unsubscribe_url_template,
+)
 
 const modeOptions = computed(() =>
   (['sendplane', 'host', 'none'] as const).map((mode) => ({
@@ -105,7 +132,8 @@ const trackingDomainRequired = computed(
 )
 
 const trackingDomainMissing = computed(
-  () => trackingDomainRequired.value && !draft.value.tracking_domain,
+  () =>
+    trackingDomainRequired.value && !draft.value.tracking_domain && !platformTrackingDomain.value,
 )
 
 // `unsubscribe_one_click` only matters under `host` mode (spec): under
@@ -256,14 +284,25 @@ async function save() {
         <SpField
           v-slot="{ id, describedBy }"
           :label="t('settings.unsubscribeUrlTemplate')"
-          :hint="t('settings.unsubscribeUrlHint')"
+          :hint="
+            unsubscribeUrlFromPlatform
+              ? t('settings.platformDefaultHint')
+              : t('settings.unsubscribeUrlHint')
+          "
         >
           <SpInput
             :id="id"
             v-model="draft.unsubscribe_url_template"
             :described-by="describedBy"
-            placeholder="https://app.example.com/u?e={{ recipient.email | url_encode }}"
+            :placeholder="
+              platformUnsubscribeUrl ??
+              'https://app.example.com/u?e={{ recipient.email | url_encode }}'
+            "
           />
+          <p v-if="unsubscribeUrlFromPlatform" class="sp-note sp-settings__platform">
+            {{ t('settings.platformDefault') }}:
+            <span class="sp-mono">{{ platformUnsubscribeUrl }}</span>
+          </p>
         </SpField>
         <SpCheckbox
           v-model="draft.unsubscribe_one_click"
@@ -279,16 +318,24 @@ async function save() {
         <SpField
           v-slot="{ id, describedBy }"
           :label="t('settings.trackingDomain')"
-          :hint="t('settings.trackingDomainHint')"
+          :hint="
+            trackingDomainFromPlatform
+              ? t('settings.platformDefaultHint')
+              : t('settings.trackingDomainHint')
+          "
           :error="trackingDomainMissing ? t('settings.trackingDomainHint') : undefined"
-          :required="trackingDomainRequired"
+          :required="trackingDomainRequired && !platformTrackingDomain"
         >
           <SpInput
             :id="id"
             v-model="draft.tracking_domain"
-            placeholder="t.example.com"
+            :placeholder="platformTrackingDomain ?? 't.example.com'"
             :described-by="describedBy"
           />
+          <p v-if="trackingDomainFromPlatform" class="sp-note sp-settings__platform">
+            {{ t('settings.platformDefault') }}:
+            <span class="sp-mono">{{ platformTrackingDomain }}</span>
+          </p>
         </SpField>
         <SpCheckbox v-model="draft.tracking_opens" :label="t('settings.trackOpens')" />
         <SpCheckbox v-model="draft.tracking_clicks" :label="t('settings.trackClicks')" />
@@ -330,6 +377,10 @@ async function save() {
 .sp-settings__subhead {
   margin: var(--sp-space-4) 0 var(--sp-space-2);
   font-size: var(--sp-font-size);
+}
+
+.sp-settings__platform {
+  margin: var(--sp-space-1) 0 0;
 }
 
 .sp-settings__note {

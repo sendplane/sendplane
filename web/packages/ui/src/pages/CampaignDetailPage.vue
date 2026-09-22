@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { DELIVERY_STATUSES, type LinkClick } from '@sendplane/api'
-import { computed, ref } from 'vue'
+import { DELIVERY_STATUSES, type LinkClick, type TenantVars } from '@sendplane/api'
+import { computed, ref, watch } from 'vue'
 
 import SpButton from '../components/SpButton.vue'
 import SpCard from '../components/SpCard.vue'
@@ -12,19 +12,24 @@ import SpRecipientUpload from '../components/SpRecipientUpload.vue'
 import SpStat from '../components/SpStat.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
+import TenantVarsEditor from '../components/TenantVarsEditor.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useConfirm } from '../composables/useConfirm.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, formatNumber, formatRate } from '../lib/format.js'
+import { isTenantVarsMissing, missingTenantVarKeys } from '../lib/platform.js'
 
 const props = defineProps<{ campaignId: string }>()
 
-const { client, t, locale } = useSendplane()
-const toast = useToast()
+const { client, t, locale, systemTenant, tenantId } = useSendplane()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const acting = ref('')
+const tenantVars = ref<TenantVars>({})
+const missingTenantVars = ref<string[]>([])
+const savingVars = ref(false)
 
 const campaign = useAsync(
   (signal) =>
@@ -42,6 +47,14 @@ const links = useAsync(
       signal,
     }),
   { watch: () => props.campaignId },
+)
+
+watch(
+  campaign.data,
+  (value) => {
+    tenantVars.value = { ...(value?.tenant_vars ?? {}) }
+  },
+  { immediate: true },
 )
 
 const stats = computed(() => campaign.data.value?.stats)
@@ -66,6 +79,11 @@ const canCancel = computed(
   () => status.value === 'scheduled' || status.value === 'running' || status.value === 'paused',
 )
 const canEditRecipients = computed(() => status.value === 'draft')
+// Once a campaign has started, its tenant attributes are what it was sent
+// with; changing them then would rewrite history rather than the next send.
+const canEditTenantVars = computed(
+  () => !systemTenant.value && (status.value === 'draft' || status.value === 'scheduled'),
+)
 
 const linkColumns = computed<TableColumn[]>(() => [
   { key: 'link_no', label: t('campaign.linkNo'), width: '60px', align: 'end' },
@@ -108,6 +126,46 @@ async function act(action: LifecycleAction, message: string, successKey: string,
     toast.fail(error)
   } finally {
     acting.value = ''
+  }
+}
+
+/**
+ * `tenant_vars` live on the campaign row and are read by every template and by
+ * a shared sender's From templates (ADR-0017), so they are edited through the
+ * campaign's own update, version and all.
+ */
+async function saveTenantVars() {
+  const current = campaign.data.value
+  if (!current || current.version === undefined) return
+  savingVars.value = true
+  missingTenantVars.value = []
+  try {
+    await client.put('/api/v1/campaigns/{campaignId}', {
+      params: { path: { campaignId: props.campaignId } },
+      body: {
+        name: current.name,
+        sender_id: current.sender_id,
+        ...(current.template_id ? { template_id: current.template_id } : {}),
+        ...(current.version_id ? { version_id: current.version_id } : {}),
+        ...(current.default_locale ? { default_locale: current.default_locale } : {}),
+        ...(current.vars ? { vars: current.vars } : {}),
+        ...(current.schedule_at ? { schedule_at: current.schedule_at } : {}),
+        tenant_vars: tenantVars.value,
+        version: current.version,
+      },
+    })
+    toast.success(t('common.saved'))
+    await campaign.reload()
+  } catch (error) {
+    if (isTenantVarsMissing(error)) {
+      const keys = missingTenantVarKeys(error)
+      missingTenantVars.value = keys
+      if (keys.length === 0) toast.fail(error)
+    } else {
+      toast.fail(error)
+    }
+  } finally {
+    savingVars.value = false
   }
 }
 
@@ -155,7 +213,11 @@ async function retryFailed() {
       class="sp-page__block"
     />
 
-    <div class="sp-actions-row sp-page__block">
+    <!--
+      The system tenant is a read-only operator view and cannot start or send
+      anything, so the lifecycle row is not offered there (ADR-0017).
+    -->
+    <div v-if="!systemTenant" class="sp-actions-row sp-page__block">
       <SpButton
         v-if="canStart"
         variant="primary"
@@ -270,6 +332,12 @@ async function retryFailed() {
           collapsed
           :label="t('campaign.vars')"
         />
+        <SpJsonView
+          v-if="campaign.data.value?.tenant_vars"
+          :value="campaign.data.value.tenant_vars"
+          collapsed
+          :label="t('tenantVars.title')"
+        />
       </SpCard>
 
       <SpRecipientUpload
@@ -277,6 +345,20 @@ async function retryFailed() {
         :disabled="!canEditRecipients"
         @ingested="campaign.reload()"
       />
+    </div>
+
+    <TenantVarsEditor
+      v-if="canEditTenantVars"
+      v-model="tenantVars"
+      class="sp-page__block"
+      :tenant-id="tenantId"
+      :missing-keys="missingTenantVars"
+      :remember="false"
+    />
+    <div v-if="canEditTenantVars" class="sp-actions-row sp-page__block">
+      <SpButton variant="primary" :loading="savingVars" @click="saveTenantVars">
+        {{ t('common.save') }}
+      </SpButton>
     </div>
 
     <SpCard :title="t('campaign.links')" :padded="false">

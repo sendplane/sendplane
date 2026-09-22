@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { createClient, isSendplaneError } from '@sendplane/api'
+import { createClient, isSendplaneError, type Whoami } from '@sendplane/api'
 import { navRoutes, SendplaneProvider, type NavigateTarget } from '@sendplane/ui'
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import ApiKeyGate from './ApiKeyGate.vue'
@@ -11,8 +11,13 @@ import {
   baseUrl,
   clearApiKey,
   locale,
+  ownTenantId,
+  rememberOwnTenant,
   setLocale,
+  setTenant,
   setTheme,
+  SYSTEM_TENANT_ID,
+  tenantOverride,
   theme,
   type ThemeChoice,
 } from './auth.js'
@@ -34,6 +39,60 @@ const client = createClient({
   },
 })
 
+/**
+ * `GET /whoami` is the first call after the gate: it needs authentication and
+ * no permission, which is exactly what a console needs to render its own chrome
+ * before it knows what the caller may do. It is reloaded after a tenant switch,
+ * because the answer is per-request — the resolver decides, not the console.
+ */
+const whoami = ref<Whoami | undefined>()
+
+async function loadWhoami() {
+  if (!apiKey.value) {
+    whoami.value = undefined
+    return
+  }
+  try {
+    const me = await client.get('/api/v1/whoami')
+    whoami.value = me
+    rememberOwnTenant(me.tenant_id)
+  } catch (error) {
+    // A console that cannot identify itself still renders: every page falls
+    // back to the tenant view, which is the safe one.
+    whoami.value = undefined
+    if (!isSendplaneError(error)) console.error(error)
+  }
+}
+
+watch(apiKey, () => void loadWhoami(), { immediate: true })
+
+const systemView = computed(() => whoami.value?.system_tenant === true)
+const canSwitchTenant = computed(() => whoami.value?.can_switch_tenant === true)
+
+/**
+ * The switcher's value is the header the console sends, not the tenant it is
+ * currently in: an empty header means "my own tenant, whichever the resolver
+ * says that is".
+ */
+const tenantChoice = computed(() =>
+  tenantOverride.value === SYSTEM_TENANT_ID ? SYSTEM_TENANT_ID : '',
+)
+
+const ownTenantLabel = computed(() => ownTenantId.value || whoami.value?.tenant_id || '')
+
+async function switchTenant(value: string) {
+  if (value === tenantChoice.value) return
+  setTenant(value === SYSTEM_TENANT_ID ? SYSTEM_TENANT_ID : '')
+  await loadWhoami()
+}
+
+/**
+ * Remounting the routed page on a tenant switch: every list it holds was
+ * fetched for the previous tenant, and re-keying is cheaper to reason about
+ * than a reload fan-out across pages.
+ */
+const viewKey = computed(() => `tenant:${tenantOverride.value}`)
+
 function navigate(to: NavigateTarget) {
   void router
     .push({ name: to.name, params: to.params, query: to.query })
@@ -46,8 +105,12 @@ function href(to: NavigateTarget): string {
   return router.resolve({ name: to.name, params: to.params, query: to.query }).href
 }
 
+// The system tenant cannot send, so the transactional send screen is not
+// offered there (ADR-0017); the operator pages stay.
 const navItems = computed(() =>
-  navRoutes.map((route) => ({ name: route.name, key: route.navKey! })),
+  navRoutes
+    .filter((route) => !(systemView.value && route.name === 'messages.send'))
+    .map((route) => ({ name: route.name, key: route.navKey! })),
 )
 
 const themeOptions: ThemeChoice[] = ['system', 'light', 'dark']
@@ -62,6 +125,7 @@ const themeOptions: ThemeChoice[] = ['system', 'light', 'dark']
     :navigate="navigate"
     :href="href"
     :locale="locale"
+    :whoami="whoami"
     class="console"
   >
     <template #default="{ context }">
@@ -82,6 +146,22 @@ const themeOptions: ThemeChoice[] = ['system', 'light', 'dark']
         </nav>
 
         <div class="console__tools">
+          <label v-if="canSwitchTenant" class="console__tool">
+            <span class="sp-visually-hidden">{{ context.t('tenant.switcher') }}</span>
+            <select
+              class="console__select"
+              :value="tenantChoice"
+              @change="switchTenant(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">
+                {{ context.t('tenant.own', { tenant: ownTenantLabel }) }}
+              </option>
+              <option :value="SYSTEM_TENANT_ID">
+                {{ context.t('tenant.system', { tenant: SYSTEM_TENANT_ID }) }}
+              </option>
+            </select>
+          </label>
+
           <label class="console__tool">
             <span class="sp-visually-hidden">{{ context.t('common.locale') }}</span>
             <select
@@ -111,8 +191,13 @@ const themeOptions: ThemeChoice[] = ['system', 'light', 'dark']
         </div>
       </header>
 
+      <p v-if="systemView" class="console__banner" role="status">
+        <strong>{{ context.t('tenant.systemBanner') }}</strong>
+        <span>{{ context.t('tenant.systemBannerHint') }}</span>
+      </p>
+
       <main id="main" class="console__main">
-        <RouterView />
+        <RouterView :key="viewKey" />
       </main>
     </template>
   </SendplaneProvider>
@@ -208,5 +293,18 @@ const themeOptions: ThemeChoice[] = ['system', 'light', 'dark']
 
 .console__main {
   flex: 1;
+}
+
+.console__banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-space-2);
+  align-items: baseline;
+  margin: 0;
+  padding: var(--sp-space-2) var(--sp-space-4);
+  color: var(--sp-warn);
+  font-size: var(--sp-font-size-sm);
+  background: var(--sp-warn-soft);
+  border-bottom: 1px solid var(--sp-border);
 }
 </style>

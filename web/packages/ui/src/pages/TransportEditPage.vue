@@ -9,17 +9,18 @@ import SpField from '../components/SpField.vue'
 import SpInput from '../components/SpInput.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpSelect from '../components/SpSelect.vue'
+import SpSharedBadge from '../components/SpSharedBadge.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
 import SpTextarea from '../components/SpTextarea.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, formatKeyValueLines, parseKeyValueLines } from '../lib/format.js'
 
 const props = defineProps<{ transportId?: string }>()
 
 const { client, t, locale, navigate } = useSendplane()
-const toast = useToast()
+const toast = useApiToast()
 
 const draft = ref({
   name: '',
@@ -62,6 +63,13 @@ watch(loaded.data, (transport) => {
   }
   domainRates.value = formatKeyValueLines(transport.domain_rate_per_second)
 })
+
+/**
+ * A platform transport is resolved from the operator's config file and has no
+ * stored row to write to (`403 platform_read_only`), so this screen becomes a
+ * read-only view of its settings and circuit state.
+ */
+const shared = computed(() => current.value?.shared === true)
 
 const tlsOptions = computed(() =>
   (['none', 'starttls', 'tls'] as const).map((mode) => ({ value: mode, label: mode })),
@@ -113,6 +121,7 @@ async function save() {
         </a>
       </template>
       <template #badge>
+        <SpSharedBadge v-if="shared" />
         <SpStatusBadge
           v-if="current?.status"
           kind="transport"
@@ -122,6 +131,7 @@ async function save() {
       </template>
       <template #actions>
         <SpButton
+          v-if="!shared"
           variant="primary"
           :loading="saving"
           :disabled="!draft.name || !draft.host"
@@ -138,7 +148,25 @@ async function save() {
       class="sp-page__block"
     />
 
-    <SpCard class="sp-page__block">
+    <SpCard v-if="shared" class="sp-page__block">
+      <p class="sp-note">{{ t('shared.readOnly') }}</p>
+      <dl class="sp-detail-list">
+        <dt>{{ t('common.name') }}</dt>
+        <dd>{{ current?.name }}</dd>
+        <dt>{{ t('transport.host') }}</dt>
+        <dd class="sp-mono">{{ current?.host }}:{{ current?.port }}</dd>
+        <dt>{{ t('transport.tls') }}</dt>
+        <dd>{{ current?.tls ?? '—' }}</dd>
+        <dt>{{ t('transport.username') }}</dt>
+        <dd class="sp-mono">{{ current?.username || '—' }}</dd>
+        <dt>{{ t('transport.maxConns') }}</dt>
+        <dd>{{ current?.max_conns ?? '—' }}</dd>
+        <dt>{{ t('transport.ratePerSecond') }}</dt>
+        <dd>{{ current?.rate_per_second ?? '—' }}</dd>
+      </dl>
+    </SpCard>
+
+    <SpCard v-else class="sp-page__block">
       <form class="sp-form-grid" @submit.prevent="save">
         <SpField v-slot="{ id }" :label="t('common.name')" required>
           <SpInput :id="id" v-model="draft.name" />
@@ -188,7 +216,7 @@ async function save() {
       </form>
     </SpCard>
 
-    <SpCard :title="t('transport.domainRates')" class="sp-page__block">
+    <SpCard v-if="!shared" :title="t('transport.domainRates')" class="sp-page__block">
       <SpField
         v-slot="{ id, describedBy }"
         :label="t('transport.domainRates')"

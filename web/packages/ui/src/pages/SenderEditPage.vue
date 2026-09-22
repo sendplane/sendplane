@@ -10,19 +10,21 @@ import SpInput from '../components/SpInput.vue'
 import SpJsonView from '../components/SpJsonView.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpSelect from '../components/SpSelect.vue'
+import SpSharedBadge from '../components/SpSharedBadge.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useCursorList } from '../composables/useCursorList.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, shortId } from '../lib/format.js'
+import { isFromDomainNotOwned, isTransportNotAssignable } from '../lib/platform.js'
 
 const props = defineProps<{ senderId?: string }>()
 
-const { client, t, locale, navigate } = useSendplane()
-const toast = useToast()
+const { client, t, locale, navigate, systemTenant } = useSendplane()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const draft = ref({
@@ -36,6 +38,10 @@ const draft = ref({
 const current = ref<Sender | undefined>()
 const saving = ref(false)
 const probing = ref(false)
+// The two 422s that name a field on this form, kept next to it rather than in
+// a toast the operator has to remember while they fix the input.
+const fromEmailError = ref('')
+const transportError = ref('')
 
 const loaded = useAsync(
   (signal) =>
@@ -61,6 +67,20 @@ watch(loaded.data, (sender) => {
   }
 })
 
+/**
+ * A shared sender is the operator's configuration (ADR-0017): there is nothing
+ * to save, and a tenant sees only the name, the From templates and `uses` —
+ * health, transport and domain are omitted by the API for them.
+ */
+const shared = computed(() => current.value?.shared === true)
+
+/**
+ * A tenant hears one bit about a shared identity — red or not — and never the
+ * reason, because the reputation behind it is everyone's (ADR-0017 §3). So the
+ * health and probe panes are the system tenant's view only.
+ */
+const hidePlatformDetail = computed(() => shared.value && !systemTenant.value)
+
 const transports = useAsync((signal) =>
   client.get('/api/v1/transports', { params: { query: { limit: 200 } }, signal }),
 )
@@ -73,41 +93,57 @@ const domains = useAsync((signal) =>
  * (architecture 11.4). It is the only place a sender's real deliverability
  * shows up, so it is loaded even on the edit screen.
  */
+// Waits for the sender itself: whether this pane applies at all depends on
+// `shared`, and asking for a shared sender's health only to abort it would put
+// a request on the wire that a tenant is not allowed to make.
 const health = useAsync(
   (signal) =>
-    props.senderId
+    props.senderId && current.value && !hidePlatformDetail.value
       ? client.get('/api/v1/senders/{senderId}/health', {
           params: { path: { senderId: props.senderId } },
           signal,
         })
       : Promise.resolve(undefined),
-  { watch: () => props.senderId },
+  { watch: [() => props.senderId, () => current.value, hidePlatformDetail] },
 )
 
 const runs = useCursorList<ProbeRun>(
   (params, signal) =>
-    props.senderId
+    props.senderId && current.value && !hidePlatformDetail.value
       ? client.get('/api/v1/probe-runs', {
           params: { query: { ...params, sender_id: props.senderId } },
           signal,
         })
       : Promise.resolve({ items: [] as ProbeRun[] }),
-  { limit: 20, watch: () => props.senderId },
+  { limit: 20, watch: [() => props.senderId, () => current.value, hidePlatformDetail] },
 )
 
+/**
+ * Platform transports and domains are filtered out rather than disabled: they
+ * cannot be assigned to a tenant's own sender at all
+ * (`422 transport_not_assignable`), and the shared *sender* is the way to use
+ * the operator's relay. They only appear in this list in the system-tenant
+ * view in the first place.
+ */
 const transportOptions = computed(() =>
-  (transports.data.value?.items ?? []).map((transport) => ({
-    value: transport.id ?? '',
-    label: `${transport.name} (${transport.host}:${transport.port})`,
-  })),
+  (transports.data.value?.items ?? [])
+    .filter((transport) => !transport.shared)
+    .map((transport) => ({
+      value: transport.id ?? '',
+      label: `${transport.name} (${transport.host}:${transport.port})`,
+    })),
 )
 
 const domainOptions = computed(() =>
-  (domains.data.value?.items ?? []).map((domain) => ({
-    value: domain.id ?? '',
-    label: domain.domain,
-  })),
+  (domains.data.value?.items ?? [])
+    .filter((domain) => !domain.shared)
+    .map((domain) => ({
+      value: domain.id ?? '',
+      label: domain.domain,
+    })),
 )
+
+const noDomainsYet = computed(() => !domains.loading.value && domainOptions.value.length === 0)
 
 const verdictHint = computed(() => {
   switch (health.data.value?.status ?? current.value?.health) {
@@ -145,6 +181,8 @@ function body() {
 
 async function save() {
   saving.value = true
+  fromEmailError.value = ''
+  transportError.value = ''
   try {
     if (props.senderId && current.value?.version !== undefined) {
       await client.put('/api/v1/senders/{senderId}', {
@@ -158,7 +196,10 @@ async function save() {
     }
     toast.success(t('common.saved'))
   } catch (error) {
-    toast.fail(error)
+    if (isFromDomainNotOwned(error)) fromEmailError.value = t('sender.fromDomainNotOwned')
+    else if (isTransportNotAssignable(error))
+      transportError.value = t('sender.transportNotAssignable')
+    else toast.fail(error)
   } finally {
     saving.value = false
   }
@@ -197,18 +238,24 @@ async function probeNow() {
         </a>
       </template>
       <template #badge>
+        <SpSharedBadge v-if="shared" />
         <SpStatusBadge
-          v-if="senderId"
+          v-if="senderId && !hidePlatformDetail"
           kind="health"
           :value="health.data.value?.status ?? current?.health"
           :title="health.data.value?.reason ?? current?.health_reason"
         />
       </template>
       <template #actions>
-        <SpButton v-if="senderId" :loading="probing" @click="probeNow">
+        <!--
+          Nothing on a shared sender is writable, and the probe is the
+          platform's: both actions would only answer 403.
+        -->
+        <SpButton v-if="senderId && !shared" :loading="probing" @click="probeNow">
           {{ t('sender.probeNow') }}
         </SpButton>
         <SpButton
+          v-if="!shared"
           variant="primary"
           :loading="saving"
           :disabled="!draft.name || !draft.from_email || !draft.transport_id"
@@ -225,7 +272,30 @@ async function probeNow() {
       class="sp-page__block"
     />
 
-    <SpCard class="sp-page__block">
+    <!--
+      A shared sender: name, the From *templates* and `uses`. No transport, no
+      domain, no health for a tenant — the API omits them (architecture 5.4).
+    -->
+    <SpCard v-if="shared" class="sp-page__block">
+      <p class="sp-note">{{ t('sender.sharedReadOnly') }}</p>
+      <dl class="sp-detail-list">
+        <dt>{{ t('common.name') }}</dt>
+        <dd>{{ current?.name }}</dd>
+        <dt>{{ t('sender.fromName') }} · {{ t('shared.template') }}</dt>
+        <dd class="sp-mono">{{ current?.from_name || '—' }}</dd>
+        <dt>{{ t('sender.fromEmail') }} · {{ t('shared.template') }}</dt>
+        <dd class="sp-mono">{{ current?.from_email }}</dd>
+        <template v-if="current?.reply_to">
+          <dt>{{ t('sender.replyTo') }} · {{ t('shared.template') }}</dt>
+          <dd class="sp-mono">{{ current.reply_to }}</dd>
+        </template>
+        <dt>{{ t('sender.uses') }}</dt>
+        <dd>{{ (current?.uses ?? []).join(', ') || '—' }}</dd>
+      </dl>
+      <p class="sp-note">{{ t('sender.sharedFromHint') }}</p>
+    </SpCard>
+
+    <SpCard v-else class="sp-page__block">
       <form class="sp-form-grid" @submit.prevent="save">
         <SpField v-slot="{ id }" :label="t('common.name')" required>
           <SpInput :id="id" v-model="draft.name" />
@@ -233,32 +303,54 @@ async function probeNow() {
         <SpField v-slot="{ id }" :label="t('sender.fromName')">
           <SpInput :id="id" v-model="draft.from_name" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('sender.fromEmail')" required>
-          <SpInput :id="id" v-model="draft.from_email" type="email" />
+        <SpField
+          v-slot="{ id, describedBy }"
+          :label="t('sender.fromEmail')"
+          :error="fromEmailError || undefined"
+          :hint="noDomainsYet ? t('sender.registerDomainHint') : undefined"
+          required
+        >
+          <SpInput :id="id" v-model="draft.from_email" type="email" :described-by="describedBy" />
         </SpField>
         <SpField v-slot="{ id }" :label="t('sender.replyTo')">
           <SpInput :id="id" v-model="draft.reply_to" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('sender.transport')" required>
+        <SpField
+          v-slot="{ id, describedBy }"
+          :label="t('sender.transport')"
+          :error="transportError || undefined"
+          :hint="t('shared.noAssign')"
+          required
+        >
           <SpSelect
             :id="id"
             v-model="draft.transport_id"
             :options="transportOptions"
             :placeholder="t('common.none')"
+            :described-by="describedBy"
           />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('sender.domain')">
+        <SpField
+          v-slot="{ id, describedBy }"
+          :label="t('sender.domain')"
+          :hint="noDomainsYet ? t('sender.registerDomainHint') : undefined"
+        >
           <SpSelect
             :id="id"
             v-model="draft.domain_id"
             :options="domainOptions"
             :placeholder="t('common.none')"
+            :described-by="describedBy"
           />
         </SpField>
       </form>
     </SpCard>
 
-    <SpCard v-if="senderId" :title="t('sender.health')" class="sp-page__block">
+    <SpCard
+      v-if="senderId && !hidePlatformDetail"
+      :title="t('sender.health')"
+      class="sp-page__block"
+    >
       <template #actions>
         <SpButton size="sm" :loading="health.loading.value" @click="health.reload()">
           {{ t('common.refresh') }}
@@ -279,7 +371,11 @@ async function probeNow() {
       </dl>
     </SpCard>
 
-    <SpCard v-if="senderId" :title="t('sender.probeHistory')" :padded="false">
+    <SpCard
+      v-if="senderId && !hidePlatformDetail"
+      :title="t('sender.probeHistory')"
+      :padded="false"
+    >
       <SpTable
         :columns="runColumns"
         :rows="runs.items.value"

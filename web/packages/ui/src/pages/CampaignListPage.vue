@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { CAMPAIGN_STATUSES, type Campaign, type CampaignStatus } from '@sendplane/api'
+import {
+  CAMPAIGN_STATUSES,
+  type Campaign,
+  type CampaignStatus,
+  type Sender,
+  type TenantVars,
+} from '@sendplane/api'
 import { computed, ref } from 'vue'
 
 import SpButton from '../components/SpButton.vue'
@@ -11,20 +17,31 @@ import SpLink from '../components/SpLink.vue'
 import SpMultiFilter from '../components/SpMultiFilter.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpSelect from '../components/SpSelect.vue'
+import SpSharedBadge from '../components/SpSharedBadge.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
+import TenantVarsEditor from '../components/TenantVarsEditor.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useCursorList } from '../composables/useCursorList.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, formatNumber } from '../lib/format.js'
+import {
+  isSenderUseDenied,
+  isTenantVarsMissing,
+  looksTemplated,
+  missingTenantVarKeys,
+} from '../lib/platform.js'
 
-const { client, t, locale, navigate } = useSendplane()
-const toast = useToast()
+const { client, t, locale, navigate, systemTenant, tenantId } = useSendplane()
+const toast = useApiToast()
 
 const statuses = ref<string[]>([])
 const creating = ref(false)
 const draft = ref({ name: '', sender_id: '', template_id: '' })
+const tenantVars = ref<TenantVars>({})
+const missingTenantVars = ref<string[]>([])
+const senderUseError = ref('')
 const saving = ref(false)
 
 const list = useCursorList<Campaign>(
@@ -56,12 +73,37 @@ const statusOptions = computed(() =>
   CAMPAIGN_STATUSES.map((status) => ({ value: status, label: t(`status.campaign.${status}`) })),
 )
 
+const senderList = computed<Sender[]>(() => senders.data.value?.items ?? [])
+
 const senderOptions = computed(() =>
-  (senders.data.value?.items ?? []).map((sender) => ({
+  senderList.value.map((sender) => ({
     value: sender.id ?? '',
-    label: `${sender.name} <${sender.from_email}>`,
+    label: sender.shared
+      ? `${sender.name} <${sender.from_email}> — ${t('shared.badge')}${
+          sender.uses?.length ? ` (${sender.uses.join(', ')})` : ''
+        }`
+      : `${sender.name} <${sender.from_email}>`,
   })),
 )
+
+const selectedSender = computed(() => senderList.value.find((s) => s.id === draft.value.sender_id))
+
+/** Absent `uses` means "anything" — only a shared sender is ever restricted. */
+const senderAllowsCampaign = computed(() => {
+  const uses = selectedSender.value?.uses
+  return !uses || uses.includes('campaign')
+})
+
+/** Only a shared sender's From fields are Liquid, so only they get a render. */
+const senderTemplates = computed(() => {
+  const sender = selectedSender.value
+  if (!sender?.shared) return undefined
+  if (!looksTemplated(sender.from_name) && !looksTemplated(sender.from_email)) return undefined
+  return {
+    ...(sender.from_name ? { from_name: sender.from_name } : {}),
+    from_email: sender.from_email,
+  }
+})
 
 const templateOptions = computed(() =>
   (templates.data.value?.items ?? []).map((template) => ({
@@ -88,12 +130,15 @@ function openCreate() {
 async function create() {
   if (!draft.value.name || !draft.value.sender_id) return
   saving.value = true
+  missingTenantVars.value = []
+  senderUseError.value = ''
   try {
     const campaign = await client.post('/api/v1/campaigns', {
       body: {
         name: draft.value.name,
         sender_id: draft.value.sender_id,
         ...(draft.value.template_id ? { template_id: draft.value.template_id } : {}),
+        ...(Object.keys(tenantVars.value).length ? { tenant_vars: tenantVars.value } : {}),
       },
     })
     creating.value = false
@@ -101,7 +146,16 @@ async function create() {
     if (campaign.id) navigate({ name: 'campaign', params: { campaignId: campaign.id } })
     else list.reset()
   } catch (error) {
-    toast.fail(error)
+    // Both failures name an input on this form, so they render on it.
+    if (isTenantVarsMissing(error)) {
+      const keys = missingTenantVarKeys(error)
+      missingTenantVars.value = keys
+      if (keys.length === 0) toast.fail(error)
+    } else if (isSenderUseDenied(error)) {
+      senderUseError.value = error instanceof Error ? error.message : String(error)
+    } else {
+      toast.fail(error)
+    }
   } finally {
     saving.value = false
   }
@@ -121,7 +175,10 @@ const failedOf = (campaign: Campaign) => campaign.stats?.by_status?.failed ?? 0
         <SpButton :loading="list.loading.value" @click="list.reload()">
           {{ t('common.refresh') }}
         </SpButton>
-        <SpButton variant="primary" @click="openCreate">{{ t('campaign.new') }}</SpButton>
+        <!-- The system tenant cannot create a campaign at all (ADR-0017). -->
+        <SpButton v-if="!systemTenant" variant="primary" @click="openCreate">
+          {{ t('campaign.new') }}
+        </SpButton>
       </template>
     </SpPageHeader>
 
@@ -130,12 +187,22 @@ const failedOf = (campaign: Campaign) => campaign.stats?.by_status?.failed ?? 0
         <SpField v-slot="{ id }" :label="t('common.name')" required>
           <SpInput :id="id" v-model="draft.name" />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('campaign.sender')" required>
+        <SpField
+          v-slot="{ id, describedBy }"
+          :label="t('campaign.sender')"
+          :error="
+            !senderAllowsCampaign
+              ? t('message.senderUses', { uses: (selectedSender?.uses ?? []).join(', ') })
+              : senderUseError || undefined
+          "
+          required
+        >
           <SpSelect
             :id="id"
             v-model="draft.sender_id"
             :options="senderOptions"
             :placeholder="t('common.none')"
+            :described-by="describedBy"
           />
         </SpField>
         <SpField v-slot="{ id }" :label="t('template.one')">
@@ -146,18 +213,30 @@ const failedOf = (campaign: Campaign) => campaign.stats?.by_status?.failed ?? 0
             :placeholder="t('common.none')"
           />
         </SpField>
+        <p v-if="selectedSender?.shared" class="sp-form-grid__note">
+          <SpSharedBadge />
+          <span class="sp-mono">{{ selectedSender.from_email }}</span>
+        </p>
         <div class="sp-form-grid__actions">
           <SpButton @click="creating = false">{{ t('common.cancel') }}</SpButton>
           <SpButton
             type="submit"
             variant="primary"
             :loading="saving"
-            :disabled="!draft.name || !draft.sender_id"
+            :disabled="!draft.name || !draft.sender_id || !senderAllowsCampaign"
           >
             {{ t('common.create') }}
           </SpButton>
         </div>
       </form>
+
+      <TenantVarsEditor
+        v-model="tenantVars"
+        class="sp-page__block"
+        :tenant-id="tenantId"
+        :missing-keys="missingTenantVars"
+        :sender-templates="senderTemplates"
+      />
     </SpCard>
 
     <SpMultiFilter
@@ -209,3 +288,15 @@ const failedOf = (campaign: Campaign) => campaign.stats?.by_status?.failed ?? 0
     </SpTable>
   </div>
 </template>
+
+<style scoped>
+.sp-form-grid__note {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: var(--sp-space-2);
+  align-items: center;
+  margin: 0;
+  color: var(--sp-text-muted);
+  font-size: var(--sp-font-size-sm);
+}
+</style>

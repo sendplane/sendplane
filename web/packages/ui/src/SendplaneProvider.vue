@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SendplaneClient } from '@sendplane/api'
+import type { SendplaneClient, Whoami } from '@sendplane/api'
 import { computed, ref, watch } from 'vue'
 
 import SpConfirmDialog from './components/SpConfirmDialog.vue'
@@ -27,6 +27,12 @@ const props = withDefaults(
     messages?: LocaleMessages
     /** Replaces the bundled translator, e.g. with the host's own `t`. */
     t?: TranslateFn
+    /**
+     * `GET /api/v1/whoami`, which the host loads once the credential is ready.
+     * Re-passing it after a tenant switch re-renders the pages that branch on
+     * the system-tenant view.
+     */
+    whoami?: Whoami
     /** Set false when the host already renders toasts and dialogs. */
     overlays?: boolean
   }>(),
@@ -43,9 +49,20 @@ watch(
   },
 )
 
+// Mirrored for the same reason as the locale: the context hands pages one
+// reactive source, whether the host re-passes the prop or never passes it.
+const whoamiRef = ref<Whoami | undefined>(props.whoami)
+watch(
+  () => props.whoami,
+  (next) => {
+    whoamiRef.value = next
+  },
+)
+
 const context = provideSendplane({
   client: props.client,
   locale: localeRef,
+  whoami: whoamiRef,
   ...(props.navigate ? { navigate: props.navigate } : {}),
   ...(props.href ? { href: props.href } : {}),
   ...(props.messages ? { messages: props.messages } : {}),

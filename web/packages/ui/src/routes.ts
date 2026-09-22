@@ -55,6 +55,13 @@ export const routes: readonly SendplaneRoute[] = [
     params: ['deliveryId'],
   },
   {
+    name: 'messages.send',
+    path: '/messages/send',
+    page: () => import('./pages/MessageSendPage.vue'),
+    params: [],
+    navKey: 'nav.messageSend',
+  },
+  {
     name: 'templates',
     path: '/templates',
     page: () => import('./pages/TemplateListPage.vue'),

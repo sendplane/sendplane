@@ -10,14 +10,14 @@ import SpField from '../components/SpField.vue'
 import SpInput from '../components/SpInput.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpSelect from '../components/SpSelect.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 
 const props = defineProps<{ layoutId?: string }>()
 
-const { client, t, navigate } = useSendplane()
-const toast = useToast()
+const { client, t, navigate, systemTenant } = useSendplane()
+const toast = useApiToast()
 
 const draft = ref<{ name: string; mode: ContentMode; body: string }>({
   name: '',
@@ -82,7 +82,14 @@ async function save() {
         </a>
       </template>
       <template #actions>
-        <SpButton variant="primary" :loading="saving" :disabled="!draft.name" @click="save">
+        <!-- Layout content is a tenant's; the system tenant only reads it. -->
+        <SpButton
+          v-if="!systemTenant"
+          variant="primary"
+          :loading="saving"
+          :disabled="!draft.name"
+          @click="save"
+        >
           {{ t('common.save') }}
         </SpButton>
       </template>

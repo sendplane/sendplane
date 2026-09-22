@@ -1,5 +1,5 @@
-import type { SendplaneClient } from '@sendplane/api'
-import { computed, inject, provide, ref, type InjectionKey, type Ref } from 'vue'
+import { SYSTEM_TENANT_ID, type SendplaneClient, type Whoami } from '@sendplane/api'
+import { computed, inject, provide, ref, type ComputedRef, type InjectionKey, type Ref } from 'vue'
 
 import { createMessages, type LocaleMessages } from './i18n/index.js'
 import { resolvePath } from './routes.js'
@@ -32,6 +32,20 @@ export interface SendplaneContext {
   locale: Ref<string>
   /** Locales the merged message bundle covers. */
   availableLocales: Ref<string[]>
+  /**
+   * `GET /api/v1/whoami`, as the host loaded it: who the caller is and which
+   * tenant this view is bound to. The host owns the call (it also owns the
+   * credential and the tenant header), so this is `undefined` until it lands
+   * and pages must render without it.
+   */
+  whoami: Ref<Whoami | undefined>
+  /**
+   * True in the operator's system-tenant view, the only one that sees platform
+   * resources and their state — and the one that cannot send (ADR-0017).
+   */
+  systemTenant: ComputedRef<boolean>
+  /** The tenant this view is bound to, or `''` before `whoami` lands. */
+  tenantId: ComputedRef<string>
 }
 
 export const SENDPLANE_KEY: InjectionKey<SendplaneContext> = Symbol('sendplane')
@@ -50,6 +64,12 @@ export interface ProvideSendplaneOptions {
   messages?: LocaleMessages
   /** Replaces the bundled translator wholesale, e.g. with the host's own. */
   t?: TranslateFn
+  /**
+   * The result of `GET /api/v1/whoami`. Pass a ref to keep it live across a
+   * tenant switch; this package never fetches it itself, because the host is
+   * the side that knows when the credential is ready.
+   */
+  whoami?: Whoami | Ref<Whoami | undefined>
 }
 
 /**
@@ -69,6 +89,10 @@ export function createSendplaneContext(options: ProvideSendplaneOptions): Sendpl
     ? options.locale
     : ref(options.locale ?? defaultLocale(options.messages))
 
+  const whoami: Ref<Whoami | undefined> = isWhoamiRef(options.whoami)
+    ? options.whoami
+    : ref(options.whoami)
+
   const composer = createMessages(locale, options.messages)
   const navigate =
     options.navigate ??
@@ -84,6 +108,14 @@ export function createSendplaneContext(options: ProvideSendplaneOptions): Sendpl
     t: options.t ?? ((key, named) => composer.translate(key, named)),
     locale,
     availableLocales: computed(() => composer.locales.value),
+    whoami,
+    // `system_tenant` is the server's answer, not a string comparison the
+    // console makes up; the id is only the fallback for a host that filled the
+    // ref by hand.
+    systemTenant: computed(
+      () => whoami.value?.system_tenant === true || whoami.value?.tenant_id === SYSTEM_TENANT_ID,
+    ),
+    tenantId: computed(() => whoami.value?.tenant_id ?? ''),
   }
 }
 
@@ -120,5 +152,9 @@ function defaultLocale(messages?: LocaleMessages): string {
 }
 
 function isRef(value: unknown): value is Ref<string> {
+  return typeof value === 'object' && value !== null && 'value' in value
+}
+
+function isWhoamiRef(value: unknown): value is Ref<Whoami | undefined> {
   return typeof value === 'object' && value !== null && 'value' in value
 }

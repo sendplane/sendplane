@@ -53,6 +53,7 @@
   "nav": {
     "campaigns": "캠페인",
     "deliveries": "딜리버리",
+    "messageSend": "메시지 보내기",
     "templates": "템플릿",
     "layouts": "레이아웃",
     "transports": "트랜스포트",
@@ -225,6 +226,40 @@
     "source": "상관관계 근거",
     "duration": "소요"
   },
+  "message": {
+    "title": "메시지 보내기",
+    "hint": "트랜잭션 발송 한 번을 수신자 최대 1000명에게 펼칩니다. 수신자마다 별도 delivery가 생깁니다.",
+    "message": "메시지",
+    "send": "보내기",
+    "sent": "delivery {count}건이 접수되었습니다.",
+    "preview": "미리보기",
+    "templateHint": "발행된 템플릿만 고를 수 있고, 발송은 발행된 버전을 씁니다.",
+    "senderUses": "공유 sender, 허용된 용도: {uses}",
+    "senderNotTransactional": "이 공유 sender는 트랜잭션 발송에 쓸 수 없습니다.",
+    "recipients": "수신자",
+    "addRecipient": "수신자 추가",
+    "recipientVars": "변수 (JSON)",
+    "recipientCount": "수신자 {count}명 (최대 {max}명)",
+    "tooMany": "한 요청에 최대 {max}명입니다. 나머지는 다음 발송으로 나누세요.",
+    "paste": "수신자 붙여넣기",
+    "pasteHint": "한 줄에 `email[,name[,locale]]` 하나. 위 표에 덧붙습니다.",
+    "applyPaste": "붙여넣기",
+    "pasteTruncated": "앞쪽 {max}명까지만 남겼습니다.",
+    "headers": "커스텀 헤더",
+    "headersHint": "설정된 화이트리스트만 허용되고, CR·LF가 들어간 값은 거부됩니다.",
+    "addHeader": "헤더 추가",
+    "noHeaders": "커스텀 헤더 없음",
+    "headerName": "헤더",
+    "headerValue": "값",
+    "idempotencyKey": "멱등 키",
+    "idempotencyKeyHint": "같은 키로 다시 보내면 다시 보내지 않고 저장된 결과를 돌려줍니다.",
+    "newKey": "새 키",
+    "vars": "메시지 변수 (JSON)",
+    "varsHint": "수신자별 변수 아래에 병합됩니다.",
+    "result": "결과",
+    "noResult": "이 화면에서 아직 보낸 것이 없습니다.",
+    "replay": "이전에 같은 요청으로 저장된 결과입니다."
+  },
   "template": {
     "title": "템플릿",
     "one": "템플릿",
@@ -351,7 +386,13 @@
     "rawHeaders": "원본 헤더",
     "transportStatus": "트랜스포트",
     "domainStatus": "도메인",
-    "noRuns": "이 발신자의 프로브 실행 기록이 없습니다."
+    "noRuns": "이 발신자의 프로브 실행 기록이 없습니다.",
+    "uses": "허용된 용도",
+    "sharedReadOnly": "공유 sender는 운영자의 설정이므로 여기서 수정할 수 없습니다.",
+    "sharedFromHint": "From 이름과 주소는 발송마다 테넌트 변수를 읽는 Liquid 템플릿입니다.",
+    "fromDomainNotOwned": "From 주소는 내 발신 도메인 중 하나여야 합니다.",
+    "transportNotAssignable": "그 transport 또는 도메인은 운영자의 것이라 지정할 수 없습니다.",
+    "registerDomainHint": "발신 도메인을 먼저 등록한 뒤 여기서 고르세요."
   },
   "domain": {
     "title": "발신 도메인",
@@ -491,6 +532,8 @@
     },
     "unsubscribeUrlTemplate": "호스트 URL 템플릿",
     "unsubscribeUrlHint": "수신자별로 평가되는 Liquid입니다. 수신자 자신의 unsubscribe_url이 우선합니다.",
+    "platformDefault": "플랫폼 기본값 사용 중",
+    "platformDefaultHint": "비워 두면 운영자의 플랫폼 기본값이 적용됩니다. 되돌리려면 필드를 비우세요.",
     "oneClick": "RFC 8058 원클릭",
     "oneClickHint": "sendplane 모드에서는 List-Unsubscribe-Post 헤더가 항상 붙습니다. host 모드에서는 호스트가 원클릭 POST를 받는 경우에만 붙습니다.",
     "tracking": "트래킹",
@@ -506,5 +549,38 @@
     "eventsNote": "선택을 비워 두면 기본 세트를 구독합니다: delivery.sent, delivery.opened, delivery.clicked를 제외한 모든 이벤트 타입입니다.",
     "eventsReset": "기본값으로 초기화",
     "eventTypeSentHint": "딜리버리마다 이벤트가 하나씩 쓰이므로, 대량 캠페인에서는 매우 많은 수가 생길 수 있습니다."
+  },
+  "shared": {
+    "badge": "공유",
+    "hint": "운영자가 설정으로 관리하고 테넌트가 함께 쓰는 항목입니다. 여기서는 읽기 전용입니다(ADR-0017).",
+    "readOnly": "운영자가 설정으로 관리하는 항목입니다",
+    "template": "템플릿",
+    "templateHint": "실제 주소가 아니라 테넌트 변수를 읽는 Liquid 템플릿입니다.",
+    "uses": "허용된 용도",
+    "noAssign": "공유 transport와 도메인은 내 sender에 지정할 수 없습니다. 운영자가 설정한 공유 sender를 쓰세요."
+  },
+  "tenant": {
+    "switcher": "테넌트",
+    "own": "내 테넌트 ({tenant})",
+    "system": "시스템 테넌트 ({tenant})",
+    "systemBanner": "운영자(시스템 테넌트) 보기",
+    "systemBannerHint": "플랫폼 transport · 발신 도메인 · 메일박스와 그 상태를 봅니다. 여기서는 발송할 수 없습니다.",
+    "systemNoSend": "시스템 테넌트는 발송할 수 없습니다",
+    "systemNoSendHint": "캠페인을 만들거나 메시지를 보내려면 내 테넌트로 돌아가세요.",
+    "systemReadOnlyAction": "시스템 테넌트 보기에서는 쓸 수 없습니다."
+  },
+  "tenantVars": {
+    "title": "테넌트 변수",
+    "hint": "모든 템플릿에서 `tenant` 로 바인딩되고, 공유 sender의 From 템플릿이 이 값을 읽습니다. 제출 시 호스트가 검증·치환합니다.",
+    "key": "키",
+    "value": "값",
+    "add": "변수 추가",
+    "json": "테넌트 변수 (JSON)",
+    "jsonMode": "JSON으로 편집",
+    "tableMode": "표로 편집",
+    "missing": "서버가 요구하는 테넌트 변수: {keys}",
+    "rendered": "렌더 결과",
+    "renderedHint": "근사값입니다. 여기서는 단순 변수 치환만 하고, 실제 Liquid는 제출 시 서버가 렌더합니다.",
+    "renderedMissing": "아직 채워지지 않은 변수: {keys}"
   }
 }

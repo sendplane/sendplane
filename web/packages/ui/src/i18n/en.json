@@ -53,6 +53,7 @@
   "nav": {
     "campaigns": "Campaigns",
     "deliveries": "Deliveries",
+    "messageSend": "Send a message",
     "templates": "Templates",
     "layouts": "Layouts",
     "transports": "Transports",
@@ -225,6 +226,40 @@
     "source": "Correlated by",
     "duration": "Duration"
   },
+  "message": {
+    "title": "Send a message",
+    "hint": "One transactional send, fanned out to up to 1000 recipients; each becomes its own delivery.",
+    "message": "Message",
+    "send": "Send",
+    "sent": "Accepted {count} deliveries.",
+    "preview": "Preview",
+    "templateHint": "Published templates only; the send uses the published version.",
+    "senderUses": "Shared sender, allowed for: {uses}",
+    "senderNotTransactional": "This shared sender is not allowed for transactional sends.",
+    "recipients": "Recipients",
+    "addRecipient": "Add recipient",
+    "recipientVars": "Variables (JSON)",
+    "recipientCount": "{count} of at most {max} recipients",
+    "tooMany": "At most {max} recipients per request; split the rest into another send.",
+    "paste": "Paste recipients",
+    "pasteHint": "One `email[,name[,locale]]` per line. Lines are appended to the rows above.",
+    "applyPaste": "Paste",
+    "pasteTruncated": "Trimmed to the first {max} recipients.",
+    "headers": "Custom headers",
+    "headersHint": "Restricted to the configured whitelist; CR and LF are rejected.",
+    "addHeader": "Add header",
+    "noHeaders": "No custom header",
+    "headerName": "Header",
+    "headerValue": "Value",
+    "idempotencyKey": "Idempotency key",
+    "idempotencyKeyHint": "Replaying the same key returns the stored result instead of sending again.",
+    "newKey": "New key",
+    "vars": "Message variables (JSON)",
+    "varsHint": "Merged under each recipient’s own variables.",
+    "result": "Result",
+    "noResult": "Nothing sent from this screen yet.",
+    "replay": "This is the stored result of an earlier identical request."
+  },
   "template": {
     "title": "Templates",
     "one": "Template",
@@ -351,7 +386,13 @@
     "rawHeaders": "Raw headers",
     "transportStatus": "Transport",
     "domainStatus": "Domain",
-    "noRuns": "No probe run recorded for this sender."
+    "noRuns": "No probe run recorded for this sender.",
+    "uses": "Allowed for",
+    "sharedReadOnly": "A shared sender is the operator’s configuration; it cannot be edited here.",
+    "sharedFromHint": "From name and address are Liquid templates over the tenant variables of each send.",
+    "fromDomainNotOwned": "The From address must be on one of your own sending domains.",
+    "transportNotAssignable": "That transport or domain cannot be assigned: it is the operator’s.",
+    "registerDomainHint": "Register the sending domain first, then pick it here."
   },
   "domain": {
     "title": "Sending domains",
@@ -491,6 +532,8 @@
     },
     "unsubscribeUrlTemplate": "Host URL template",
     "unsubscribeUrlHint": "Liquid, evaluated per recipient. A recipient's own unsubscribe_url wins over it.",
+    "platformDefault": "Using the platform default",
+    "platformDefaultHint": "Empty means the operator’s platform default is in force; clear the field to go back to it.",
     "oneClick": "RFC 8058 one-click",
     "oneClickHint": "Under `sendplane` mode the List-Unsubscribe-Post header is always sent. Under `host` mode it is only sent when the host accepts the one-click POST.",
     "tracking": "Tracking",
@@ -506,5 +549,38 @@
     "eventsNote": "An empty selection subscribes to the default set: every event type except delivery.sent, delivery.opened and delivery.clicked.",
     "eventsReset": "Reset to default",
     "eventTypeSentHint": "Writes one event per delivery, so a bulk campaign can produce a very large number of these."
+  },
+  "shared": {
+    "badge": "Shared",
+    "hint": "Configured by the operator and shared across tenants; read-only here (ADR-0017).",
+    "readOnly": "This item is managed by the operator through configuration.",
+    "template": "Template",
+    "templateHint": "A Liquid template over the tenant variables, not a literal address.",
+    "uses": "Allowed for",
+    "noAssign": "Shared transports and domains cannot be assigned to your own sender; use the shared sender instead."
+  },
+  "tenant": {
+    "switcher": "Tenant",
+    "own": "My tenant ({tenant})",
+    "system": "System tenant ({tenant})",
+    "systemBanner": "Operator (system tenant) view",
+    "systemBannerHint": "Platform transports, sending domains, mailboxes and their state. Sending is disabled here.",
+    "systemNoSend": "The system tenant cannot send",
+    "systemNoSendHint": "Switch back to your own tenant to create a campaign or send a message.",
+    "systemReadOnlyAction": "Not available in the system tenant view."
+  },
+  "tenantVars": {
+    "title": "Tenant variables",
+    "hint": "Bound as `tenant` in every template and what a shared sender’s From templates resolve from. The host validates and substitutes them on submit.",
+    "key": "Key",
+    "value": "Value",
+    "add": "Add variable",
+    "json": "Tenant variables (JSON)",
+    "jsonMode": "Edit as JSON",
+    "tableMode": "Edit as a table",
+    "missing": "The server needs these tenant variables: {keys}",
+    "rendered": "Rendered result",
+    "renderedHint": "Approximate: only simple variable interpolation is applied here, and the server renders the real Liquid on submit.",
+    "renderedMissing": "Not supplied yet: {keys}"
   }
 }

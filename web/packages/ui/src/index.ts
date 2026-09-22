@@ -45,6 +45,7 @@ export {
   type ConfirmApi,
   type ConfirmRequest,
 } from './composables/useConfirm.js'
+export { useApiToast } from './composables/useApiToast.js'
 export {
   createToastApi,
   describeError,
@@ -73,12 +74,14 @@ export { default as SpMultiFilter } from './components/SpMultiFilter.vue'
 export { default as SpPageHeader } from './components/SpPageHeader.vue'
 export { default as SpRecipientUpload } from './components/SpRecipientUpload.vue'
 export { default as SpSelect, type SelectOption } from './components/SpSelect.vue'
+export { default as SpSharedBadge } from './components/SpSharedBadge.vue'
 export { default as SpStat } from './components/SpStat.vue'
 export { default as SpStatusBadge } from './components/SpStatusBadge.vue'
 export { default as SpTable, type TableColumn } from './components/SpTable.vue'
 export { default as SpTabs, type TabItem } from './components/SpTabs.vue'
 export { default as SpTextarea } from './components/SpTextarea.vue'
 export { default as SpBlockEditorSlot } from './components/SpBlockEditorSlot.vue'
+export { default as TenantVarsEditor } from './components/TenantVarsEditor.vue'
 
 /**
  * The GrapesJS + grapesjs-mjml block editor (ADR-0009).
@@ -97,6 +100,7 @@ export const MjmlBlockEditor = defineAsyncComponent(
 export { default as CampaignListPage } from './pages/CampaignListPage.vue'
 export { default as CampaignDetailPage } from './pages/CampaignDetailPage.vue'
 export { default as DeliveryListPage } from './pages/DeliveryListPage.vue'
+export { default as MessageSendPage } from './pages/MessageSendPage.vue'
 export { default as DeliveryDetailPage } from './pages/DeliveryDetailPage.vue'
 export { default as TemplateListPage } from './pages/TemplateListPage.vue'
 export { default as TemplateEditorPage } from './pages/TemplateEditorPage.vue'
@@ -137,6 +141,18 @@ export {
   tryParseJson,
 } from './lib/format.js'
 export { labelKeyFor, toneFor, type StatusKind, type Tone } from './lib/status.js'
+export {
+  extractTenantVarKeys,
+  isFromDomainNotOwned,
+  isPlatformReadOnly,
+  isSenderUseDenied,
+  isTenantVarsMissing,
+  isTransportNotAssignable,
+  looksTemplated,
+  missingTenantVarKeys,
+  renderTenantTemplate,
+  type TenantTemplateRender,
+} from './lib/platform.js'
 export {
   BLOCK_EDITOR,
   BLOCK_EDITOR_VERSION,

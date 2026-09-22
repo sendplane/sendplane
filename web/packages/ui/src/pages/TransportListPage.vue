@@ -6,16 +6,17 @@ import SpButton from '../components/SpButton.vue'
 import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpLink from '../components/SpLink.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
+import SpSharedBadge from '../components/SpSharedBadge.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useCursorList } from '../composables/useCursorList.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, formatNumber } from '../lib/format.js'
 
 const { client, t, locale, navigate } = useSendplane()
-const toast = useToast()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const list = useCursorList<Transport>((params, signal) =>
@@ -87,6 +88,7 @@ async function remove(transport: Transport) {
         <SpLink :to="{ name: 'transport', params: { transportId: (row as Transport).id! } }">
           {{ (row as Transport).name }}
         </SpLink>
+        <SpSharedBadge v-if="(row as Transport).shared" class="sp-row__badge" />
       </template>
       <template #[`cell-endpoint`]="{ row }">
         {{ (row as Transport).host }}:{{ (row as Transport).port }}
@@ -105,10 +107,23 @@ async function remove(transport: Transport) {
         {{ formatDateTime((row as Transport).status_changed_at, locale) }}
       </template>
       <template #[`cell-actions`]="{ row }">
-        <SpButton size="sm" variant="ghost" @click="remove(row as Transport)">
+        <!-- Shared rows are the operator's configuration: no delete to offer. -->
+        <SpButton
+          v-if="!(row as Transport).shared"
+          size="sm"
+          variant="ghost"
+          @click="remove(row as Transport)"
+        >
           {{ t('common.delete') }}
         </SpButton>
+        <span v-else>—</span>
       </template>
     </SpTable>
   </div>
 </template>
+
+<style scoped>
+.sp-row__badge {
+  margin-left: var(--sp-space-1);
+}
+</style>

@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import type { ContentMode, I18nBundle, PreviewRecipient, Template, Vars } from '@sendplane/api'
+import type {
+  ContentMode,
+  I18nBundle,
+  PreviewRecipient,
+  Template,
+  TenantVars,
+  Vars,
+} from '@sendplane/api'
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
 import SpButton from '../components/SpButton.vue'
@@ -11,17 +18,18 @@ import SpPageHeader from '../components/SpPageHeader.vue'
 import SpSelect from '../components/SpSelect.vue'
 import SpTabs, { type TabItem } from '../components/SpTabs.vue'
 import SpTextarea from '../components/SpTextarea.vue'
+import TenantVarsEditor from '../components/TenantVarsEditor.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useConfirm } from '../composables/useConfirm.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { downloadText, tryParseJson } from '../lib/format.js'
 import { buildI18nMatrix } from '../lib/i18n-matrix.js'
 
 const props = defineProps<{ templateId?: string }>()
 
-const { client, t, navigate } = useSendplane()
-const toast = useToast()
+const { client, t, navigate, systemTenant, tenantId } = useSendplane()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 // Both editors are heavy and mutually exclusive, so each is its own chunk.
@@ -145,6 +153,7 @@ const layoutOptions = computed(() =>
 // --- preview ---------------------------------------------------------------
 const previewLocale = ref('')
 const previewVarsText = ref('{}')
+const previewTenantVars = ref<TenantVars>({})
 const previewRecipientText = ref('{\n  "email": "sample@example.com",\n  "name": "Sample"\n}')
 const previewHtml = ref('')
 const previewResult = ref<{
@@ -171,6 +180,10 @@ async function runPreview() {
         ...(previewLocale.value ? { locale: previewLocale.value } : {}),
         vars: tryParseJson<Vars>(previewVarsText.value, {}).value,
         recipient: tryParseJson<PreviewRecipient>(previewRecipientText.value, {}).value,
+        // Bound as `tenant` in the render, the same way a real send binds it.
+        ...(Object.keys(previewTenantVars.value).length
+          ? { tenant_vars: previewTenantVars.value }
+          : {}),
       },
     })
     previewHtml.value = result.html
@@ -277,7 +290,12 @@ async function importYaml(event: Event) {
         </a>
       </template>
       <template #actions>
+        <!--
+          Content is a tenant's, and the system tenant never sends: editing and
+          publishing are hidden there rather than failing on submit.
+        -->
         <SpButton
+          v-if="!systemTenant"
           variant="primary"
           :loading="saving"
           :disabled="!draft.name || !draft.subject"
@@ -285,7 +303,7 @@ async function importYaml(event: Event) {
         >
           {{ t('common.save') }}
         </SpButton>
-        <SpButton v-if="templateId" :loading="publishing" @click="publish">
+        <SpButton v-if="templateId && !systemTenant" :loading="publishing" @click="publish">
           {{ t('template.publish') }}
         </SpButton>
       </template>
@@ -464,6 +482,13 @@ async function importYaml(event: Event) {
               <SpTextarea :id="id" v-model="previewRecipientText" mono :rows="5" />
             </SpField>
           </div>
+
+          <TenantVarsEditor
+            v-model="previewTenantVars"
+            class="sp-page__block"
+            :tenant-id="tenantId"
+            :remember="false"
+          />
 
           <p v-if="previewResult.locale" class="sp-note sp-page__block">
             {{ t('template.renderedAs', { locale: previewResult.locale }) }}

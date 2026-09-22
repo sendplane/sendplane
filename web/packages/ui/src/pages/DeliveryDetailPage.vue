@@ -10,16 +10,16 @@ import SpJsonView from '../components/SpJsonView.vue'
 import SpLink from '../components/SpLink.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpStatusBadge from '../components/SpStatusBadge.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useConfirm } from '../composables/useConfirm.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, shortId } from '../lib/format.js'
 
 const props = defineProps<{ deliveryId: string }>()
 
 const { client, t, locale } = useSendplane()
-const toast = useToast()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const delivery = useAsync(
@@ -148,6 +148,17 @@ async function retry() {
           :value="delivery.data.value.vars"
           collapsed
           label="vars"
+        />
+        <!--
+          Only a delivery with no campaign to inherit them from carries its own
+          `tenant_vars` (a transactional send or a probe), so this is absent for
+          most rows rather than empty.
+        -->
+        <SpJsonView
+          v-if="delivery.data.value?.tenant_vars"
+          :value="delivery.data.value.tenant_vars"
+          collapsed
+          :label="t('tenantVars.title')"
         />
       </SpCard>
 

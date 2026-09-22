@@ -7,14 +7,14 @@ import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpLink from '../components/SpLink.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
+import { useApiToast } from '../composables/useApiToast.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useCursorList } from '../composables/useCursorList.js'
-import { useToast } from '../composables/useToast.js'
 import { useSendplane } from '../context.js'
 import { formatDateTime, shortId } from '../lib/format.js'
 
-const { client, t, locale, navigate } = useSendplane()
-const toast = useToast()
+const { client, t, locale, navigate, systemTenant } = useSendplane()
+const toast = useApiToast()
 const confirm = useConfirm()
 
 const list = useCursorList<Template>((params, signal) =>
@@ -58,7 +58,12 @@ async function remove(template: Template) {
         <SpButton :loading="list.loading.value" @click="list.reload()">
           {{ t('common.refresh') }}
         </SpButton>
-        <SpButton variant="primary" @click="navigate({ name: 'template.new' })">
+        <!-- Content belongs to a tenant; the system tenant only reads it. -->
+        <SpButton
+          v-if="!systemTenant"
+          variant="primary"
+          @click="navigate({ name: 'template.new' })"
+        >
           {{ t('template.new') }}
         </SpButton>
       </template>
@@ -97,9 +102,10 @@ async function remove(template: Template) {
         {{ formatDateTime((row as Template).updated_at, locale) }}
       </template>
       <template #[`cell-actions`]="{ row }">
-        <SpButton size="sm" variant="ghost" @click="remove(row as Template)">
+        <SpButton v-if="!systemTenant" size="sm" variant="ghost" @click="remove(row as Template)">
           {{ t('common.delete') }}
         </SpButton>
+        <span v-else>—</span>
       </template>
     </SpTable>
   </div>
