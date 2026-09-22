@@ -50,6 +50,16 @@ func TestClassifyTable(t *testing.T) {
 		{451, "4.3.0 Temporary local problem", store.ErrorClassTransient, "transient.4xx"},
 		{450, "4.2.0 Mailbox busy", store.ErrorClassTransient, "transient.4xx"},
 		{400, "unspecified", store.ErrorClassTransient, "transient.4xx"},
+
+		// "try again later" is standard Postfix/Exim wording for a generic
+		// temporary failure (chaossmtp uses it for exactly that), not a
+		// rate-limit signal by itself: it must not trip ratelimit.4xx.text.
+		// A real rate limit that uses this phrasing still carries 421 or an
+		// enhanced code, which the other rate-limit rules already catch.
+		{451, "4.3.0 Temporary local problem, try again later", store.ErrorClassTransient, "transient.4xx"},
+		{421, "4.7.0 try again later", store.ErrorClassRateLimited, "ratelimit.421"},
+		{451, "4.7.0 try again later", store.ErrorClassRateLimited, "ratelimit.enhanced"},
+		{450, "4.2.1 mailbox busy, try again later", store.ErrorClassRateLimited, "ratelimit.enhanced"},
 	}
 	for _, tc := range cases {
 		name := fmt.Sprintf("%d %s", tc.code, tc.msg)

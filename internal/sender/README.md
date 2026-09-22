@@ -80,7 +80,7 @@ enqueue가 실패해도 delivery 결과는 이미 커밋돼 있으므로 로그�
 | `auth.code` | 530, 534, 535, 538 | `auth` |
 | `auth.enhanced` | 5.7.8 / 5.7.9 / 4.7.8 | `auth` |
 | `ratelimit.421` | 421 | `rate_limited` |
-| `ratelimit.4xx.text` | 450·451·452 + `rate\|too many\|too quickly\|throttl\|slow down\|try again later\|deferred due to` | `rate_limited` |
+| `ratelimit.4xx.text` | 450·451·452 + `rate\|too many\|too quickly\|throttl\|slow down\|deferred due to` | `rate_limited` |
 | `ratelimit.enhanced` | 4.7.0 / 4.7.28 / 4.2.1 | `rate_limited` |
 | `policy.enhanced` | 5.7.* | `policy` |
 | `policy.text` | 5xx + `spam\|blocked\|blacklist\|blocklist\|reputation\|policy\|abuse` | `policy` |
@@ -91,6 +91,11 @@ enqueue가 실패해도 delivery 결과는 이미 커밋돼 있으므로 로그�
 | `transient.unknown` | 그 외 | `transient` |
 
 `auth` 가 `policy` 보다 위인 것이 중요합니다 — 535는 enhanced가 5.7.8이라 순서를 바꾸면 policy로 잘못 분류됩니다.
+
+`ratelimit.4xx.text` 에는 일부러 `"try again later"` 를 넣지 않습니다 — Postfix/Exim 이 평범한 일시 실패에도
+쓰는 상투 문구라(`internal/chaossmtp` 의 tempfail 응답이 그 예: `451 4.3.0 Temporary local problem, try again later`)
+너무 넓게 잡혀 진짜 일시 실패까지 `rate_limited` 로 오분류했습니다. 이 문구를 쓰는 진짜 레이트리밋 응답은
+421(`ratelimit.421`) 이거나 enhanced code 4.7.0/4.7.28/4.2.1(`ratelimit.enhanced`) 을 동반하므로 다른 규칙이 잡습니다.
 
 문서는 이 표를 YAML로 두자고 했지만 **Go 리터럴**로 두었습니다: 어차피 컴파일되어야 하고,
 규칙과 테스트가 같은 디렉터리에서 함께 움직이는 편이 낫습니다. 테넌트별 오버라이드가 필요해지면
@@ -114,6 +119,16 @@ replica의 로컬 서킷 하나만으로는 부족합니다. 실패를 본 적 �
 - cooldown/unhealthy 를 쓸 때마다 `StatusUntil = now + TransportProbeInterval` 을 같이 씁니다. healthy 는 zero.
 - 저장된 상태가 `unhealthy` 면 로컬 서킷과 무관하게 건너뜁니다.
 - 단, `StatusUntil` 이 **이미 지났으면** 로컬 상태와 무관하게 다시 시도합니다 — 다음 delivery가 곧 프로브입니다.
+
+`rate_limited` 는 **한 번의 응답으로 cooldown에 들어가지 않습니다.** healthy → cooldown 전환에는 최근
+`rateLimitWindow`(기본 1분) 안에 `rateLimitThreshold`(기본 3)개 이상의 `rate_limited` 인스턴트가 쌓여야
+합니다(`transportHealth.rateLimits`, 매 `fail`/`success` 호출마다 창을 가지치기합니다). 반대로 cooldown →
+healthy 복귀는 창이 **완전히 빌 때만**, 즉 마지막 `rate_limited` 이후 `rateLimitWindow` 가 통째로 지나야
+일어납니다 — 그다음 바로 온 성공 한 건으로는 돌아오지 않습니다. 수 퍼센트의 응답이 산발적으로
+deferred되는 정상 트래픽에서 cooldown/healthy를 매 전송마다 오가며 DB에 쓰고 outbox 이벤트를 내는 플래핑을
+막기 위한 장치입니다. 이 두 값은 `Sender.Config` 가 아니라 `internal/sender/health.go` 의 패키지 상수
+(`defaultRateLimitThreshold`, `defaultRateLimitWindow`)입니다 — 인증/TLS/connect 실패에 쓰는
+`TransportFailThreshold`/`TransportProbeInterval` 과 달리 테넌트별로 노출되어 있지 않습니다.
 
 ## 레이트리밋 (§8.2)
 

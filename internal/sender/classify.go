@@ -75,7 +75,7 @@ var rules = []rule{
 		codes: []int{450, 451, 452},
 		contains: []string{
 			"rate", "too many", "too quickly", "throttl", "slow down",
-			"try again later", "deferred due to",
+			"deferred due to",
 		},
 		class: store.ErrorClassRateLimited,
 	}, {

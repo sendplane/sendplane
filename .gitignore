@@ -50,3 +50,7 @@ cmd/sendplane/console/dist/*
 *.swo
 *~
 .DS_Store
+
+# agent worktrees and load-test artifacts
+.claude/worktrees/
+report.json

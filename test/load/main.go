@@ -121,13 +121,25 @@ func run(args []string) error {
 	return nil
 }
 
+// defaultDSN builds the --dsn default from LOAD_PG_PORT, the same variable
+// docker-compose.yml uses to publish Postgres (${LOAD_PG_PORT:-15432}). A
+// hardcoded 15432 default here silently disconnects the report's final
+// database queries whenever the stack was started on a different port.
+func defaultDSN() string {
+	port := os.Getenv("LOAD_PG_PORT")
+	if port == "" {
+		port = "15432"
+	}
+	return fmt.Sprintf("postgres://sendplane:sendplane@127.0.0.1:%s/sendplane?sslmode=disable", port)
+}
+
 func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("loadgen", flag.ContinueOnError)
 	var o options
 
 	fs.StringVar(&o.api, "api", "http://127.0.0.1:18080", "base URL of the control API")
 	fs.StringVar(&o.chaosStats, "chaos-stats", "http://127.0.0.1:19090", "base URL of the chaos-smtp stats listener")
-	fs.StringVar(&o.dsn, "dsn", "postgres://sendplane:sendplane@127.0.0.1:15432/sendplane?sslmode=disable",
+	fs.StringVar(&o.dsn, "dsn", defaultDSN(),
 		"postgres DSN used for the database-size measurement; empty skips it")
 
 	fs.IntVar(&o.recipients, "recipients", 1_000_000, "number of recipients to ingest and send to")
@@ -812,6 +824,13 @@ func percentile(sorted []float64, p float64) float64 {
 	return sorted[i]
 }
 
+// measureDB connects to Postgres to fill in the report's database-size and
+// delivery_attempt-row numbers. These are report-only (measureDB never calls
+// r.fail): a connection or query failure here must not fail an otherwise
+// passing run, but it also must not be mistaken for a clean run that
+// genuinely wrote nothing. Silently leaving DBSizeBytes/AttemptRows at zero
+// looks exactly like a healthy run against an empty freshly-created database,
+// so every failure path logs an explicit WARNING line instead.
 func (r *runner) measureDB(ctx context.Context) {
 	if r.opt.dsn == "" {
 		return
@@ -820,21 +839,25 @@ func (r *runner) measureDB(ctx context.Context) {
 	defer cancel()
 	conn, err := pgx.Connect(ctx, r.opt.dsn)
 	if err != nil {
-		r.logf("database size unavailable: %v", err)
+		r.logf("WARNING: database size and delivery_attempt row count unavailable: could not connect to %s: %v", r.opt.dsn, err)
 		return
 	}
 	defer func() { _ = conn.Close(context.Background()) }()
 
 	var size int64
 	if err := conn.QueryRow(ctx, "SELECT pg_database_size(current_database())").Scan(&size); err != nil {
-		r.logf("database size unavailable: %v", err)
-		return
+		r.logf("WARNING: database size query failed: %v", err)
+	} else {
+		r.rep.DBSizeBytes = size
 	}
-	r.rep.DBSizeBytes = size
+
 	var attempts int64
-	if err := conn.QueryRow(ctx, "SELECT count(*) FROM delivery_attempt").Scan(&attempts); err == nil {
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM delivery_attempt").Scan(&attempts); err != nil {
+		r.logf("WARNING: delivery_attempt row count query failed: %v", err)
+	} else {
 		r.rep.AttemptRows = attempts
 	}
+
 	r.logf("database size %.1f MiB, %d delivery_attempts rows (expected %d for a clean run)",
-		float64(size)/(1<<20), r.rep.AttemptRows, r.exp.Attempts)
+		float64(r.rep.DBSizeBytes)/(1<<20), r.rep.AttemptRows, r.exp.Attempts)
 }

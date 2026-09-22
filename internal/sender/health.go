@@ -14,9 +14,24 @@ import (
 // probe every TransportProbeInterval puts it back. A rate_limited reply is not
 // a fault, it is a signal to slow down, so it moves the transport to cooldown
 // (visible in the UI) while the rate limiter does the actual work.
+//
+// A single rate_limited reply must not flip the status: with a few percent of
+// deliveries deferred, one-strike cooldown and one-success recovery flap the
+// status (and its DB write and outbox event) forever. Cooldown instead needs
+// rateLimitThreshold rate_limited replies within rateLimitWindow, and healthy
+// is only restored once the window has been clear of them for a full
+// rateLimitWindow.
 type healthTracker struct {
 	threshold  int
 	probeEvery time.Duration
+
+	// rateLimitThreshold and rateLimitWindow are not threaded through Config:
+	// they are package constants (defaultRateLimitThreshold,
+	// defaultRateLimitWindow) rather than Sender.Config fields, because wiring
+	// them through Config means touching sender.go, which is out of scope for
+	// this change.
+	rateLimitThreshold int
+	rateLimitWindow    time.Duration
 
 	mu sync.Mutex
 	m  map[string]*transportHealth
@@ -28,13 +43,30 @@ type transportHealth struct {
 	failures    int
 	status      store.TransportStatus
 	nextProbe   time.Time
+	// rateLimits holds the instants of recent rate_limited replies, pruned to
+	// rateLimitWindow on every touch (fail and success both prune it, so a
+	// long-idle transport does not carry a stale window forward).
+	rateLimits []time.Time
 }
 
 // probeTarget names a transport whose probe is due.
 type probeTarget struct{ tenantID, transportID string }
 
+// Defaults for the rate-limited cooldown window (architecture 8.3). Kept as
+// package constants rather than Config fields: see the healthTracker comment.
+const (
+	defaultRateLimitThreshold = 3
+	defaultRateLimitWindow    = time.Minute
+)
+
 func newHealthTracker(threshold int, probeEvery time.Duration) *healthTracker {
-	return &healthTracker{threshold: threshold, probeEvery: probeEvery, m: map[string]*transportHealth{}}
+	return &healthTracker{
+		threshold:          threshold,
+		probeEvery:         probeEvery,
+		rateLimitThreshold: defaultRateLimitThreshold,
+		rateLimitWindow:    defaultRateLimitWindow,
+		m:                  map[string]*transportHealth{},
+	}
 }
 
 func healthKey(tenantID, transportID string) string { return tenantID + "/" + transportID }
@@ -78,7 +110,9 @@ func (h *healthTracker) fail(tenantID, transportID string, class store.ErrorClas
 		th.nextProbe = now.Add(h.probeEvery)
 		return store.TransportUnhealthy, true
 	case store.ErrorClassRateLimited:
-		if th.status == store.TransportHealthy {
+		th.rateLimits = pruneRateLimits(th.rateLimits, now, h.rateLimitWindow)
+		th.rateLimits = append(th.rateLimits, now)
+		if th.status == store.TransportHealthy && len(th.rateLimits) >= h.rateLimitThreshold {
 			th.status = store.TransportCooldown
 			return store.TransportCooldown, true
 		}
@@ -90,17 +124,47 @@ func (h *healthTracker) fail(tenantID, transportID string, class store.ErrorClas
 }
 
 // success clears the failure run and returns the status to persist when the
-// transport was not healthy before.
-func (h *healthTracker) success(tenantID, transportID string, _ time.Time) (store.TransportStatus, bool) {
+// transport recovered.
+//
+// An unhealthy transport (auth/TLS/connect) recovers unconditionally: it only
+// gets here after a successful probe, which is itself the signal. A cooldown
+// transport (rate_limited) recovers only once its rate_limited window is
+// clear: a success in the middle of a burst of deferrals says nothing about
+// whether the burst is over.
+func (h *healthTracker) success(tenantID, transportID string, now time.Time) (store.TransportStatus, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	th := h.state(tenantID, transportID)
 	th.failures = 0
-	if th.status == store.TransportHealthy {
+	switch th.status {
+	case store.TransportHealthy:
 		return 0, false
+	case store.TransportCooldown:
+		th.rateLimits = pruneRateLimits(th.rateLimits, now, h.rateLimitWindow)
+		if len(th.rateLimits) > 0 {
+			return 0, false
+		}
+		th.status = store.TransportHealthy
+		return store.TransportHealthy, true
+	default: // store.TransportUnhealthy
+		th.status = store.TransportHealthy
+		return store.TransportHealthy, true
 	}
-	th.status = store.TransportHealthy
-	return store.TransportHealthy, true
+}
+
+// pruneRateLimits drops instants older than window, relative to now. Entries
+// are appended in call order so they are already non-decreasing; this still
+// filters rather than assumes it, since fail and success both call it and a
+// clock is free to be handed non-monotonic values in tests.
+func pruneRateLimits(ts []time.Time, now time.Time, window time.Duration) []time.Time {
+	cutoff := now.Add(-window)
+	out := ts[:0]
+	for _, t := range ts {
+		if !t.Before(cutoff) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // due lists the unhealthy transports whose probe interval has elapsed, and

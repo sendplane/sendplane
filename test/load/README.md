@@ -29,9 +29,13 @@ control 18080, chaos-smtp stats 19090** 을 씁니다. 이미 쓰는 포트가 �
 
 ```sh
 LOAD_PG_PORT=15440 docker compose -f test/load/docker-compose.yml up -d
-go run ./test/load --recipients=100000 --kill-sender \
-  --dsn='postgres://sendplane:sendplane@127.0.0.1:15440/sendplane?sslmode=disable'
+go run ./test/load --recipients=100000 --kill-sender
 ```
+
+`--dsn` 의 기본값은 하드코딩된 15432 가 아니라 `LOAD_PG_PORT`(compose 파일과 같은 변수, 기본 15432)로
+빌드됩니다. `LOAD_PG_PORT` 를 export 한 쉘에서 그대로 `go run ./test/load` 를 돌리면 포트가 맞고,
+`--dsn` 을 직접 넘기면 그 값이 우선합니다. 최종 두 쿼리(DB 크기, `delivery_attempt` 행 수)가 연결
+실패나 쿼리 실패로 값을 못 채우면 `report.json` 에 0 을 조용히 남기는 대신 `WARNING:` 로그 줄을 남깁니다.
 
 Compose 플러그인(`docker compose`) 대신 단독 바이너리만 있는 머신에서는 `--compose-cmd=docker-compose`
 를 넘겨야 SIGKILL 단계가 동작합니다.
@@ -91,7 +95,7 @@ sender 는 `X-Sendplane-Attempt` 헤더로 시도 번호를 실어 보냅니다.
 
 | chaos 응답 | 분류 | 결과 |
 |---|---|---|
-| `451 4.3.0 Temporary local problem, try again later` | `rate_limited`(`ratelimit.4xx.text` 규칙이 "try again later" 로 먼저 잡습니다) | attempt 소비, `deferred` |
+| `451 4.3.0 Temporary local problem, try again later` | `transient`(`transient.4xx` 규칙. "try again later" 는 Postfix/Exim 의 일반적인 일시 실패 문구라 `ratelimit.4xx.text` 규칙에서 뺐습니다 — classify.go) | attempt 소비, `deferred` |
 | DATA 중 연결 끊김 | `transient`(`transient.connection`) | attempt 소비, `deferred` |
 | `550 5.2.0 Mailbox unavailable` | `permanent`(`permanent.5xx`) | 즉시 `failed`, attempt 소비 안 함 |
 | `250` | — | `sent` |
