@@ -59,6 +59,12 @@ type Outcome struct {
 
 // Options configures a Processor.
 type Options struct {
+	// Provider is what the platform paths need: resolving a delivery ID to its
+	// tenant for a shared bounce mailbox (HandlePlatform), and reaching the
+	// system tenant's suppression list when a bounce came back through a
+	// shared transport. Nil disables both, which is right for a deployment
+	// with no platform resources.
+	Provider store.Provider
 	// MaxRawBytes caps a retained raw message. Zero uses DefaultMaxRawBytes.
 	// Whether the raw message is kept at all is the tenant's
 	// TenantSettings.BounceRetainRaw (architecture 10), not an option here:
@@ -245,19 +251,24 @@ func (p *Processor) Handle(ctx context.Context, st store.Store, tenantID string,
 	out.Processed = true
 	out.NewStatus = status
 
-	if settings.SuppressionEnabled && d.Lane != store.LaneProbe {
-		// Probe deliveries are excluded from suppression (ADR-0012): a
-		// loopback address that bounces is a health problem, not a recipient
-		// to stop mailing.
-		if err := st.Suppressions().Upsert(ctx, &store.Suppression{
-			EmailNorm:        d.EmailNorm,
-			Reason:           reason,
-			SourceDeliveryID: d.ID,
-			CreatedAt:        now,
-		}); err != nil {
-			return out, fmt.Errorf("bounce: suppress %s: %w", d.EmailNorm, err)
+	// Probe deliveries are excluded from suppression (ADR-0012): a loopback
+	// address that bounces is a health problem, not a recipient to stop
+	// mailing.
+	if d.Lane != store.LaneProbe {
+		if settings.SuppressionEnabled {
+			if err := st.Suppressions().Upsert(ctx, &store.Suppression{
+				EmailNorm:        d.EmailNorm,
+				Reason:           reason,
+				SourceDeliveryID: d.ID,
+				CreatedAt:        now,
+			}); err != nil {
+				return out, fmt.Errorf("bounce: suppress %s: %w", d.EmailNorm, err)
+			}
+			out.Suppressed = true
 		}
-		out.Suppressed = true
+		if err := p.suppressPlatform(ctx, st, d, reason, now); err != nil {
+			return out, err
+		}
 	}
 
 	if err := p.enqueueEvent(ctx, st, d, parsed, eventType, status, out.Suppressed, now); err != nil {

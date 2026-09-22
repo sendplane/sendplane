@@ -20,6 +20,19 @@ type Options struct {
 	Hooks   Hooks
 	Secrets SecretCipher // at-rest encryption for SMTP/IMAP passwords and DKIM keys
 	Limits  Limits       // zero fields fall back to DefaultLimits
+	// Platform is the operator's shared sending infrastructure: the
+	// transports, domains, From identities and mailboxes it runs for its
+	// tenants (ADR-0017, architecture 5.4).
+	//
+	// It is configuration and is never written to the store. New validates it
+	// — unique IDs, resolvable references, parseable From templates — and
+	// wraps Options.Store in the overlay that resolves it, so a shared sender
+	// shows up in every tenant's GET /senders while its relay credentials
+	// exist only in this struct.
+	//
+	// The zero value is a deployment with no shared resources, which is every
+	// single-tenant one: nothing is wrapped and nothing costs anything.
+	Platform Platform
 	// Probe configures the loopback health probe (architecture 11). It is off
 	// by default: probing needs mailboxes the deployment owns, and a trigger
 	// nothing collects is worse than none at all.
@@ -58,6 +71,25 @@ type (
 	// mailboxes themselves are tenant rows managed through the API.
 	ProbeConfig = host.ProbeConfig
 
+	// Platform is the operator's shared sending infrastructure (ADR-0017).
+	Platform = host.Platform
+	// PlatformTransport is a shared SMTP account.
+	PlatformTransport = host.PlatformTransport
+	// PlatformDomain is a shared sending domain.
+	PlatformDomain = host.PlatformDomain
+	// PlatformSender is a shared From identity with templated addresses.
+	PlatformSender = host.PlatformSender
+	// PlatformProbeMailbox is a shared loopback probe mailbox.
+	PlatformProbeMailbox = host.PlatformProbeMailbox
+	// PlatformBounceMailbox is a shared bounce mailbox.
+	PlatformBounceMailbox = host.PlatformBounceMailbox
+	// UseKind is what a sender is being used for (campaign, transactional,
+	// probe): the vocabulary of the sender-use policy.
+	UseKind = host.UseKind
+	// SenderUse is one request to send something with a sender, handed to
+	// Hooks.SenderPolicy.
+	SenderUse = host.SenderUse
+
 	// Hooks are the optional Go escape hatches.
 	Hooks = host.Hooks
 	// RecipientContext is the per-recipient data available to hooks.
@@ -89,7 +121,22 @@ var (
 	ErrForbidden = host.ErrForbidden
 	// ErrSkip is returned by Hooks.BeforeSend to drop a message.
 	ErrSkip = host.ErrSkip
+	// ErrSenderUseDenied is what a Hooks.SenderPolicy returns to refuse a
+	// send; the API answers 403 sender_use_denied with its message.
+	ErrSenderUseDenied = host.ErrSenderUseDenied
 )
+
+// The sender uses a Hooks.SenderPolicy discriminates on.
+const (
+	UseCampaign      = host.UseCampaign
+	UseTransactional = host.UseTransactional
+	UseProbe         = host.UseProbe
+)
+
+// DefaultSenderPolicy is the sender-use policy applied when Hooks.SenderPolicy
+// is nil: a shared sender may only be used for what its configuration's
+// `uses` list names. It is exported so that a host hook can chain it.
+var DefaultSenderPolicy = host.DefaultSenderPolicy
 
 // The Action constants of architecture 3, one per x-sendplane-action value in
 // api/openapi.yaml.

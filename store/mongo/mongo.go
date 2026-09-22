@@ -193,6 +193,28 @@ func (p *Provider) Tenants(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// LookupDeliveryTenant answers with one _id lookup: shared mode keeps every
+// tenant's deliveries in one collection (store.Provider).
+func (p *Provider) LookupDeliveryTenant(ctx context.Context, deliveryID string) (string, error) {
+	if deliveryID == "" {
+		return "", fmt.Errorf("%w: empty delivery id", store.ErrInvalid)
+	}
+	var doc struct {
+		TenantID string `bson:"tenant_id"`
+	}
+	err := p.db.Collection(collDelivery).
+		FindOne(ctx, bson.D{{Key: "_id", Value: deliveryID}},
+			options.FindOne().SetProjection(bson.D{{Key: "tenant_id", Value: 1}})).
+		Decode(&doc)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return "", fmt.Errorf("%w: delivery %s", store.ErrNotFound, deliveryID)
+		}
+		return "", fmt.Errorf("mongo: lookup delivery tenant: %w", err)
+	}
+	return doc.TenantID, nil
+}
+
 // distinctTenants adds the tenants matching filter in one collection to seen,
 // skipping the system scope: it holds the leader lock, never work.
 func (p *Provider) distinctTenants(ctx context.Context, seen map[string]bool, coll string, filter bson.D) error {

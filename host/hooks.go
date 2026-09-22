@@ -33,6 +33,46 @@ type Hooks struct {
 	// Events receives delivery/campaign/transport events. Default: the outbox
 	// dispatches to the tenant's webhook URL.
 	Events EventSink
+
+	// TenantVars validates and completes the tenant attributes one request
+	// carried (`tenant_vars` on a campaign, a message or a preview). What it
+	// returns is what gets stored on the campaign or delivery and bound as
+	// `tenant` in every template, including a shared sender's From templates.
+	//
+	// It exists because sendplane has no tenant registry: it stores no tenant
+	// name, slug or plan, on purpose (ADR-0017). The host's own database is
+	// the authority, so the host is the only thing that can say whether
+	// "slug: acme" is this tenant's slug. A typical implementation ignores
+	// `requested` entirely and returns the attributes it looked up itself,
+	// which is what stops one tenant from sending as another:
+	//
+	//	TenantVars: func(ctx context.Context, _ *sendplane.Principal, tenantID string,
+	//	    _ map[string]any) (map[string]any, error) {
+	//	    t, err := db.Tenant(ctx, tenantID)
+	//	    if err != nil {
+	//	        return nil, err
+	//	    }
+	//	    return map[string]any{"name": t.Name, "slug": t.Slug, "plan": t.Plan}, nil
+	//	}
+	//
+	// Default (nil): pass-through, i.e. the request's own variables. That is
+	// right for a single-tenant deployment and a trust decision anywhere else.
+	// Returning an error rejects the request: wrap ErrForbidden for a 403,
+	// anything else is a 422.
+	TenantVars func(ctx context.Context, p *Principal, tenantID string, requested map[string]any) (map[string]any, error)
+
+	// SenderPolicy decides whether a sender may be used for this kind of
+	// send. It is called on POST /campaigns (create and start), POST /messages
+	// and a probe trigger, before anything is queued.
+	//
+	// Default (nil): DefaultSenderPolicy, which enforces a platform sender's
+	// configured `uses` list. A hook replaces that rather than adding to it,
+	// so a host that wants both chains them (see DefaultSenderPolicy).
+	//
+	// Any non-nil error is a denial and becomes 403 sender_use_denied with the
+	// error's message, so the message is part of the API and should say what
+	// would be allowed.
+	SenderPolicy func(ctx context.Context, u SenderUse) error
 }
 
 // RecipientContext is the per-recipient data available to hooks.

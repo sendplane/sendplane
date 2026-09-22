@@ -2,6 +2,7 @@ package storetest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -1154,4 +1155,49 @@ func testTimePrecision(t *testing.T, p store.Provider) {
 	})
 	must(t, "Claim when due", err)
 	eqIDs(t, "due row", claimIDs(batch), []string{d.ID})
+}
+
+// testLookupDeliveryTenant covers Provider.LookupDeliveryTenant: the bounce
+// path's only way back from a VERP address to a tenant, since a shared bounce
+// mailbox's mail may belong to any of them (architecture 10).
+func testLookupDeliveryTenant(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	s, tenantID := fresh(t, p)
+
+	if _, err := p.LookupDeliveryTenant(ctx, store.NewID()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("LookupDeliveryTenant of an unknown id: got %v, want ErrNotFound", err)
+	}
+
+	now := time.Now().UTC()
+	mk := func(email string) store.Delivery {
+		return store.Delivery{
+			ID: store.NewID(), VersionID: "v", SenderID: "s",
+			Lane: store.LaneTransactional, Status: store.DeliveryQueued,
+			Email: email, EmailNorm: email, NextAttemptAt: now,
+		}
+	}
+
+	d := mk("lookup@example.com")
+	n, err := s.Deliveries().InsertBatch(ctx, []store.Delivery{d})
+	must(t, "InsertBatch", err)
+	eq(t, "inserted", n, 1)
+
+	got, err := p.LookupDeliveryTenant(ctx, d.ID)
+	must(t, "LookupDeliveryTenant", err)
+	eq(t, "tenant", got, tenantID)
+
+	// A second tenant's delivery resolves to that tenant, not to the first:
+	// the lookup is by ID alone and must not depend on call order.
+	s2, tenant2 := fresh(t, p)
+	d2 := mk("lookup@example.com")
+	_, err = s2.Deliveries().InsertBatch(ctx, []store.Delivery{d2})
+	must(t, "InsertBatch other tenant", err)
+
+	got, err = p.LookupDeliveryTenant(ctx, d2.ID)
+	must(t, "LookupDeliveryTenant other tenant", err)
+	eq(t, "other tenant", got, tenant2)
+
+	got, err = p.LookupDeliveryTenant(ctx, d.ID)
+	must(t, "LookupDeliveryTenant first tenant again", err)
+	eq(t, "first tenant", got, tenantID)
 }

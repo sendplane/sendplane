@@ -180,23 +180,28 @@ func (e DeliveryUnsubscribeNoticeSource) Valid() bool {
 
 // Defines values for ErrorCode.
 const (
-	ErrorCodeDuplicate            ErrorCode = "duplicate"
-	ErrorCodeForbidden            ErrorCode = "forbidden"
-	ErrorCodeInternal             ErrorCode = "internal"
-	ErrorCodeInvalidCursor        ErrorCode = "invalid_cursor"
-	ErrorCodeInvalidRequest       ErrorCode = "invalid_request"
-	ErrorCodeInvalidState         ErrorCode = "invalid_state"
-	ErrorCodeLimitExceeded        ErrorCode = "limit_exceeded"
-	ErrorCodeMissingI18nKeys      ErrorCode = "missing_i18n_keys"
-	ErrorCodeNotFound             ErrorCode = "not_found"
-	ErrorCodePayloadTooLarge      ErrorCode = "payload_too_large"
-	ErrorCodePreconditionFailed   ErrorCode = "precondition_failed"
-	ErrorCodeRateLimited          ErrorCode = "rate_limited"
-	ErrorCodeRenderFailed         ErrorCode = "render_failed"
-	ErrorCodeTemplateNotPublished ErrorCode = "template_not_published"
-	ErrorCodeUnauthenticated      ErrorCode = "unauthenticated"
-	ErrorCodeValidationFailed     ErrorCode = "validation_failed"
-	ErrorCodeVersionConflict      ErrorCode = "version_conflict"
+	ErrorCodeDuplicate              ErrorCode = "duplicate"
+	ErrorCodeForbidden              ErrorCode = "forbidden"
+	ErrorCodeFromDomainNotOwned     ErrorCode = "from_domain_not_owned"
+	ErrorCodeInternal               ErrorCode = "internal"
+	ErrorCodeInvalidCursor          ErrorCode = "invalid_cursor"
+	ErrorCodeInvalidRequest         ErrorCode = "invalid_request"
+	ErrorCodeInvalidState           ErrorCode = "invalid_state"
+	ErrorCodeLimitExceeded          ErrorCode = "limit_exceeded"
+	ErrorCodeMissingI18nKeys        ErrorCode = "missing_i18n_keys"
+	ErrorCodeNotFound               ErrorCode = "not_found"
+	ErrorCodePayloadTooLarge        ErrorCode = "payload_too_large"
+	ErrorCodePlatformReadOnly       ErrorCode = "platform_read_only"
+	ErrorCodePreconditionFailed     ErrorCode = "precondition_failed"
+	ErrorCodeRateLimited            ErrorCode = "rate_limited"
+	ErrorCodeRenderFailed           ErrorCode = "render_failed"
+	ErrorCodeSenderUseDenied        ErrorCode = "sender_use_denied"
+	ErrorCodeTemplateNotPublished   ErrorCode = "template_not_published"
+	ErrorCodeTenantVarsMissing      ErrorCode = "tenant_vars_missing"
+	ErrorCodeTransportNotAssignable ErrorCode = "transport_not_assignable"
+	ErrorCodeUnauthenticated        ErrorCode = "unauthenticated"
+	ErrorCodeValidationFailed       ErrorCode = "validation_failed"
+	ErrorCodeVersionConflict        ErrorCode = "version_conflict"
 )
 
 // Valid indicates whether the value is a known member of the ErrorCode enum.
@@ -205,6 +210,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeDuplicate:
 		return true
 	case ErrorCodeForbidden:
+		return true
+	case ErrorCodeFromDomainNotOwned:
 		return true
 	case ErrorCodeInternal:
 		return true
@@ -222,13 +229,21 @@ func (e ErrorCode) Valid() bool {
 		return true
 	case ErrorCodePayloadTooLarge:
 		return true
+	case ErrorCodePlatformReadOnly:
+		return true
 	case ErrorCodePreconditionFailed:
 		return true
 	case ErrorCodeRateLimited:
 		return true
 	case ErrorCodeRenderFailed:
 		return true
+	case ErrorCodeSenderUseDenied:
+		return true
 	case ErrorCodeTemplateNotPublished:
+		return true
+	case ErrorCodeTenantVarsMissing:
+		return true
+	case ErrorCodeTransportNotAssignable:
 		return true
 	case ErrorCodeUnauthenticated:
 		return true
@@ -324,19 +339,19 @@ func (e I18nKeyUsageUsedIn) Valid() bool {
 
 // Defines values for Lane.
 const (
-	Bulk          Lane = "bulk"
-	Probe         Lane = "probe"
-	Transactional Lane = "transactional"
+	LaneBulk          Lane = "bulk"
+	LaneProbe         Lane = "probe"
+	LaneTransactional Lane = "transactional"
 )
 
 // Valid indicates whether the value is a known member of the Lane enum.
 func (e Lane) Valid() bool {
 	switch e {
-	case Bulk:
+	case LaneBulk:
 		return true
-	case Probe:
+	case LaneProbe:
 		return true
-	case Transactional:
+	case LaneTransactional:
 		return true
 	default:
 		return false
@@ -478,6 +493,27 @@ func (e ProbeRunFolder) Valid() bool {
 	}
 }
 
+// Defines values for SenderUses.
+const (
+	SenderUsesCampaign      SenderUses = "campaign"
+	SenderUsesProbe         SenderUses = "probe"
+	SenderUsesTransactional SenderUses = "transactional"
+)
+
+// Valid indicates whether the value is a known member of the SenderUses enum.
+func (e SenderUses) Valid() bool {
+	switch e {
+	case SenderUsesCampaign:
+		return true
+	case SenderUsesProbe:
+		return true
+	case SenderUsesTransactional:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ServiceHealthStatus.
 const (
 	ServiceHealthStatusDegraded ServiceHealthStatus = "degraded"
@@ -508,6 +544,24 @@ func (e ServiceHealthStore) Valid() bool {
 	case ServiceHealthStoreError:
 		return true
 	case ServiceHealthStoreOk:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SettingSource.
+const (
+	SettingSourcePlatform SettingSource = "platform"
+	SettingSourceTenant   SettingSource = "tenant"
+)
+
+// Valid indicates whether the value is a known member of the SettingSource enum.
+func (e SettingSource) Valid() bool {
+	switch e {
+	case SettingSourcePlatform:
+		return true
+	case SettingSourceTenant:
 		return true
 	default:
 		return false
@@ -706,20 +760,42 @@ type BounceMailbox struct {
 	// Health The last reachability check of the account, written by the bounce
 	// poller, the probe collector, the `mailbox-check` leader loop and the
 	// test endpoints (architecture 11.5).
-	Health *MailboxHealth      `json:"health,omitempty"`
-	Host   string              `json:"host"`
-	Id     *openapi_types.UUID `json:"id,omitempty"`
-	Name   string              `json:"name"`
-	Port   int32               `json:"port"`
+	Health *MailboxHealth `json:"health,omitempty"`
+	Host   string         `json:"host"`
+
+	// Id An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	Id   ResourceId `json:"id"`
+	Name string     `json:"name"`
+	Port int32      `json:"port"`
 
 	// Protocol Receiving protocol, `imap` when omitted. POP3 cannot move messages to
 	// another folder, so `after_process` may not be `move:<folder>` on a POP3
 	// mailbox.
-	Protocol  *MailboxProtocol `json:"protocol,omitempty"`
-	Tls       *TLSMode         `json:"tls,omitempty"`
-	UpdatedAt *time.Time       `json:"updated_at,omitempty"`
-	Username  *string          `json:"username,omitempty"`
-	Version   *int64           `json:"version,omitempty"`
+	Protocol *MailboxProtocol `json:"protocol,omitempty"`
+
+	// Shared True for a *platform* resource: one the operator configured rather
+	// than a tenant created (ADR-0017). It is read-only in every sense —
+	// the field is never accepted on a write, and neither is the object
+	// (`403 platform_read_only`).
+	Shared    *Shared    `json:"shared,omitempty"`
+	Tls       *TLSMode   `json:"tls,omitempty"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	Username  *string    `json:"username,omitempty"`
+	Version   *int64     `json:"version,omitempty"`
 }
 
 // BounceMailboxInput defines model for BounceMailboxInput.
@@ -804,17 +880,38 @@ type Campaign struct {
 	Name          string              `json:"name"`
 
 	// ScheduleAt Absent means "start now".
-	ScheduleAt *time.Time         `json:"schedule_at,omitempty"`
-	SenderId   openapi_types.UUID `json:"sender_id"`
-	StartedAt  *time.Time         `json:"started_at,omitempty"`
-	Stats      *CampaignStats     `json:"stats,omitempty"`
-	Status     CampaignStatus     `json:"status"`
+	ScheduleAt *time.Time `json:"schedule_at,omitempty"`
+
+	// SenderId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	SenderId  ResourceId     `json:"sender_id"`
+	StartedAt *time.Time     `json:"started_at,omitempty"`
+	Stats     *CampaignStats `json:"stats,omitempty"`
+	Status    CampaignStatus `json:"status"`
 
 	// TemplateId The template the campaign was created from, when no version was
 	// pinned. Start resolves it to the template's published version and
 	// fills in `version_id`.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
-	UpdatedAt  *time.Time          `json:"updated_at,omitempty"`
+
+	// TenantVars The tenant attributes this campaign was created with, after the
+	// host's `TenantVars` hook. Bound as `tenant` in every template and,
+	// for a shared sender, what its From templates resolved from.
+	TenantVars *Vars      `json:"tenant_vars,omitempty"`
+	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
 
 	// Vars Campaign-wide variables, merged under each recipient's own.
 	Vars    *Vars  `json:"vars,omitempty"`
@@ -827,15 +924,51 @@ type Campaign struct {
 
 // CampaignInput defines model for CampaignInput.
 type CampaignInput struct {
-	DefaultLocale *string            `json:"default_locale,omitempty"`
-	Name          string             `json:"name"`
-	ScheduleAt    *time.Time         `json:"schedule_at,omitempty"`
-	SenderId      openapi_types.UUID `json:"sender_id"`
+	DefaultLocale *string    `json:"default_locale,omitempty"`
+	Name          string     `json:"name"`
+	ScheduleAt    *time.Time `json:"schedule_at,omitempty"`
+
+	// SenderId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	SenderId ResourceId `json:"sender_id"`
 
 	// TemplateId Resolve the version from this template's published one, at start
 	// rather than here: a template that is not published yet is accepted
 	// and start fails if it still is not.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
+
+	// TenantVars The tenant's own attributes for this request: name, slug, plan,
+	// whatever the operator's `TenantVars` hook admits.
+	//
+	// They travel per request because sendplane keeps no tenant registry: it
+	// stores no tenant name and no tenant slug, so the host's own database
+	// stays the single authority and nothing here can go stale against it
+	// (ADR-0017). What arrives here is *requested*; the host's hook decides
+	// what is actually used, and a typical hook ignores the request and
+	// substitutes the attributes it looked up itself, which is what stops one
+	// tenant from sending as another.
+	//
+	// They are bound as `tenant` in every template (`{{ tenant.name }}`) and
+	// are what a shared sender's From templates resolve from. A variable such
+	// a template reads and this does not supply is
+	// `422 tenant_vars_missing`, listing the keys.
+	//
+	//
+	// Examples: {"name":"Acme, Inc.","plan":"pro","slug":"acme"}
+	TenantVars *TenantVars `json:"tenant_vars,omitempty"`
 
 	// Vars Free-form Liquid variables. Capped per recipient by `Limits`
 	// (8 KiB by default) and rejected with 422 `limit_exceeded` beyond it.
@@ -891,15 +1024,51 @@ type CampaignStatus string
 
 // CampaignUpdate Campaign replacement carrying the read version.
 type CampaignUpdate struct {
-	DefaultLocale *string            `json:"default_locale,omitempty"`
-	Name          string             `json:"name"`
-	ScheduleAt    *time.Time         `json:"schedule_at,omitempty"`
-	SenderId      openapi_types.UUID `json:"sender_id"`
+	DefaultLocale *string    `json:"default_locale,omitempty"`
+	Name          string     `json:"name"`
+	ScheduleAt    *time.Time `json:"schedule_at,omitempty"`
+
+	// SenderId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	SenderId ResourceId `json:"sender_id"`
 
 	// TemplateId Resolve the version from this template's published one, at start
 	// rather than here: a template that is not published yet is accepted
 	// and start fails if it still is not.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
+
+	// TenantVars The tenant's own attributes for this request: name, slug, plan,
+	// whatever the operator's `TenantVars` hook admits.
+	//
+	// They travel per request because sendplane keeps no tenant registry: it
+	// stores no tenant name and no tenant slug, so the host's own database
+	// stays the single authority and nothing here can go stale against it
+	// (ADR-0017). What arrives here is *requested*; the host's hook decides
+	// what is actually used, and a typical hook ignores the request and
+	// substitutes the attributes it looked up itself, which is what stops one
+	// tenant from sending as another.
+	//
+	// They are bound as `tenant` in every template (`{{ tenant.name }}`) and
+	// are what a shared sender's From templates resolve from. A variable such
+	// a template reads and this does not supply is
+	// `422 tenant_vars_missing`, listing the keys.
+	//
+	//
+	// Examples: {"name":"Acme, Inc.","plan":"pro","slug":"acme"}
+	TenantVars *TenantVars `json:"tenant_vars,omitempty"`
 
 	// Vars Free-form Liquid variables. Capped per recipient by `Limits`
 	// (8 KiB by default) and rejected with 422 `limit_exceeded` beyond it.
@@ -960,16 +1129,38 @@ type Delivery struct {
 	Priority      *int32     `json:"priority,omitempty"`
 
 	// RetryGen Bumped by a manual retry so the attempt history stays intact.
-	RetryGen *int32             `json:"retry_gen,omitempty"`
-	SenderId openapi_types.UUID `json:"sender_id"`
-	SentAt   *time.Time         `json:"sent_at,omitempty"`
+	RetryGen *int32 `json:"retry_gen,omitempty"`
+
+	// SenderId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	SenderId ResourceId `json:"sender_id"`
+	SentAt   *time.Time `json:"sent_at,omitempty"`
 
 	// Status Delivery state machine (architecture 4.1). `bounced` is only reachable
 	// from `sent`, asynchronously, via a hard DSN.
-	Status         DeliveryStatus `json:"status"`
-	UnsubscribeUrl *string        `json:"unsubscribe_url,omitempty"`
-	UnsubscribedAt *time.Time     `json:"unsubscribed_at,omitempty"`
-	UpdatedAt      *time.Time     `json:"updated_at,omitempty"`
+	Status DeliveryStatus `json:"status"`
+
+	// TenantVars The tenant attributes this delivery was sent with. Present only on
+	// a delivery that has no campaign to inherit them from (a
+	// transactional send or a probe); a campaign delivery reads its
+	// campaign's.
+	TenantVars     *Vars      `json:"tenant_vars,omitempty"`
+	UnsubscribeUrl *string    `json:"unsubscribe_url,omitempty"`
+	UnsubscribedAt *time.Time `json:"unsubscribed_at,omitempty"`
+	UpdatedAt      *time.Time `json:"updated_at,omitempty"`
 
 	// Vars Free-form Liquid variables. Capped per recipient by `Limits`
 	// (8 KiB by default) and rejected with 422 `limit_exceeded` beyond it.
@@ -989,13 +1180,29 @@ type DeliveryAttempt struct {
 	Error        *string `json:"error,omitempty"`
 
 	// ErrorClass Normalized SMTP failure classification (architecture 4.2).
-	ErrorClass  *ErrorClass         `json:"error_class,omitempty"`
-	FinishedAt  *time.Time          `json:"finished_at,omitempty"`
-	Id          openapi_types.UUID  `json:"id"`
-	RetryGen    *int32              `json:"retry_gen,omitempty"`
-	SmtpCode    *int32              `json:"smtp_code,omitempty"`
-	StartedAt   *time.Time          `json:"started_at,omitempty"`
-	TransportId *openapi_types.UUID `json:"transport_id,omitempty"`
+	ErrorClass *ErrorClass        `json:"error_class,omitempty"`
+	FinishedAt *time.Time         `json:"finished_at,omitempty"`
+	Id         openapi_types.UUID `json:"id"`
+	RetryGen   *int32             `json:"retry_gen,omitempty"`
+	SmtpCode   *int32             `json:"smtp_code,omitempty"`
+	StartedAt  *time.Time         `json:"started_at,omitempty"`
+
+	// TransportId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	TransportId *ResourceId `json:"transport_id,omitempty"`
 }
 
 // DeliveryAttemptList defines model for DeliveryAttemptList.
@@ -1342,11 +1549,47 @@ type MessageRequest struct {
 	Headers *map[string]string `json:"headers,omitempty"`
 
 	// Priority Higher is claimed first within the transactional lane; `0` when omitted.
-	Priority *int32             `json:"priority,omitempty"`
-	SenderId openapi_types.UUID `json:"sender_id"`
+	Priority *int32 `json:"priority,omitempty"`
+
+	// SenderId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	SenderId ResourceId `json:"sender_id"`
 
 	// TemplateId Uses the template's currently published version. Required unless `version_id` is given.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
+
+	// TenantVars The tenant's own attributes for this request: name, slug, plan,
+	// whatever the operator's `TenantVars` hook admits.
+	//
+	// They travel per request because sendplane keeps no tenant registry: it
+	// stores no tenant name and no tenant slug, so the host's own database
+	// stays the single authority and nothing here can go stale against it
+	// (ADR-0017). What arrives here is *requested*; the host's hook decides
+	// what is actually used, and a typical hook ignores the request and
+	// substitutes the attributes it looked up itself, which is what stops one
+	// tenant from sending as another.
+	//
+	// They are bound as `tenant` in every template (`{{ tenant.name }}`) and
+	// are what a shared sender's From templates resolve from. A variable such
+	// a template reads and this does not supply is
+	// `422 tenant_vars_missing`, listing the keys.
+	//
+	//
+	// Examples: {"name":"Acme, Inc.","plan":"pro","slug":"acme"}
+	TenantVars *TenantVars `json:"tenant_vars,omitempty"`
 
 	// To Each entry becomes its own delivery with its own envelope; they are
 	// not a single multi-recipient message.
@@ -1479,6 +1722,26 @@ type PreviewRequest struct {
 	// Recipient Stand-in for the `recipient` Liquid object.
 	Recipient *PreviewRecipient `json:"recipient,omitempty"`
 
+	// TenantVars The tenant's own attributes for this request: name, slug, plan,
+	// whatever the operator's `TenantVars` hook admits.
+	//
+	// They travel per request because sendplane keeps no tenant registry: it
+	// stores no tenant name and no tenant slug, so the host's own database
+	// stays the single authority and nothing here can go stale against it
+	// (ADR-0017). What arrives here is *requested*; the host's hook decides
+	// what is actually used, and a typical hook ignores the request and
+	// substitutes the attributes it looked up itself, which is what stops one
+	// tenant from sending as another.
+	//
+	// They are bound as `tenant` in every template (`{{ tenant.name }}`) and
+	// are what a shared sender's From templates resolve from. A variable such
+	// a template reads and this does not supply is
+	// `422 tenant_vars_missing`, listing the keys.
+	//
+	//
+	// Examples: {"name":"Acme, Inc.","plan":"pro","slug":"acme"}
+	TenantVars *TenantVars `json:"tenant_vars,omitempty"`
+
 	// Vars Campaign-level variables, merged under the recipient's own.
 	Vars *Vars `json:"vars,omitempty"`
 }
@@ -1516,10 +1779,26 @@ type ProbeMailbox struct {
 	// Health The last reachability check of the account, written by the bounce
 	// poller, the probe collector, the `mailbox-check` leader loop and the
 	// test endpoints (architecture 11.5).
-	Health      *MailboxHealth      `json:"health,omitempty"`
-	Host        string              `json:"host"`
-	Id          *openapi_types.UUID `json:"id,omitempty"`
-	InboxFolder *string             `json:"inbox_folder,omitempty"`
+	Health *MailboxHealth `json:"health,omitempty"`
+	Host   string         `json:"host"`
+
+	// Id An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	Id          ResourceId `json:"id"`
+	InboxFolder *string    `json:"inbox_folder,omitempty"`
 
 	// Kind How a probe mail gets back to sendplane. `imap` is an account sendplane
 	// polls and is the only kind that can tell the inbox from the spam
@@ -1530,14 +1809,20 @@ type ProbeMailbox struct {
 	//
 	// Omitted means `imap`, which is also what rows written before this field
 	// existed read back as.
-	Kind       *ProbeMailboxKind `json:"kind,omitempty"`
-	Name       string            `json:"name"`
-	Port       int32             `json:"port"`
-	SpamFolder *string           `json:"spam_folder,omitempty"`
-	Tls        *TLSMode          `json:"tls,omitempty"`
-	UpdatedAt  *time.Time        `json:"updated_at,omitempty"`
-	Username   *string           `json:"username,omitempty"`
-	Version    *int64            `json:"version,omitempty"`
+	Kind *ProbeMailboxKind `json:"kind,omitempty"`
+	Name string            `json:"name"`
+	Port int32             `json:"port"`
+
+	// Shared True for a *platform* resource: one the operator configured rather
+	// than a tenant created (ADR-0017). It is read-only in every sense —
+	// the field is never accepted on a write, and neither is the object
+	// (`403 platform_read_only`).
+	Shared     *Shared    `json:"shared,omitempty"`
+	SpamFolder *string    `json:"spam_folder,omitempty"`
+	Tls        *TLSMode   `json:"tls,omitempty"`
+	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
+	Username   *string    `json:"username,omitempty"`
+	Version    *int64     `json:"version,omitempty"`
 }
 
 // ProbeMailboxInput `host` and `port` are required for `kind: imap` (the default) and must
@@ -1658,9 +1943,25 @@ type ProbeRun struct {
 	// Latency Go duration string, e.g. `30s`, `5m`, `12h`.
 	//
 	// Examples: 5m, 1h30m
-	Latency    *Duration          `json:"latency,omitempty"`
-	MailboxId  openapi_types.UUID `json:"mailbox_id"`
-	ObservedIp *string            `json:"observed_ip,omitempty"`
+	Latency *Duration `json:"latency,omitempty"`
+
+	// MailboxId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	MailboxId  ResourceId `json:"mailbox_id"`
+	ObservedIp *string    `json:"observed_ip,omitempty"`
 
 	// Pending True while the run is still waiting for its mail. A finished run
 	// carries one of green/yellow/red; a DNS-only run can finish as
@@ -1675,9 +1976,25 @@ type ProbeRun struct {
 	RawHeaders *string `json:"raw_headers,omitempty"`
 
 	// Reason Explains a non-green status, e.g. `dkim=fail`.
-	Reason     *string            `json:"reason,omitempty"`
-	ReceivedAt *time.Time         `json:"received_at,omitempty"`
-	SenderId   openapi_types.UUID `json:"sender_id"`
+	Reason     *string    `json:"reason,omitempty"`
+	ReceivedAt *time.Time `json:"received_at,omitempty"`
+
+	// SenderId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	SenderId ResourceId `json:"sender_id"`
 
 	// Spf SPF verdict from `Authentication-Results`.
 	Spf       *string    `json:"spf,omitempty"`
@@ -1707,7 +2024,7 @@ type ProbeRunList struct {
 // ProbeTriggerRequest defines model for ProbeTriggerRequest.
 type ProbeTriggerRequest struct {
 	// MailboxIds Restrict the run to these mailboxes. Omit for every enabled one.
-	MailboxIds *[]openapi_types.UUID `json:"mailbox_ids,omitempty"`
+	MailboxIds *[]ResourceId `json:"mailbox_ids,omitempty"`
 }
 
 // ProbeTriggerResult defines model for ProbeTriggerResult.
@@ -1715,8 +2032,24 @@ type ProbeTriggerResult struct {
 	// Runs One entry per mailbox the probe was enqueued for.
 	Runs []struct {
 		DeliveryId *openapi_types.UUID `json:"delivery_id,omitempty"`
-		MailboxId  openapi_types.UUID  `json:"mailbox_id"`
-		RunId      openapi_types.UUID  `json:"run_id"`
+
+		// MailboxId An entity ID.
+		//
+		// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+		// *platform* resource the operator configured rather than stored:
+		// `sys:` followed by the name from the `platform:` section of its
+		// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+		// in a UUID, so the two spaces never collide (ADR-0017).
+		//
+		// A platform ID appears wherever a transport, sender, sending domain or
+		// mailbox is named. It is read-only everywhere: a write that targets one
+		// answers `403 platform_read_only`, because its configuration lives in
+		// the operator's config file and the only way to change it is a deploy.
+		//
+		//
+		// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+		MailboxId ResourceId         `json:"mailbox_id"`
+		RunId     openapi_types.UUID `json:"run_id"`
 	} `json:"runs"`
 }
 
@@ -1772,6 +2105,22 @@ type RecipientLine struct {
 	Vars *Vars `json:"vars,omitempty"`
 }
 
+// ResourceId An entity ID.
+//
+// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+// *platform* resource the operator configured rather than stored:
+// `sys:` followed by the name from the `platform:` section of its
+// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+// in a UUID, so the two spaces never collide (ADR-0017).
+//
+// A platform ID appears wherever a transport, sender, sending domain or
+// mailbox is named. It is read-only everywhere: a write that targets one
+// answers `403 platform_read_only`, because its configuration lives in
+// the operator's config file and the only way to change it is a deploy.
+//
+// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+type ResourceId = string
+
 // RetryPolicy Backoff schedule for transient failures (architecture 4.2).
 type RetryPolicy struct {
 	// Backoff Delay before attempt 1, 2, ... The last entry repeats if
@@ -1806,25 +2155,116 @@ type RetryResult struct {
 }
 
 // Sender A From identity bound to a transport and a sending domain.
+//
+// A `shared` sender is the operator's, resolved from configuration
+// (ADR-0017). Every tenant sees it and may send with it, subject to
+// `uses`, but three things differ:
+//
+//   - `from_name`, `from_email` and `reply_to` are Liquid templates over
+//     the send's `tenant_vars` (`sender+{{ tenant.slug }}@mail.example.com`),
+//     not literal addresses. A request whose `tenant_vars` do not supply
+//     what they read is `422 tenant_vars_missing`.
+//   - `transport_id` and `domain_id` are omitted: the relay and the domain
+//     behind a shared sender are the operator's infrastructure.
+//   - `health`, `health_reason` and `health_checked_at` are omitted. The
+//     probe verdict of a shared identity is the platform's, and a campaign
+//     blocked by it is told only `shared sender unavailable`.
+//
+// All three are present for the system tenant, which is the operator's
+// own view.
 type Sender struct {
-	CreatedAt *time.Time          `json:"created_at,omitempty"`
-	DomainId  *openapi_types.UUID `json:"domain_id,omitempty"`
-	FromEmail openapi_types.Email `json:"from_email"`
-	FromName  *string             `json:"from_name,omitempty"`
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+
+	// DomainId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	DomainId *ResourceId `json:"domain_id,omitempty"`
+
+	// FromEmail An address for a tenant's own sender, and a **Liquid template**
+	// over the send's `tenant_vars` for a shared one
+	// (`sender+{{ tenant.slug }}@mail.example.com`, ADR-0017). That is
+	// why it is not declared `format: email`: a template is not an
+	// address, and a client that validated it as one would reject the
+	// shared sender it is meant to render. `from_name` and `reply_to`
+	// are the same.
+	//
+	// The rendered result is always a valid address or the send is
+	// refused (`422 tenant_vars_missing`).
+	FromEmail string  `json:"from_email"`
+	FromName  *string `json:"from_name,omitempty"`
 
 	// Health `green` all checks pass and mail landed in the inbox over TLS; `yellow`
 	// degraded (spam folder, `p=none`, PTR mismatch, no TLS); `red` not
 	// delivered or an authentication failure.
-	Health          *HealthStatus       `json:"health,omitempty"`
-	HealthCheckedAt *time.Time          `json:"health_checked_at,omitempty"`
-	HealthReason    *string             `json:"health_reason,omitempty"`
-	Id              *openapi_types.UUID `json:"id,omitempty"`
-	Name            string              `json:"name"`
-	ReplyTo         *string             `json:"reply_to,omitempty"`
-	TransportId     openapi_types.UUID  `json:"transport_id"`
-	UpdatedAt       *time.Time          `json:"updated_at,omitempty"`
-	Version         *int64              `json:"version,omitempty"`
+	Health          *HealthStatus `json:"health,omitempty"`
+	HealthCheckedAt *time.Time    `json:"health_checked_at,omitempty"`
+	HealthReason    *string       `json:"health_reason,omitempty"`
+
+	// Id An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	Id      ResourceId `json:"id"`
+	Name    string     `json:"name"`
+	ReplyTo *string    `json:"reply_to,omitempty"`
+
+	// Shared True for a *platform* resource: one the operator configured rather
+	// than a tenant created (ADR-0017). It is read-only in every sense —
+	// the field is never accepted on a write, and neither is the object
+	// (`403 platform_read_only`).
+	Shared *Shared `json:"shared,omitempty"`
+
+	// TransportId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	TransportId *ResourceId `json:"transport_id,omitempty"`
+	UpdatedAt   *time.Time  `json:"updated_at,omitempty"`
+
+	// Uses What a shared sender may be used for, from the operator's
+	// configuration. Absent for a tenant's own sender, which may be used
+	// for anything. A send of a kind that is not listed is
+	// `403 sender_use_denied`.
+	Uses    *[]SenderUses `json:"uses,omitempty"`
+	Version *int64        `json:"version,omitempty"`
 }
+
+// SenderUses defines model for Sender.Uses.
+type SenderUses string
 
 // SenderHealth Worst-of summary across probe mailboxes, with the per-mailbox detail.
 type SenderHealth struct {
@@ -1836,9 +2276,25 @@ type SenderHealth struct {
 	DomainStatus *HealthStatus `json:"domain_status,omitempty"`
 
 	// Mailboxes Latest probe run per mailbox.
-	Mailboxes *[]ProbeRun        `json:"mailboxes,omitempty"`
-	Reason    *string            `json:"reason,omitempty"`
-	SenderId  openapi_types.UUID `json:"sender_id"`
+	Mailboxes *[]ProbeRun `json:"mailboxes,omitempty"`
+	Reason    *string     `json:"reason,omitempty"`
+
+	// SenderId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	SenderId ResourceId `json:"sender_id"`
 
 	// Status `green` all checks pass and mail landed in the inbox over TLS; `yellow`
 	// degraded (spam folder, `p=none`, PTR mismatch, no TLS); `red` not
@@ -1853,14 +2309,22 @@ type SenderHealth struct {
 
 // SenderInput defines model for SenderInput.
 type SenderInput struct {
-	DomainId *openapi_types.UUID `json:"domain_id,omitempty"`
+	// DomainId A sending domain of this tenant; `422 transport_not_assignable`
+	// for a platform one. `from_email` must be on the tenant's own
+	// sending domains whichever it is, or the request is
+	// `422 from_domain_not_owned`.
+	DomainId *ResourceId `json:"domain_id,omitempty"`
 
 	// FromEmail CR and LF are rejected (header injection, architecture 16).
-	FromEmail   openapi_types.Email `json:"from_email"`
-	FromName    *string             `json:"from_name,omitempty"`
-	Name        string              `json:"name"`
-	ReplyTo     *string             `json:"reply_to,omitempty"`
-	TransportId openapi_types.UUID  `json:"transport_id"`
+	FromEmail openapi_types.Email `json:"from_email"`
+	FromName  *string             `json:"from_name,omitempty"`
+	Name      string              `json:"name"`
+	ReplyTo   *string             `json:"reply_to,omitempty"`
+
+	// TransportId A transport of this tenant. A platform transport (`sys:…`) cannot
+	// be assigned: `422 transport_not_assignable`. Use the shared
+	// *sender* the operator configured instead.
+	TransportId ResourceId `json:"transport_id"`
 }
 
 // SenderList defines model for SenderList.
@@ -1873,20 +2337,31 @@ type SenderList struct {
 
 // SenderUpdate Sender replacement carrying the read version.
 type SenderUpdate struct {
-	DomainId *openapi_types.UUID `json:"domain_id,omitempty"`
+	// DomainId A sending domain of this tenant; `422 transport_not_assignable`
+	// for a platform one. `from_email` must be on the tenant's own
+	// sending domains whichever it is, or the request is
+	// `422 from_domain_not_owned`.
+	DomainId *ResourceId `json:"domain_id,omitempty"`
 
 	// FromEmail CR and LF are rejected (header injection, architecture 16).
-	FromEmail   openapi_types.Email `json:"from_email"`
-	FromName    *string             `json:"from_name,omitempty"`
-	Name        string              `json:"name"`
-	ReplyTo     *string             `json:"reply_to,omitempty"`
-	TransportId openapi_types.UUID  `json:"transport_id"`
+	FromEmail openapi_types.Email `json:"from_email"`
+	FromName  *string             `json:"from_name,omitempty"`
+	Name      string              `json:"name"`
+	ReplyTo   *string             `json:"reply_to,omitempty"`
+
+	// TransportId A transport of this tenant. A platform transport (`sys:…`) cannot
+	// be assigned: `422 transport_not_assignable`. Use the shared
+	// *sender* the operator configured instead.
+	TransportId ResourceId `json:"transport_id"`
 
 	// Version The `version` last read. A mismatch answers 409 `version_conflict`.
 	Version int64 `json:"version"`
 }
 
 // SendingDomain DKIM material, the VERP return-path domain and observed outbound IPs.
+//
+// A `shared` domain is the operator's and is listed only for the system
+// tenant, like a shared transport (ADR-0017).
 type SendingDomain struct {
 	CreatedAt    *time.Time `json:"created_at,omitempty"`
 	DkimSelector *string    `json:"dkim_selector,omitempty"`
@@ -1899,18 +2374,40 @@ type SendingDomain struct {
 	// Health `green` all checks pass and mail landed in the inbox over TLS; `yellow`
 	// degraded (spam folder, `p=none`, PTR mismatch, no TLS); `red` not
 	// delivered or an authentication failure.
-	Health          *HealthStatus       `json:"health,omitempty"`
-	HealthCheckedAt *time.Time          `json:"health_checked_at,omitempty"`
-	HealthReason    *string             `json:"health_reason,omitempty"`
-	Id              *openapi_types.UUID `json:"id,omitempty"`
+	Health          *HealthStatus `json:"health,omitempty"`
+	HealthCheckedAt *time.Time    `json:"health_checked_at,omitempty"`
+	HealthReason    *string       `json:"health_reason,omitempty"`
+
+	// Id An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	Id ResourceId `json:"id"`
 
 	// OutboundIps Configured, or observed from probe `Received` headers (architecture 11.3).
 	OutboundIps *[]string `json:"outbound_ips,omitempty"`
 
 	// ReturnPathDomain Carries the VERP bounce address `bounce+{deliveryID}.{hmac8}@...`.
-	ReturnPathDomain *string    `json:"return_path_domain,omitempty"`
-	UpdatedAt        *time.Time `json:"updated_at,omitempty"`
-	Version          *int64     `json:"version,omitempty"`
+	ReturnPathDomain *string `json:"return_path_domain,omitempty"`
+
+	// Shared True for a *platform* resource: one the operator configured rather
+	// than a tenant created (ADR-0017). It is read-only in every sense —
+	// the field is never accepted on a write, and neither is the object
+	// (`403 platform_read_only`).
+	Shared    *Shared    `json:"shared,omitempty"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	Version   *int64     `json:"version,omitempty"`
 }
 
 // SendingDomainInput defines model for SendingDomainInput.
@@ -1992,6 +2489,18 @@ type ServiceHealthStatus string
 
 // ServiceHealthStore Store reachability.
 type ServiceHealthStore string
+
+// SettingSource Where the effective value of a setting comes from: `tenant` when the
+// tenant configured it, `platform` when it falls back to the operator's
+// `platform:` configuration (ADR-0017). Absent when the setting is empty
+// either way.
+type SettingSource string
+
+// Shared True for a *platform* resource: one the operator configured rather
+// than a tenant created (ADR-0017). It is read-only in every sense —
+// the field is never accepted on a write, and neither is the object
+// (`403 platform_read_only`).
+type Shared = bool
 
 // SigningKeyInfo Tracking token HMAC key. The secret itself is never returned.
 type SigningKeyInfo struct {
@@ -2198,9 +2707,20 @@ type TenantSettings struct {
 	// UnsubscribeUrlTemplate Liquid evaluated per recipient, e.g.
 	// `https://app.example.com/u?e={{ recipient.email | url_encode }}`.
 	// A recipient's own `unsubscribe_url` wins over it.
-	UnsubscribeUrlTemplate *string    `json:"unsubscribe_url_template,omitempty"`
-	UpdatedAt              *time.Time `json:"updated_at,omitempty"`
-	Version                *int64     `json:"version,omitempty"`
+	//
+	// The value returned is the *effective* one: the tenant's, or the
+	// operator's platform default when the tenant has set none. Write it
+	// empty to go back to the platform default;
+	// `unsubscribe_url_template_source` says which one is in force.
+	UnsubscribeUrlTemplate *string `json:"unsubscribe_url_template,omitempty"`
+
+	// UnsubscribeUrlTemplateSource Where the effective value of a setting comes from: `tenant` when the
+	// tenant configured it, `platform` when it falls back to the operator's
+	// `platform:` configuration (ADR-0017). Absent when the setting is empty
+	// either way.
+	UnsubscribeUrlTemplateSource *SettingSource `json:"unsubscribe_url_template_source,omitempty"`
+	UpdatedAt                    *time.Time     `json:"updated_at,omitempty"`
+	Version                      *int64         `json:"version,omitempty"`
 }
 
 // TenantSettingsInput defines model for TenantSettingsInput.
@@ -2258,6 +2778,25 @@ type TenantSettingsUpdate struct {
 	Version int64 `json:"version"`
 }
 
+// TenantVars The tenant's own attributes for this request: name, slug, plan,
+// whatever the operator's `TenantVars` hook admits.
+//
+// They travel per request because sendplane keeps no tenant registry: it
+// stores no tenant name and no tenant slug, so the host's own database
+// stays the single authority and nothing here can go stale against it
+// (ADR-0017). What arrives here is *requested*; the host's hook decides
+// what is actually used, and a typical hook ignores the request and
+// substitutes the attributes it looked up itself, which is what stops one
+// tenant from sending as another.
+//
+// They are bound as `tenant` in every template (`{{ tenant.name }}`) and
+// are what a shared sender's From templates resolve from. A variable such
+// a template reads and this does not supply is
+// `422 tenant_vars_missing`, listing the keys.
+//
+// Examples: {"name":"Acme, Inc.","plan":"pro","slug":"acme"}
+type TenantVars map[string]interface{}
+
 // TrackingConfig Tenant tracking setup (architecture 9).
 type TrackingConfig struct {
 	// Clicks Rewrite links through the click redirect.
@@ -2267,6 +2806,12 @@ type TrackingConfig struct {
 	// routes. Required for opens, clicks and `unsubscribe_mode=sendplane`.
 	Domain *string `json:"domain,omitempty"`
 
+	// DomainSource Where the effective value of a setting comes from: `tenant` when the
+	// tenant configured it, `platform` when it falls back to the operator's
+	// `platform:` configuration (ADR-0017). Absent when the setting is empty
+	// either way.
+	DomainSource *SettingSource `json:"domain_source,omitempty"`
+
 	// Opens Insert the open pixel.
 	Opens *bool `json:"opens,omitempty"`
 
@@ -2275,6 +2820,10 @@ type TrackingConfig struct {
 }
 
 // Transport An SMTP account, its rate limits and its circuit state.
+//
+// A `shared` transport is the operator's, resolved from configuration
+// and listed only for the system tenant: an ordinary tenant never sees
+// the relay behind the shared sender it is allowed to use (ADR-0017).
 type Transport struct {
 	CreatedAt *time.Time `json:"created_at,omitempty"`
 
@@ -2282,9 +2831,25 @@ type Transport struct {
 	DomainRatePerSecond *map[string]float64 `json:"domain_rate_per_second,omitempty"`
 
 	// HasPassword Whether a password is stored. The password itself is never returned.
-	HasPassword *bool               `json:"has_password,omitempty"`
-	Host        string              `json:"host"`
-	Id          *openapi_types.UUID `json:"id,omitempty"`
+	HasPassword *bool  `json:"has_password,omitempty"`
+	Host        string `json:"host"`
+
+	// Id An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	Id ResourceId `json:"id"`
 
 	// MaxConns Connection pool size per sender replica.
 	MaxConns *int32 `json:"max_conns,omitempty"`
@@ -2293,6 +2858,12 @@ type Transport struct {
 
 	// RatePerSecond Cluster-wide target rate, split across active sender replicas. 0 is unlimited.
 	RatePerSecond *float64 `json:"rate_per_second,omitempty"`
+
+	// Shared True for a *platform* resource: one the operator configured rather
+	// than a tenant created (ADR-0017). It is read-only in every sense —
+	// the field is never accepted on a write, and neither is the object
+	// (`403 platform_read_only`).
+	Shared *Shared `json:"shared,omitempty"`
 
 	// Status `cooldown` is a temporary slowdown after rate limiting; `unhealthy`
 	// follows repeated auth, TLS or connection failures and is cleared by a
@@ -2314,8 +2885,24 @@ type TransportHealth struct {
 	// Status `cooldown` is a temporary slowdown after rate limiting; `unhealthy`
 	// follows repeated auth, TLS or connection failures and is cleared by a
 	// probe.
-	Status      TransportStatus    `json:"status"`
-	TransportId openapi_types.UUID `json:"transport_id"`
+	Status TransportStatus `json:"status"`
+
+	// TransportId An entity ID.
+	//
+	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+	// *platform* resource the operator configured rather than stored:
+	// `sys:` followed by the name from the `platform:` section of its
+	// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+	// in a UUID, so the two spaces never collide (ADR-0017).
+	//
+	// A platform ID appears wherever a transport, sender, sending domain or
+	// mailbox is named. It is read-only everywhere: a write that targets one
+	// answers `403 platform_read_only`, because its configuration lives in
+	// the operator's config file and the only way to change it is a deploy.
+	//
+	//
+	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+	TransportId ResourceId `json:"transport_id"`
 }
 
 // TransportInput defines model for TransportInput.
@@ -2418,11 +3005,46 @@ type VersionRequired struct {
 	Version int64 `json:"version"`
 }
 
+// Whoami The authenticated caller and the tenant this request resolved to.
+type Whoami struct {
+	// CanSwitchTenant True when the host's `TenantResolver` would honour a tenant header
+	// from this caller, so a console may offer the switch.
+	CanSwitchTenant bool `json:"can_switch_tenant"`
+
+	// PrincipalId The host's own identifier for the caller.
+	PrincipalId string `json:"principal_id"`
+
+	// Roles The principal's roles, exactly as the host's `Authenticator`
+	// supplied them. sendplane never interprets them.
+	Roles *[]string `json:"roles,omitempty"`
+
+	// SystemTenant True when `tenant_id` is the system tenant, the only view that
+	// shows platform transports, domains, mailboxes and state.
+	SystemTenant bool `json:"system_tenant"`
+
+	// TenantId The tenant this request is bound to, as the host's `TenantResolver`
+	// returned it. `_system` is the operator's own scope.
+	TenantId string `json:"tenant_id"`
+}
+
 // BounceId defines model for BounceId.
 type BounceId = openapi_types.UUID
 
-// BounceMailboxId defines model for BounceMailboxId.
-type BounceMailboxId = openapi_types.UUID
+// BounceMailboxId An entity ID.
+//
+// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+// *platform* resource the operator configured rather than stored:
+// `sys:` followed by the name from the `platform:` section of its
+// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+// in a UUID, so the two spaces never collide (ADR-0017).
+//
+// A platform ID appears wherever a transport, sender, sending domain or
+// mailbox is named. It is read-only everywhere: a write that targets one
+// answers `403 platform_read_only`, because its configuration lives in
+// the operator's config file and the only way to change it is a deploy.
+//
+// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+type BounceMailboxId = ResourceId
 
 // CampaignId defines model for CampaignId.
 type CampaignId = openapi_types.UUID
@@ -2433,8 +3055,21 @@ type Cursor = string
 // DeliveryId defines model for DeliveryId.
 type DeliveryId = openapi_types.UUID
 
-// DomainId defines model for DomainId.
-type DomainId = openapi_types.UUID
+// DomainId An entity ID.
+//
+// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+// *platform* resource the operator configured rather than stored:
+// `sys:` followed by the name from the `platform:` section of its
+// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+// in a UUID, so the two spaces never collide (ADR-0017).
+//
+// A platform ID appears wherever a transport, sender, sending domain or
+// mailbox is named. It is read-only everywhere: a write that targets one
+// answers `403 platform_read_only`, because its configuration lives in
+// the operator's config file and the only way to change it is a deploy.
+//
+// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+type DomainId = ResourceId
 
 // EventId defines model for EventId.
 type EventId = openapi_types.UUID
@@ -2448,14 +3083,40 @@ type LayoutId = openapi_types.UUID
 // Limit defines model for Limit.
 type Limit = int32
 
-// MailboxId defines model for MailboxId.
-type MailboxId = openapi_types.UUID
+// MailboxId An entity ID.
+//
+// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+// *platform* resource the operator configured rather than stored:
+// `sys:` followed by the name from the `platform:` section of its
+// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+// in a UUID, so the two spaces never collide (ADR-0017).
+//
+// A platform ID appears wherever a transport, sender, sending domain or
+// mailbox is named. It is read-only everywhere: a write that targets one
+// answers `403 platform_read_only`, because its configuration lives in
+// the operator's config file and the only way to change it is a deploy.
+//
+// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+type MailboxId = ResourceId
 
 // RunId defines model for RunId.
 type RunId = openapi_types.UUID
 
-// SenderId defines model for SenderId.
-type SenderId = openapi_types.UUID
+// SenderId An entity ID.
+//
+// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+// *platform* resource the operator configured rather than stored:
+// `sys:` followed by the name from the `platform:` section of its
+// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+// in a UUID, so the two spaces never collide (ADR-0017).
+//
+// A platform ID appears wherever a transport, sender, sending domain or
+// mailbox is named. It is read-only everywhere: a write that targets one
+// answers `403 platform_read_only`, because its configuration lives in
+// the operator's config file and the only way to change it is a deploy.
+//
+// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+type SenderId = ResourceId
 
 // SuppressionEmail defines model for SuppressionEmail.
 type SuppressionEmail = openapi_types.Email
@@ -2466,8 +3127,21 @@ type TemplateId = openapi_types.UUID
 // TrackingToken defines model for TrackingToken.
 type TrackingToken = string
 
-// TransportId defines model for TransportId.
-type TransportId = openapi_types.UUID
+// TransportId An entity ID.
+//
+// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+// *platform* resource the operator configured rather than stored:
+// `sys:` followed by the name from the `platform:` section of its
+// configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+// in a UUID, so the two spaces never collide (ADR-0017).
+//
+// A platform ID appears wherever a transport, sender, sending domain or
+// mailbox is named. It is read-only everywhere: a write that targets one
+// answers `403 platform_read_only`, because its configuration lives in
+// the operator's config file and the only way to change it is a deploy.
+//
+// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
+type TransportId = ResourceId
 
 // VersionId defines model for VersionId.
 type VersionId = openapi_types.UUID
@@ -2677,7 +3351,7 @@ type ListProbeMailboxesParams struct {
 // ListProbeRunsParams defines parameters for ListProbeRuns.
 type ListProbeRunsParams struct {
 	// SenderId Probe history is always read per sender.
-	SenderId openapi_types.UUID `form:"sender_id" json:"sender_id"`
+	SenderId ResourceId `form:"sender_id" json:"sender_id"`
 
 	// Limit Page size. Clamped into 1-1000.
 	Limit *Limit `form:"limit,omitempty" json:"limit,omitempty"`
@@ -3252,6 +3926,9 @@ type ServerInterface interface {
 	// GetTransportHealth Read transport circuit state
 	// (GET /api/v1/transports/{transportId}/health)
 	GetTransportHealth(w http.ResponseWriter, r *http.Request, transportId TransportId)
+	// GetWhoami The caller, the tenant it is bound to, and what it may switch to
+	// (GET /api/v1/whoami)
+	GetWhoami(w http.ResponseWriter, r *http.Request)
 	// GetServiceHealth Liveness and readiness probe
 	// (GET /healthz)
 	GetServiceHealth(w http.ResponseWriter, r *http.Request)
@@ -3777,6 +4454,12 @@ func (_ Unimplemented) GetTransportHealth(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// GetWhoami The caller, the tenant it is bound to, and what it may switch to
+// (GET /api/v1/whoami)
+func (_ Unimplemented) GetWhoami(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // GetServiceHealth Liveness and readiness probe
 // (GET /healthz)
 func (_ Unimplemented) GetServiceHealth(w http.ResponseWriter, r *http.Request) {
@@ -3899,7 +4582,7 @@ func (siw *ServerInterfaceWrapper) DeleteBounceMailbox(w http.ResponseWriter, r 
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId BounceMailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -3925,7 +4608,7 @@ func (siw *ServerInterfaceWrapper) GetBounceMailbox(w http.ResponseWriter, r *ht
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId BounceMailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -3951,7 +4634,7 @@ func (siw *ServerInterfaceWrapper) UpdateBounceMailbox(w http.ResponseWriter, r 
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId BounceMailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -3977,7 +4660,7 @@ func (siw *ServerInterfaceWrapper) TestBounceMailbox(w http.ResponseWriter, r *h
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId BounceMailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -5339,7 +6022,7 @@ func (siw *ServerInterfaceWrapper) DeleteProbeMailbox(w http.ResponseWriter, r *
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId MailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -5365,7 +6048,7 @@ func (siw *ServerInterfaceWrapper) GetProbeMailbox(w http.ResponseWriter, r *htt
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId MailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -5391,7 +6074,7 @@ func (siw *ServerInterfaceWrapper) UpdateProbeMailbox(w http.ResponseWriter, r *
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId MailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -5417,7 +6100,7 @@ func (siw *ServerInterfaceWrapper) TestProbeMailbox(w http.ResponseWriter, r *ht
 	// ------------- Path parameter "mailboxId" -------------
 	var mailboxId MailboxId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "mailboxId", chi.URLParam(r, "mailboxId"), &mailboxId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "mailboxId", Err: err})
 		return
@@ -5445,7 +6128,7 @@ func (siw *ServerInterfaceWrapper) ListProbeRuns(w http.ResponseWriter, r *http.
 
 	// ------------- Required query parameter "sender_id" -------------
 
-	err = runtime.BindQueryParameterWithOptions("form", true, true, "sender_id", r.URL.Query(), &params.SenderId, runtime.BindQueryParameterOptions{Type: "string", Format: "uuid"})
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "sender_id", r.URL.Query(), &params.SenderId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
 	if err != nil {
 		var requiredError *runtime.RequiredParameterError
 		if errors.As(err, &requiredError) {
@@ -5588,7 +6271,7 @@ func (siw *ServerInterfaceWrapper) DeleteSender(w http.ResponseWriter, r *http.R
 	// ------------- Path parameter "senderId" -------------
 	var senderId SenderId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "senderId", Err: err})
 		return
@@ -5614,7 +6297,7 @@ func (siw *ServerInterfaceWrapper) GetSender(w http.ResponseWriter, r *http.Requ
 	// ------------- Path parameter "senderId" -------------
 	var senderId SenderId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "senderId", Err: err})
 		return
@@ -5640,7 +6323,7 @@ func (siw *ServerInterfaceWrapper) UpdateSender(w http.ResponseWriter, r *http.R
 	// ------------- Path parameter "senderId" -------------
 	var senderId SenderId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "senderId", Err: err})
 		return
@@ -5666,7 +6349,7 @@ func (siw *ServerInterfaceWrapper) GetSenderHealth(w http.ResponseWriter, r *htt
 	// ------------- Path parameter "senderId" -------------
 	var senderId SenderId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "senderId", Err: err})
 		return
@@ -5692,7 +6375,7 @@ func (siw *ServerInterfaceWrapper) TriggerProbeRun(w http.ResponseWriter, r *htt
 	// ------------- Path parameter "senderId" -------------
 	var senderId SenderId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "senderId", chi.URLParam(r, "senderId"), &senderId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "senderId", Err: err})
 		return
@@ -5778,7 +6461,7 @@ func (siw *ServerInterfaceWrapper) DeleteSendingDomain(w http.ResponseWriter, r 
 	// ------------- Path parameter "domainId" -------------
 	var domainId DomainId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "domainId", chi.URLParam(r, "domainId"), &domainId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "domainId", chi.URLParam(r, "domainId"), &domainId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "domainId", Err: err})
 		return
@@ -5804,7 +6487,7 @@ func (siw *ServerInterfaceWrapper) GetSendingDomain(w http.ResponseWriter, r *ht
 	// ------------- Path parameter "domainId" -------------
 	var domainId DomainId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "domainId", chi.URLParam(r, "domainId"), &domainId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "domainId", chi.URLParam(r, "domainId"), &domainId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "domainId", Err: err})
 		return
@@ -5830,7 +6513,7 @@ func (siw *ServerInterfaceWrapper) UpdateSendingDomain(w http.ResponseWriter, r 
 	// ------------- Path parameter "domainId" -------------
 	var domainId DomainId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "domainId", chi.URLParam(r, "domainId"), &domainId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "domainId", chi.URLParam(r, "domainId"), &domainId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "domainId", Err: err})
 		return
@@ -6407,7 +7090,7 @@ func (siw *ServerInterfaceWrapper) DeleteTransport(w http.ResponseWriter, r *htt
 	// ------------- Path parameter "transportId" -------------
 	var transportId TransportId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "transportId", Err: err})
 		return
@@ -6433,7 +7116,7 @@ func (siw *ServerInterfaceWrapper) GetTransport(w http.ResponseWriter, r *http.R
 	// ------------- Path parameter "transportId" -------------
 	var transportId TransportId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "transportId", Err: err})
 		return
@@ -6459,7 +7142,7 @@ func (siw *ServerInterfaceWrapper) UpdateTransport(w http.ResponseWriter, r *htt
 	// ------------- Path parameter "transportId" -------------
 	var transportId TransportId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "transportId", Err: err})
 		return
@@ -6485,7 +7168,7 @@ func (siw *ServerInterfaceWrapper) GetTransportHealth(w http.ResponseWriter, r *
 	// ------------- Path parameter "transportId" -------------
 	var transportId TransportId
 
-	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "transportId", chi.URLParam(r, "transportId"), &transportId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: r.URL.RawPath == ""})
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "transportId", Err: err})
 		return
@@ -6493,6 +7176,20 @@ func (siw *ServerInterfaceWrapper) GetTransportHealth(w http.ResponseWriter, r *
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetTransportHealth(w, r, transportId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetWhoami operation middleware
+func (siw *ServerInterfaceWrapper) GetWhoami(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetWhoami(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -6751,6 +7448,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/healthz", wrapper.GetServiceHealth)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/v1/whoami", wrapper.GetWhoami)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/settings", wrapper.GetTenantSettings)
@@ -15036,6 +15736,69 @@ func (response GetTransportHealth500JSONResponse) VisitGetTransportHealthRespons
 	return err
 }
 
+type GetWhoamiRequestObject struct {
+}
+
+type GetWhoamiResponseObject interface {
+	VisitGetWhoamiResponse(w http.ResponseWriter) error
+}
+
+type GetWhoami200JSONResponse Whoami
+
+func (response GetWhoami200JSONResponse) VisitGetWhoamiResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetWhoami401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response GetWhoami401JSONResponse) VisitGetWhoamiResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetWhoami403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response GetWhoami403JSONResponse) VisitGetWhoamiResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetWhoami500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response GetWhoami500JSONResponse) VisitGetWhoamiResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetServiceHealthRequestObject struct {
 }
 
@@ -15539,6 +16302,9 @@ type StrictServerInterface interface {
 	// GetTransportHealth Read transport circuit state
 	// (GET /api/v1/transports/{transportId}/health)
 	GetTransportHealth(ctx context.Context, request GetTransportHealthRequestObject) (GetTransportHealthResponseObject, error)
+	// GetWhoami The caller, the tenant it is bound to, and what it may switch to
+	// (GET /api/v1/whoami)
+	GetWhoami(ctx context.Context, request GetWhoamiRequestObject) (GetWhoamiResponseObject, error)
 	// GetServiceHealth Liveness and readiness probe
 	// (GET /healthz)
 	GetServiceHealth(ctx context.Context, request GetServiceHealthRequestObject) (GetServiceHealthResponseObject, error)
@@ -17997,6 +18763,30 @@ func (sh *strictHandler) GetTransportHealth(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetTransportHealthResponseObject); ok {
 		if err := validResponse.VisitGetTransportHealthResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetWhoami operation middleware
+func (sh *strictHandler) GetWhoami(w http.ResponseWriter, r *http.Request) {
+	var request GetWhoamiRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetWhoami(ctx, request.(GetWhoamiRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetWhoami")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetWhoamiResponseObject); ok {
+		if err := validResponse.VisitGetWhoamiResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

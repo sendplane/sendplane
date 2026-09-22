@@ -50,11 +50,15 @@ func (s *server) CreateCampaign(ctx context.Context, req CreateCampaignRequestOb
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
+	if err := refuseSystemTenantSend(t, "create a campaign"); err != nil {
+		return nil, err
+	}
 	c := &store.Campaign{Status: store.CampaignDraft}
 	if err := s.applyCampaign(ctx, t, c, CampaignUpdate{
 		Name: req.Body.Name, VersionId: req.Body.VersionId, TemplateId: req.Body.TemplateId,
 		SenderId: req.Body.SenderId, DefaultLocale: req.Body.DefaultLocale,
-		Vars: req.Body.Vars, ScheduleAt: req.Body.ScheduleAt,
+		TenantVars: req.Body.TenantVars,
+		Vars:       req.Body.Vars, ScheduleAt: req.Body.ScheduleAt,
 	}); err != nil {
 		return nil, err
 	}
@@ -158,18 +162,40 @@ func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign
 	default:
 		return errInvalid("one of template_id or version_id is required")
 	}
-	if _, err := t.st.Senders().Get(ctx, idOf(in.SenderId)); err != nil {
+	snd, err := t.st.Senders().Get(ctx, string(in.SenderId))
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return errInvalid("sender %s does not exist", in.SenderId)
 		}
 		return err
 	}
 
+	// The tenant attributes this campaign is created with, through the host's
+	// hook: they are stored on the campaign and are what every delivery of it
+	// renders `tenant` from, including a shared sender's From templates. They
+	// live on the campaign rather than on its rows so that starting it stays a
+	// one-row write (ADR-0002, ADR-0017).
+	tenantVars, err := s.tenantVars(ctx, t, in.TenantVars)
+	if err != nil {
+		return err
+	}
+	// Both halves of the policy, at create time: may this tenant run a
+	// campaign with this sender at all, and does it supply what a shared
+	// sender's From templates need. Start checks again, because the
+	// configuration may have changed in between.
+	if err := s.checkSenderUse(ctx, t, snd.ID, store.UseCampaign, tenantVars); err != nil {
+		return err
+	}
+	if err := s.checkSharedFrom(snd.ID, snd.Shared, tenantVars); err != nil {
+		return err
+	}
+
 	c.Name = in.Name
 	c.TemplateID = templateID
 	c.VersionID = versionID
-	c.SenderID = idOf(in.SenderId)
+	c.SenderID = string(in.SenderId)
 	c.DefaultLocale = deref(in.DefaultLocale)
+	c.TenantVars = tenantVars
 	c.Vars = varsOf(in.Vars)
 	c.ScheduleAt = timeVal(in.ScheduleAt)
 	return nil
@@ -204,8 +230,9 @@ func campaignOut(v *store.Campaign) Campaign {
 	return Campaign{
 		Id: uuidPtrOf(v.ID), Name: v.Name,
 		TemplateId: uuidPtrOf(v.TemplateID),
-		VersionId:  uuidPtrOf(v.VersionID), SenderId: uuidOf(v.SenderID),
-		DefaultLocale: strPtr(v.DefaultLocale), Vars: varsOut(v.Vars),
+		VersionId:  uuidPtrOf(v.VersionID), SenderId: rid(v.SenderID),
+		DefaultLocale: strPtr(v.DefaultLocale),
+		TenantVars:    varsOut(v.TenantVars), Vars: varsOut(v.Vars),
 		Status:     campaignStatusOut(v.Status),
 		ScheduleAt: timePtr(v.ScheduleAt), StartedAt: timePtr(v.StartedAt),
 		CompletedAt: timePtr(v.CompletedAt),
@@ -279,6 +306,12 @@ func (s *server) StartCampaign(ctx context.Context, req StartCampaignRequestObje
 	var at time.Time
 	if req.Body != nil {
 		at = timeVal(req.Body.ScheduleAt)
+	}
+	// The sender-use policy is re-checked at start, not only at create: a
+	// campaign may sit in draft for days, and the operator may have narrowed
+	// what its shared sender is allowed for in between (ADR-0017).
+	if err := s.checkCampaignSenderUse(ctx, t, req.CampaignId.String()); err != nil {
+		return nil, err
 	}
 	if err := s.deps.Control.StartCampaign(ctx, t.st, req.CampaignId.String(), at); err != nil {
 		return nil, err

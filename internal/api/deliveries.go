@@ -232,13 +232,14 @@ func (s *server) NotifyDeliveryUnsubscribe(ctx context.Context, req NotifyDelive
 func deliveryOut(v *store.Delivery) Delivery {
 	out := Delivery{
 		Id: uuidOf(v.ID), CampaignId: uuidPtrOf(v.CampaignID),
-		VersionId: uuidOf(v.VersionID), SenderId: uuidOf(v.SenderID),
+		VersionId: uuidOf(v.VersionID), SenderId: rid(v.SenderID),
 		Lane: laneOut(v.Lane), Priority: i32(v.Priority),
 		Status:    deliveryStatusOut(v.Status),
 		Email:     openapiEmail(v.Email),
 		EmailNorm: strPtr(v.EmailNorm), Name: strPtr(v.Name), Locale: strPtr(v.Locale),
-		Vars: varsOut(v.Vars), UnsubscribeUrl: strPtr(v.UnsubscribeURL),
-		AttemptCount: i32(v.AttemptCount), RetryGen: i32(v.RetryGen),
+		Vars: varsOut(v.Vars), TenantVars: varsOut(v.TenantVars),
+		UnsubscribeUrl: strPtr(v.UnsubscribeURL),
+		AttemptCount:   i32(v.AttemptCount), RetryGen: i32(v.RetryGen),
 		NextAttemptAt: timePtr(v.NextAttemptAt),
 		LeaseOwner:    strPtr(v.LeaseOwner), LeaseUntil: timePtr(v.LeaseUntil),
 		LastError: strPtr(v.LastError),
@@ -261,7 +262,7 @@ func attemptOut(v *store.DeliveryAttempt) DeliveryAttempt {
 	out := DeliveryAttempt{
 		Id: uuidOf(v.ID), DeliveryId: uuidOf(v.DeliveryID),
 		AttemptNo: clampInt32(v.AttemptNo), RetryGen: i32(v.RetryGen),
-		TransportId: uuidPtrOf(v.TransportID),
+		TransportId: ridPtr(v.TransportID),
 		StartedAt:   timePtr(v.StartedAt), FinishedAt: timePtr(v.FinishedAt),
 		EnhancedCode: strPtr(v.EnhancedCode), Error: strPtr(v.Error),
 		CreatedAt: timePtr(v.CreatedAt),

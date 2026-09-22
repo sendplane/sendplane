@@ -21,7 +21,7 @@ func TestSendMessageAndIdempotentReplay(t *testing.T) {
 	snd, version := e.publishedTemplate()
 
 	req := MessageRequest{
-		SenderId: *snd.Id, VersionId: &version.Id,
+		SenderId: snd.Id, VersionId: &version.Id,
 		Vars: &Vars{"product": "sendplane"},
 		To: []MessageRecipient{
 			{Email: "a@example.com", Name: ptr("A"), Vars: &Vars{"plan": "pro"}},
@@ -98,7 +98,7 @@ func TestSendMessageSuppressesKnownAddresses(t *testing.T) {
 		SuppressionInput{Reason: SuppressionReasonHardBounce})
 
 	got := decodeInto[MessageResult](t, e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
-		SenderId: *snd.Id, VersionId: &version.Id,
+		SenderId: snd.Id, VersionId: &version.Id,
 		To: []MessageRecipient{{Email: "ok@example.com"}, {Email: "Blocked@Example.com"}},
 	}), http.StatusAccepted)
 
@@ -124,7 +124,7 @@ func TestSendMessageHeaders(t *testing.T) {
 	snd, version := e.publishedTemplate()
 
 	got := decodeInto[MessageResult](t, e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
-		SenderId: *snd.Id, VersionId: &version.Id,
+		SenderId: snd.Id, VersionId: &version.Id,
 		To:      []MessageRecipient{{Email: "a@example.com"}},
 		Headers: &map[string]string{"X-Campaign-Tag": "spring", "In-Reply-To": "<x@example.com>"},
 	}), http.StatusAccepted)
@@ -147,7 +147,7 @@ func TestSendMessageHeaders(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
-				SenderId: *snd.Id, VersionId: &version.Id,
+				SenderId: snd.Id, VersionId: &version.Id,
 				To: []MessageRecipient{{Email: "b@example.com"}}, Headers: &tc.headers,
 			})
 			decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
@@ -161,7 +161,7 @@ func TestSendMessageValidation(t *testing.T) {
 
 	t.Run("no recipients", func(t *testing.T) {
 		w := e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
-			SenderId: *snd.Id, VersionId: &version.Id, To: nil,
+			SenderId: snd.Id, VersionId: &version.Id, To: nil,
 		})
 		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
 	})
@@ -172,7 +172,7 @@ func TestSendMessageValidation(t *testing.T) {
 			to[i] = MessageRecipient{Email: Email("a" + itoaTest(i) + "@example.com")}
 		}
 		w := e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
-			SenderId: *snd.Id, VersionId: &version.Id, To: to,
+			SenderId: snd.Id, VersionId: &version.Id, To: to,
 		})
 		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
 	})
@@ -180,7 +180,7 @@ func TestSendMessageValidation(t *testing.T) {
 	t.Run("bad address", func(t *testing.T) {
 		// Sent as raw JSON: the generated Email type refuses to marshal an
 		// address that is not one, so the struct form cannot express this.
-		body := []byte(`{"sender_id":"` + snd.Id.String() + `","version_id":"` +
+		body := []byte(`{"sender_id":"` + snd.Id + `","version_id":"` +
 			version.Id.String() + `","to":[{"email":"not-an-email"}]}`)
 		w := e.do(http.MethodPost, "/api/v1/messages", body,
 			withHeader("Content-Type", "application/json"))
@@ -191,7 +191,7 @@ func TestSendMessageValidation(t *testing.T) {
 
 	t.Run("neither template nor version", func(t *testing.T) {
 		w := e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
-			SenderId: *snd.Id, To: []MessageRecipient{{Email: "a@example.com"}},
+			SenderId: snd.Id, To: []MessageRecipient{{Email: "a@example.com"}},
 		})
 		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
 	})
@@ -215,7 +215,7 @@ func TestRetryDelivery(t *testing.T) {
 	e := newEnv(t)
 	snd, version := e.publishedTemplate()
 	res := decodeInto[MessageResult](t, e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
-		SenderId: *snd.Id, VersionId: &version.Id,
+		SenderId: snd.Id, VersionId: &version.Id,
 		To: []MessageRecipient{{Email: "a@example.com"}},
 	}), http.StatusAccepted)
 	id := res.Deliveries[0].DeliveryId.String()

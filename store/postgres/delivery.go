@@ -19,7 +19,7 @@ import (
 var deliveryColumns = []string{
 	"id", "tenant_id", "campaign_id", "version_id", "sender_id", "lane",
 	"priority", "status", "email", "email_norm", "name", "locale", "vars",
-	"unsubscribe_url", "headers", "attempt_count", "retry_gen",
+	"tenant_vars", "unsubscribe_url", "headers", "attempt_count", "retry_gen",
 	"next_attempt_at", "lease_owner", "lease_until",
 	"last_error_class", "last_smtp_code", "last_error", "message_id",
 	"sent_at", "finished_at",
@@ -47,6 +47,10 @@ func deliveryValues(d *store.Delivery) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	tenantVars, err := jsonIn(d.TenantVars)
+	if err != nil {
+		return nil, err
+	}
 	headers, err := jsonIn(d.Headers)
 	if err != nil {
 		return nil, err
@@ -54,7 +58,7 @@ func deliveryValues(d *store.Delivery) ([]any, error) {
 	return []any{
 		d.ID, d.TenantID, idIn(d.CampaignID), d.VersionID, d.SenderID,
 		i16(d.Lane), d.Priority, i16(d.Status), d.Email, d.EmailNorm, d.Name,
-		d.Locale, vars, d.UnsubscribeURL, headers, d.AttemptCount, d.RetryGen,
+		d.Locale, vars, tenantVars, d.UnsubscribeURL, headers, d.AttemptCount, d.RetryGen,
 		tsInNN(d.NextAttemptAt), d.LeaseOwner, tsIn(d.LeaseUntil),
 		i16(d.LastErrorClass), d.LastSMTPCode, d.LastError, d.MessageID,
 		tsIn(d.SentAt), tsIn(d.FinishedAt),
@@ -66,14 +70,14 @@ func deliveryValues(d *store.Delivery) ([]any, error) {
 func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	var d store.Delivery
 	var campaign *string
-	var vars, headers []byte
+	var vars, tenantVars, headers []byte
 	var lane, status, errClass int16
 	var nextAt time.Time
 	var leaseUntil, sentAt, finishedAt, opened, clicked, unsubscribed *time.Time
 	if err := r.Scan(
 		&d.ID, &d.TenantID, &campaign, &d.VersionID, &d.SenderID, &lane,
 		&d.Priority, &status, &d.Email, &d.EmailNorm, &d.Name, &d.Locale,
-		&vars, &d.UnsubscribeURL, &headers, &d.AttemptCount, &d.RetryGen,
+		&vars, &tenantVars, &d.UnsubscribeURL, &headers, &d.AttemptCount, &d.RetryGen,
 		&nextAt, &d.LeaseOwner, &leaseUntil,
 		&errClass, &d.LastSMTPCode, &d.LastError, &d.MessageID,
 		&sentAt, &finishedAt, &opened, &clicked, &unsubscribed,
@@ -96,7 +100,10 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	if err := jsonOut(headers, &d.Headers); err != nil {
 		return nil, err
 	}
-	return &d, jsonOut(vars, &d.Vars)
+	if err := jsonOut(vars, &d.Vars); err != nil {
+		return nil, err
+	}
+	return &d, jsonOut(tenantVars, &d.TenantVars)
 }
 
 type deliveryRepo struct {

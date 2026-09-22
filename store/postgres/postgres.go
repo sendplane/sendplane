@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sendplane/sendplane/store"
@@ -178,6 +179,28 @@ func (p *Provider) Tenants(ctx context.Context) ([]string, error) {
 		out = append(out, id)
 	}
 	return out, mapErr(rows.Err())
+}
+
+// LookupDeliveryTenant answers with one primary-key lookup: shared mode keeps
+// every tenant's deliveries in one table, and the ID is the primary key
+// (store.Provider).
+func (p *Provider) LookupDeliveryTenant(ctx context.Context, deliveryID string) (string, error) {
+	if err := p.check(); err != nil {
+		return "", err
+	}
+	if deliveryID == "" {
+		return "", fmt.Errorf("%w: empty delivery id", store.ErrInvalid)
+	}
+	var tenantID string
+	err := p.pool.QueryRow(ctx,
+		`SELECT tenant_id FROM delivery WHERE id = $1`, deliveryID).Scan(&tenantID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("%w: delivery %s", store.ErrNotFound, deliveryID)
+		}
+		return "", mapErr(err)
+	}
+	return tenantID, nil
 }
 
 // Close marks the provider closed and, when it created the pool itself,

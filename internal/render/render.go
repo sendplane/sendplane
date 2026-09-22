@@ -59,8 +59,12 @@ type Campaign struct {
 // Bindings is everything a template can see. Recipient.Vars override Vars of
 // the same name.
 type Bindings struct {
-	Recipient      Recipient
-	Vars           map[string]any
+	Recipient Recipient
+	Vars      map[string]any
+	// TenantVars are the tenant attributes of this send, exposed as
+	// `{{ tenant.* }}`. They come from the request, not from a tenant table:
+	// sendplane stores no tenant attributes (ADR-0017).
+	TenantVars     map[string]any
 	Campaign       Campaign
 	UnsubscribeURL string
 	// Locale overrides the locale exposed as {{ locale }}; it defaults to the
@@ -324,9 +328,18 @@ func (p *Prepared) baseBindings(b Bindings, locale string) map[string]any {
 		recipient["vars"] = map[string]any{}
 	}
 
+	tenant := b.TenantVars
+	if tenant == nil {
+		// An empty map rather than nil: `{{ tenant.slug }}` on a send that
+		// carried no tenant variables renders empty, the same as any other
+		// missing variable, instead of failing the whole message.
+		tenant = map[string]any{}
+	}
+
 	return map[string]any{
 		"recipient":       recipient,
 		"vars":            vars,
+		"tenant":          tenant,
 		"campaign":        map[string]any{"id": b.Campaign.ID, "name": b.Campaign.Name},
 		"unsubscribe_url": b.UnsubscribeURL,
 		"locale":          locale,

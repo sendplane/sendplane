@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+
+	"github.com/sendplane/sendplane/store"
 )
 
 // Errors returned across the embedding API. Hosts match them with errors.Is.
@@ -102,9 +104,27 @@ type TenantResolver interface {
 	Resolve(ctx context.Context, r *http.Request, p *Principal) (tenantID string, err error)
 }
 
-// SecretCipher encrypts secrets (SMTP/IMAP passwords, DKIM private keys,
-// tracking signing keys) before they reach the store.
-type SecretCipher interface {
-	Encrypt(ctx context.Context, plaintext []byte) ([]byte, error)
-	Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
+// TenantSwitcher is the optional half of a TenantResolver that lets some
+// callers choose their tenant per request — typically an operator console
+// switching between its own tenant and the system tenant (store.SystemTenantID),
+// which is the only view that shows platform state (ADR-0017).
+//
+// It exists so that GET /api/v1/whoami can tell a console whether to render
+// the switcher at all, without the API having to know how the host decides.
+// A resolver that does not implement it reports can_switch_tenant false, and
+// nothing else changes: the switch itself is entirely the resolver's, which is
+// where the trust decision belongs.
+type TenantSwitcher interface {
+	// CanSwitchTenant reports whether Resolve would honour a tenant selection
+	// from this principal.
+	CanSwitchTenant(ctx context.Context, p *Principal) bool
 }
+
+// SecretCipher encrypts secrets (SMTP/IMAP passwords, DKIM private keys)
+// before they reach the store.
+//
+// It is an alias of store.SecretCipher, which is where the interface is
+// declared so that the platform overlay (store.WithPlatform) can encrypt the
+// secrets it builds virtual entities from without importing this package. A
+// host implements one interface either way.
+type SecretCipher = store.SecretCipher

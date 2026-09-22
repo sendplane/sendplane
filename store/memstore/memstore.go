@@ -11,6 +11,7 @@ package memstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -196,6 +197,26 @@ func hasOpenWork(d *tenantData) bool {
 		}
 	}
 	return false
+}
+
+// LookupDeliveryTenant scans the tenants for the delivery (store.Provider).
+// memstore holds everything in maps, so the "fan-out over providers" a routed
+// implementation has to do is one loop here.
+func (p *Provider) LookupDeliveryTenant(_ context.Context, deliveryID string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.check(); err != nil {
+		return "", err
+	}
+	if deliveryID == "" {
+		return "", fmt.Errorf("%w: empty delivery id", store.ErrInvalid)
+	}
+	for id, d := range p.tenants {
+		if _, ok := d.deliveries[deliveryID]; ok {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("%w: delivery %s", store.ErrNotFound, deliveryID)
 }
 
 // Migrate is a no-op: there is no schema.

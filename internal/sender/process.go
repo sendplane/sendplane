@@ -56,11 +56,15 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 	if err != nil {
 		return s.configResult(d, "sender", err)
 	}
-	transport, err := t.transport(ctx, snd.TransportID, started)
+	// A shared sender's transport and sending domain are the operator's, and
+	// only the system tenant's view can see them (store.PlatformView): a
+	// tenant must not be able to read the relay's host or the platform
+	// domain's DKIM key (ADR-0017).
+	transport, err := s.transportFor(ctx, t, snd.TransportID, started)
 	if err != nil {
 		return s.configResult(d, "transport", err)
 	}
-	domain, err := t.domain(ctx, snd.DomainID, started)
+	domain, err := s.domainFor(ctx, t, snd.DomainID, started)
 	if err != nil && !isNotFound(err) {
 		return s.internalDefer(d, "sending domain", err)
 	}
@@ -70,6 +74,15 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 		suppressed, _, err := t.st.Suppressions().IsSuppressed(ctx, d.EmailNorm, started)
 		if err != nil {
 			return s.internalDefer(d, "suppression lookup", err)
+		}
+		if !suppressed {
+			// A send through a shared relay also checks the platform list: a
+			// hard bounce anybody on the relay collected is a hard bounce for
+			// everybody on it.
+			suppressed, err = s.platformSuppressed(ctx, transport, d.EmailNorm, started)
+			if err != nil {
+				return s.internalDefer(d, "platform suppression lookup", err)
+			}
 		}
 		if suppressed {
 			return store.DeliveryResult{
@@ -85,7 +98,7 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 			NewStatus:     store.DeliveryQueued,
 			NextAttemptAt: started.Add(pol.AuthRetryAfter),
 			ErrorClass:    store.ErrorClassAuth,
-			Error:         "transport is unhealthy",
+			Error:         FailureReason(transport.Shared, "transport is unhealthy"),
 		}
 	}
 
@@ -146,12 +159,21 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 		rate = s.cfg.DefaultRatePerSecond
 	}
 	rcptDomain := domainOf(d.Email)
-	transportKey := healthKey(t.id, transport.ID)
+	// A shared transport's buckets are keyed under the system tenant, not this
+	// one: the configured rate is the whole relay's capacity, and one bucket
+	// per tenant would silently multiply it (architecture 8.2).
+	transportKey := sharedTransportKey(t.id, transport)
 	domainKey := transportKey + "|" + rcptDomain
-	waited, err := s.limiter.Wait(ctx,
-		Key{Name: transportKey, Rate: rate},
-		Key{Name: domainKey, Rate: transport.DomainRatePerSecond[rcptDomain]},
-	)
+	keys := []Key{
+		{Name: transportKey, Rate: rate},
+		{Name: domainKey, Rate: transport.DomainRatePerSecond[rcptDomain]},
+	}
+	// The fair share: one tenant's slice of a shared relay, so that a single
+	// campaign cannot consume the capacity everybody else needs.
+	if perTenant := s.perTenantRate(transport); perTenant > 0 {
+		keys = append(keys, Key{Name: tenantBucket(transportKey, t.id), Rate: perTenant})
+	}
+	waited, err := s.limiter.Wait(ctx, keys...)
 	if waited > 0 {
 		s.cfg.Metrics.Observe(MetricLimiterWait, waited.Seconds(), "transport", transport.ID)
 	}
@@ -181,19 +203,22 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 	s.cfg.Metrics.Observe(MetricSendTime, finished.Sub(sendStart).Seconds(),
 		"transport", transport.ID, "class", f.Class.String())
 
+	// The circuit is scoped like the rate buckets: a shared relay has one
+	// status for the whole cluster, stored in the system tenant's shadow row.
+	scope := limitScope(t.id, transport)
 	switch f.Class {
 	case store.ErrorClassNone:
-		if status, changed := s.health.success(t.id, transport.ID, finished); changed {
-			s.setTransportStatus(ctx, t, transport.ID, status, "delivery succeeded", s.statusUntil(status, finished))
+		if status, changed := s.health.success(scope, transport.ID, finished); changed {
+			s.setTransportStatus(ctx, t, transport, status, "delivery succeeded", s.statusUntil(status, finished))
 		}
 	case store.ErrorClassRateLimited:
 		s.limiter.Penalize(transportKey, domainKey)
-		if status, changed := s.health.fail(t.id, transport.ID, f.Class, finished); changed {
-			s.setTransportStatus(ctx, t, transport.ID, status, f.Message, s.statusUntil(status, finished))
+		if status, changed := s.health.fail(scope, transport.ID, f.Class, finished); changed {
+			s.setTransportStatus(ctx, t, transport, status, f.Message, s.statusUntil(status, finished))
 		}
 	case store.ErrorClassAuth:
-		if status, changed := s.health.fail(t.id, transport.ID, f.Class, finished); changed {
-			s.setTransportStatus(ctx, t, transport.ID, status, f.Message, s.statusUntil(status, finished))
+		if status, changed := s.health.fail(scope, transport.ID, f.Class, finished); changed {
+			s.setTransportStatus(ctx, t, transport, status, f.Message, s.statusUntil(status, finished))
 		}
 	}
 
@@ -247,6 +272,20 @@ func (s *Sender) renderMessage(
 		Email: d.Email, EmailNorm: d.EmailNorm, Name: d.Name,
 		Locale: d.Locale, Vars: d.Vars,
 	}
+	// The tenant attributes this send was requested with. They are the
+	// `tenant` binding in the message templates and, for a shared sender, what
+	// its From templates resolve from (ADR-0017).
+	tenantVars := tenantVarsFor(d, campaign)
+	if d.Lane == store.LaneProbe && len(tenantVars) == 0 {
+		// A platform sender is probed once, in the system tenant, and its
+		// From templates still have to resolve: the configured ProbeVars are
+		// what they resolve from (architecture 11.2).
+		tenantVars = s.probeVarsFor(snd.ID)
+	}
+	from, err := s.resolveFrom(snd, tenantVars)
+	if err != nil {
+		return nil, unsubscribeLinks{}, err
+	}
 	// A probe mail is a health check, not a message to a subscriber: it takes
 	// no part in statistics, tracking or unsubscribe (architecture 11.2,
 	// ADR-0012). Rewriting its links or pixelling it would file open and click
@@ -280,6 +319,7 @@ func (s *Sender) renderMessage(
 		Recipient: render.Recipient{
 			Email: d.Email, Name: d.Name, Locale: d.Locale, Vars: d.Vars,
 		},
+		TenantVars:     tenantVars,
 		UnsubscribeURL: unsub.body,
 	}
 	if campaign != nil {
@@ -328,7 +368,7 @@ func (s *Sender) renderMessage(
 		TenantID: t.id, DeliveryID: d.ID, CampaignID: d.CampaignID,
 		VersionID: version.ID, SenderID: d.SenderID, Lane: d.Lane,
 		Recipient: rc,
-		FromName:  snd.FromName, From: snd.FromEmail, ReplyTo: snd.ReplyTo,
+		FromName:  from.Name, From: from.Email, ReplyTo: from.ReplyTo,
 		Subject: out.Subject, HTML: html, Text: out.Text,
 		Headers:        outboundHeaders(d),
 		UnsubscribeURL: unsub.body,

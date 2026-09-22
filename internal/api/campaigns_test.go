@@ -17,7 +17,7 @@ func TestCampaignStatsDenominators(t *testing.T) {
 	sender := e.seedSender()
 	tpl := e.seedTemplate()
 	c := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
-		Name: "spring", SenderId: *sender.Id, TemplateId: tpl.Id,
+		Name: "spring", SenderId: sender.Id, TemplateId: tpl.Id,
 	}), http.StatusCreated)
 
 	err := e.st.Campaigns().UpdateStats(t.Context(), c.Id.String(), store.CampaignStats{

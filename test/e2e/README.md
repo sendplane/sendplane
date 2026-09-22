@@ -2,7 +2,7 @@
 
 `docs/architecture.md` §15 의 **종단 간(end-to-end) 테스트**입니다.
 `test/e2e/docker-compose.yml` 스택(postgres + control 1 + sender 2 + bounce 1 + chaos-smtp 1 + GreenMail 1)을
-띄우고, `go run ./test/e2e` 가 시나리오 8개를 순서대로 돌리며 각각 **PASS / FAIL / KNOWN-FAIL** 을 시간과 함께 찍습니다.
+띄우고, `go run ./test/e2e` 가 시나리오 9개를 순서대로 돌리며 각각 **PASS / FAIL / KNOWN-FAIL** 을 시간과 함께 찍습니다.
 
 한 시나리오는 첫 실패에서 멈추지 않고 **단언 실패를 모두 모아서** 보고합니다 — compose 스택 한 번 띄우는 비용이
 "한 번에 차이 하나"를 감당할 만큼 싸지 않습니다.
@@ -93,6 +93,7 @@ Compose 플러그인(`docker compose`) 대신 단독 바이너리만 있는 머�
 | 5 | bounce | sender B로 3통 발송 → GreenMail에서 실제 `Return-Path`(VERP)·`X-Sendplane-ID`·`Message-ID` 를 읽어 **DSN/ARF/위조 DSN을 합성** → GreenMail SMTP로 `bounce@sendplane.test` 에 투입 → `bounced` / `complained` / (위조는) `sent` 유지 + `verified=false` 이벤트, suppression 등록, 그 주소로의 재발송이 `suppressed` |
 | 6 | loopback probe | `POST /senders/{B}/probe` → 프로브 메일이 `probe@sendplane.test` 에 도착(+`X-Sendplane-Probe` 헤더, 제목의 run id) → 수집 루프가 판정 → `delivered=true`, `folder=inbox`, **`yellow`** (아래 참고), sender health 가 같은 값. 벌크 캠페인이 끝난 뒤(**테넌트가 한가할 때**) 일부러 트리거합니다 — 그때도 판정이 끝나야 한다는 게 요점입니다 |
 | 7 | events | 웹훅 수신기에 `campaign.started`·`campaign.completed`·`delivery.bounced`·`delivery.complained`·`delivery.failed`·`recipient.unsubscribed`·`sender.health_changed` 가 **HMAC 서명이 맞는 상태로** 도착, `GET /events/dead-letter` 와 `GET /events?status=failed` 가 비어 있음. `delivery.failed` 는 벌크 캠페인의 기대 실패 수와 **정확히** 일치하고, `delivery.sent` 는 기본 구독에 없으므로 **한 건도 오면 안 됩니다** |
+| 9 | platform | 운영자의 **공유 자원**(ADR-0017). 카탈로그는 API가 아니라 `config.yaml` 의 `platform:` 에서 옵니다 — 그게 핵심입니다. ① 테넌트의 `GET /senders/sys:default` 는 `shared: true`·`uses: [transactional]`·템플릿 주소를 주고 **health 와 domain_id 는 없음**, `_system` 은 전부 봄 ② 테넌트의 `GET /transports` 에 `sys:relay` 없음·`GET /transports/sys:relay` 404, `_system` 은 host/has_password 까지 봄 ③ 공유 자원에 대한 PUT/DELETE 는 (테넌트든 `_system` 이든) `403 platform_read_only` ④ `tenant_vars {slug: acme, name: "Acme, Inc."}` 로 트랜잭션 발송 → chaos-smtp 가 받은 메일의 `From: Acme, Inc. <sender+acme@platform.e2e.test>` ⑤ `slug` 없이 보내면 `422 tenant_vars_missing` 이고 **아무것도 큐에 안 들어감** ⑥ 공유 sender 로 캠페인은 `403 sender_use_denied`, 테넌트의 프로브 트리거는 403 ⑦ `_system` 으로 프로브를 트리거하면 `_system` 만 run 을 보고 테넌트는 0건, 테넌트의 health 요약에 플랫폼 상세 없음 ⑧ **psql 로 shadow 행을 직접 읽어** `sys:` 행의 설정 컬럼이 전부 빈 값인지 확인(mongo 오버레이에서는 skip 로그) |
 | 8 | lease recovery | `--kill-sender` 일 때 시나리오 2 진행 중 sender 한 대를 SIGKILL 후 재기동. `sent`/`failed` 는 그대로 정확하고 중복은 chaos-smtp `Accepted` 에만 나타남 |
 
 ### 왜 프로브 판정이 green 이 아니라 yellow 인가

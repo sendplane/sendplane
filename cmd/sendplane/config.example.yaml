@@ -37,6 +37,29 @@ auth:
     jwks_url: https://auth.example.com/.well-known/jwks.json
     tenant_claim: tenant   # claim name that holds the tenant ID
     roles_claim: roles     # claim name that holds a []string or space-separated string
+  # Per-request tenant selection (ADR-0017).
+  #
+  # By default a caller gets its own tenant and cannot name another, which is
+  # what a multi-tenant API should be. Turning this on lets a caller holding
+  # one of the named roles select a tenant with a header, which is how an
+  # operator console switches between a tenant and the *system* tenant
+  # (`_system`) — the only view that shows the shared `platform:` transports,
+  # domains, mailboxes and their probe state.
+  #
+  #   GET /api/v1/senders            -> the caller's own tenant
+  #   GET /api/v1/senders
+  #     X-Sendplane-Tenant: _system  -> the operator's view, with state
+  #
+  # GET /api/v1/whoami reports `can_switch_tenant`, so a console renders the
+  # switcher only where it works. An embedding application does not use this:
+  # it implements its own host.TenantResolver and makes its own decision.
+  #
+  # Leave it off unless something needs it: a role that can switch can read
+  # and write every tenant it names.
+  tenant_header:
+    enabled: false
+    header: X-Sendplane-Tenant
+    roles: [operator]
 
 authz:
   # "allow_all" (default) or "roles".
@@ -132,6 +155,118 @@ probe:
   #     - ${SENDPLANE_PROBE_WEBHOOK_SECRET}
   #   path: ""             # default /probe/inbound/sendplane
   #   tolerance: 300s      # how stale a signed timestamp may be (default 5m)
+
+# The operator's shared sending infrastructure: the relay, domain, From
+# identity and mailboxes it runs *for* its tenants (ADR-0017,
+# docs/architecture.md 5.4). Omit the whole section for a single-tenant
+# deployment; nothing is wrapped and nothing costs anything.
+#
+# Three properties are the point of it:
+#
+#   * It is configuration, never data. A read of a shared transport resolves
+#     this section every time; only runtime state about it (circuit status,
+#     probe verdict, mailbox reachability) is persisted, in the `_system`
+#     tenant, as a row that carries no host, no username and no password.
+#     Rotating the relay password is a deploy, not a migration, and a database
+#     dump of one tenant can never contain another tenant's relay credentials.
+#   * There is no tenant table either. A shared sender's From address is Liquid
+#     over the tenant attributes each *request* carries (`tenant_vars`, shaped
+#     by the host's TenantVars hook), so your own database stays the only place
+#     a tenant's name and slug live.
+#   * A tenant sees the shared *senders* and nothing else. The relay behind
+#     them, the DKIM key, the probe verdict of the shared reputation: all
+#     `_system` only.
+#
+# Every ID here is local (`shared-eu`); the API and the store see it as
+# `sys:shared-eu`, and every write to one answers 403 platform_read_only.
+# Startup validates the whole section — unique IDs, resolvable references,
+# parseable templates — and refuses to start rather than failing deliveries
+# later.
+platform:
+  transports: []
+  # - id: shared-eu
+  #   name: Shared EU relay
+  #   host: smtp.eu.example.net
+  #   port: 587
+  #   tls: starttls          # none | starttls (default) | tls
+  #   username: sendplane
+  #   password: ${SENDPLANE_SHARED_RELAY_PASSWORD}
+  #   max_conns: 8
+  #   # The whole relay's cluster-wide capacity, split across sender replicas.
+  #   rate_per_second: 200
+  #   # One tenant's slice of it: the fair share of architecture 8.2, which is
+  #   # what stops a single campaign consuming the relay.
+  #   per_tenant_rate_per_second: 20
+  #   domain_rate_per_second:
+  #     gmail.com: 50
+
+  domains: []
+  # - id: shared
+  #   domain: mail.example.com
+  #   dkim_selector: sp1
+  #   dkim_private_key: ${SENDPLANE_SHARED_DKIM_KEY}
+  #   return_path_domain: bounce.example.com
+  #   expected_spf: include:_spf.example.net
+  #   outbound_ips: [203.0.113.7]
+
+  senders: []
+  # - id: default
+  #   name: Shared sender
+  #   transport_id: shared-eu
+  #   domain_id: shared
+  #   # Liquid over the request's tenant_vars. One entry, one address per
+  #   # tenant; a request that does not supply `slug` is 422
+  #   # tenant_vars_missing rather than a mail from `sender+@mail.example.com`.
+  #   from_name: "{{ tenant.name }}"
+  #   from_email: "sender+{{ tenant.slug }}@mail.example.com"
+  #   reply_to: ""
+  #   # What tenants may use it for: campaign | transactional | probe.
+  #   # Omitted means [campaign, transactional]. A send of a kind that is not
+  #   # listed is 403 sender_use_denied. A Hooks.SenderPolicy replaces this
+  #   # rule entirely and can chain it (sendplane.DefaultSenderPolicy).
+  #   uses: [transactional]
+  #   # The tenant variables the loopback probe renders the templates with: it
+  #   # runs once, in `_system`, so the From address needs values from
+  #   # somewhere (architecture 11.2).
+  #   probe_vars:
+  #     slug: probe
+  #     name: sendplane probe
+
+  # Shared probe and bounce mailboxes. A shared bounce mailbox's mail may
+  # belong to any tenant, so the tenant is found from the delivery ID in the
+  # VERP return path (architecture 10) rather than from the mailbox.
+  probe_mailboxes: []
+  # - id: gmail
+  #   name: Shared Gmail probe
+  #   address: probe@example.com
+  #   host: imap.gmail.com
+  #   port: 993
+  #   tls: tls
+  #   username: probe@example.com
+  #   password: ${SENDPLANE_SHARED_PROBE_PASSWORD}
+  #   inbox_folder: INBOX
+  #   spam_folder: '[Gmail]/Spam'
+  #   authserv_id: mx.google.com
+
+  bounce_mailboxes: []
+  # - id: shared
+  #   name: Shared bounce mailbox
+  #   address: bounces@bounce.example.com
+  #   protocol: imap
+  #   host: imap.example.com
+  #   port: 993
+  #   tls: tls
+  #   username: bounces@bounce.example.com
+  #   password: ${SENDPLANE_SHARED_BOUNCE_PASSWORD}
+  #   folder: INBOX
+  #   after_process: delete
+
+  # Fallbacks for the matching tenant settings: a tenant that has configured
+  # neither still gets working opens, clicks and unsubscribe links off the
+  # operator's own domain. A tenant that sets its own wins, and
+  # GET /api/v1/settings reports which one is in force (`*_source`).
+  tracking_domain: ""
+  unsubscribe_url_template: ""
 
 limits:
   max_recipients_per_campaign: 10000000

@@ -27,6 +27,12 @@ type Delivery struct {
 	Name      string
 	Locale    string
 	Vars      map[string]any
+	// TenantVars are the tenant attributes of a delivery that has no campaign
+	// to inherit them from: a transactional send (POST /messages) and a probe.
+	// A campaign delivery leaves this empty and the sender reads
+	// Campaign.TenantVars instead, so starting a campaign stays a one-row
+	// write (ADR-0017).
+	TenantVars map[string]any
 	// UnsubscribeURL is the per-recipient host destination, when the caller
 	// supplied one.
 	UnsubscribeURL string

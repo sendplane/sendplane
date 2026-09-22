@@ -50,6 +50,10 @@ type loopSpec struct {
 	// Provider may compute it expensively, and a loop must not wait for that
 	// refresh to reach a tenant that has work right now.
 	allTenants bool
+	// includeSystem also ticks store.SystemTenantID, which no tenant listing
+	// returns. It is how the platform loops reach the shared senders and
+	// mailboxes, which the overlay only makes visible there (ADR-0017).
+	includeSystem bool
 }
 
 // tenantSet is one loop's state between ticks: the per-tenant loop instances,
@@ -118,6 +122,11 @@ func (l *Leader) tickTenants(ctx context.Context, spec loopSpec, set *tenantSet)
 		if spec.linger > 0 {
 			set.linger[tenantID] = spec.linger
 		}
+	}
+	if spec.includeSystem {
+		// No tenant listing returns the system tenant (store.Provider), so a
+		// loop whose work is the platform's has to be told to include it.
+		live[store.SystemTenantID] = true
 	}
 	if spec.allTenants {
 		known, err := l.knownTenants(ctx)

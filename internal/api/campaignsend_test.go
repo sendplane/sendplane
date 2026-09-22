@@ -36,7 +36,7 @@ func TestCampaignSendsThroughARealSender(t *testing.T) {
 	e.do(http.MethodPost, "/api/v1/templates/"+tpl.Id.String()+"/publish", nil)
 
 	camp := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
-		Name: "spring", SenderId: *snd.Id, TemplateId: tpl.Id, DefaultLocale: ptr("en"),
+		Name: "spring", SenderId: snd.Id, TemplateId: tpl.Id, DefaultLocale: ptr("en"),
 	}), http.StatusCreated)
 
 	const recipients = 5
@@ -126,6 +126,7 @@ func TestCampaignSendsThroughARealSender(t *testing.T) {
 // auth, which is what chaossmtp offers by default.
 func (e *env) seedSenderFor(addr string) Sender {
 	e.t.Helper()
+	e.seedSendingDomain("example.com")
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		e.t.Fatalf("split %q: %v", addr, err)
@@ -139,6 +140,6 @@ func (e *env) seedSenderFor(addr string) Sender {
 	}), http.StatusCreated)
 	return decodeInto[Sender](e.t, e.do(http.MethodPost, "/api/v1/senders", SenderInput{
 		Name: "marketing", FromEmail: "news@example.com", FromName: ptr("Example"),
-		TransportId: *tr.Id,
+		TransportId: tr.Id,
 	}), http.StatusCreated)
 }

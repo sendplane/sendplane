@@ -1318,6 +1318,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/whoami": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The caller, the tenant it is bound to, and what it may switch to
+         * @description Who sendplane thinks this request is. It needs authentication and no
+         *     permission at all (`x-sendplane-action: none` with `security` left in
+         *     place), because a console has to render its own chrome before it knows
+         *     which actions the caller holds.
+         *
+         *     `tenant_id` is what the host's `TenantResolver` returned for this
+         *     request, which is not necessarily the principal's own: a resolver may
+         *     honour a tenant header for a privileged caller, which is how an
+         *     operator console switches between its own tenant and the system tenant
+         *     (`_system`). `can_switch_tenant` reports whether this resolver would,
+         *     so the console shows the switcher only when it works, and
+         *     `system_tenant` reports whether the request is already in the system
+         *     tenant — the one view that shows platform state (ADR-0017).
+         *
+         *     Embedding hosts implement the switch in their own `TenantResolver`; the
+         *     reference binary's is driven by `auth.tenant_header` in its config.
+         */
+        get: operations["getWhoami"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -1539,12 +1574,12 @@ export interface components {
             readonly has_password?: boolean;
             health?: components["schemas"]["MailboxHealth"];
             host: string;
-            /** Format: uuid */
-            readonly id: string;
+            id: components["schemas"]["ResourceId"];
             name: string;
             /** Format: int32 */
             port: number;
             protocol?: components["schemas"]["MailboxProtocol"];
+            shared?: components["schemas"]["Shared"];
             tls?: components["schemas"]["TLSMode"];
             /** Format: date-time */
             readonly updated_at?: string;
@@ -1600,8 +1635,7 @@ export interface components {
              * @description Absent means "start now".
              */
             schedule_at?: string;
-            /** Format: uuid */
-            sender_id: string;
+            sender_id: components["schemas"]["ResourceId"];
             /** Format: date-time */
             readonly started_at?: string;
             readonly stats?: components["schemas"]["CampaignStats"];
@@ -1613,6 +1647,12 @@ export interface components {
              *     fills in `version_id`.
              */
             template_id?: string;
+            /**
+             * @description The tenant attributes this campaign was created with, after the
+             *     host's `TenantVars` hook. Bound as `tenant` in every template and,
+             *     for a shared sender, what its From templates resolved from.
+             */
+            readonly tenant_vars?: components["schemas"]["Vars"];
             /** Format: date-time */
             readonly updated_at?: string;
             /** @description Campaign-wide variables, merged under each recipient's own. */
@@ -1631,8 +1671,7 @@ export interface components {
             name: string;
             /** Format: date-time */
             schedule_at?: string;
-            /** Format: uuid */
-            sender_id: string;
+            sender_id: components["schemas"]["ResourceId"];
             /**
              * Format: uuid
              * @description Resolve the version from this template's published one, at start
@@ -1640,6 +1679,7 @@ export interface components {
              *     and start fails if it still is not.
              */
             template_id?: string;
+            tenant_vars?: components["schemas"]["TenantVars"];
             vars?: components["schemas"]["Vars"];
             /**
              * Format: uuid
@@ -1764,11 +1804,17 @@ export interface components {
              * @description Bumped by a manual retry so the attempt history stays intact.
              */
             retry_gen?: number;
-            /** Format: uuid */
-            sender_id: string;
+            sender_id: components["schemas"]["ResourceId"];
             /** Format: date-time */
             sent_at?: string;
             status: components["schemas"]["DeliveryStatus"];
+            /**
+             * @description The tenant attributes this delivery was sent with. Present only on
+             *     a delivery that has no campaign to inherit them from (a
+             *     transactional send or a probe); a campaign delivery reads its
+             *     campaign's.
+             */
+            readonly tenant_vars?: components["schemas"]["Vars"];
             unsubscribe_url?: string;
             /** Format: date-time */
             unsubscribed_at?: string;
@@ -1803,8 +1849,7 @@ export interface components {
             smtp_code?: number;
             /** Format: date-time */
             started_at?: string;
-            /** Format: uuid */
-            transport_id?: string;
+            transport_id?: components["schemas"]["ResourceId"];
         };
         DeliveryAttemptList: components["schemas"]["PageInfo"] & {
             items: components["schemas"]["DeliveryAttempt"][];
@@ -1850,7 +1895,7 @@ export interface components {
              *     message.
              * @enum {string}
              */
-            code: "invalid_request" | "invalid_cursor" | "unauthenticated" | "forbidden" | "not_found" | "duplicate" | "version_conflict" | "invalid_state" | "payload_too_large" | "validation_failed" | "limit_exceeded" | "missing_i18n_keys" | "template_not_published" | "render_failed" | "precondition_failed" | "rate_limited" | "internal";
+            code: "invalid_request" | "invalid_cursor" | "unauthenticated" | "forbidden" | "not_found" | "duplicate" | "version_conflict" | "invalid_state" | "payload_too_large" | "validation_failed" | "limit_exceeded" | "missing_i18n_keys" | "template_not_published" | "render_failed" | "precondition_failed" | "rate_limited" | "platform_read_only" | "sender_use_denied" | "tenant_vars_missing" | "from_domain_not_owned" | "transport_not_assignable" | "internal";
             /** @description Per-field or per-item detail, when the failure has any. */
             details?: components["schemas"]["ErrorDetail"][];
             /** @description Human-readable English explanation; not for display to end users. */
@@ -2140,13 +2185,13 @@ export interface components {
              * @description Higher is claimed first within the transactional lane; `0` when omitted.
              */
             priority?: number;
-            /** Format: uuid */
-            sender_id: string;
+            sender_id: components["schemas"]["ResourceId"];
             /**
              * Format: uuid
              * @description Uses the template's currently published version. Required unless `version_id` is given.
              */
             template_id?: string;
+            tenant_vars?: components["schemas"]["TenantVars"];
             /**
              * @description Each entry becomes its own delivery with its own envelope; they are
              *     not a single multi-recipient message.
@@ -2270,6 +2315,7 @@ export interface components {
             /** @description Falls back like a real send would. */
             locale?: string;
             recipient?: components["schemas"]["PreviewRecipient"];
+            tenant_vars?: components["schemas"]["TenantVars"];
             /** @description Campaign-level variables, merged under the recipient's own. */
             vars?: components["schemas"]["Vars"];
         };
@@ -2307,13 +2353,13 @@ export interface components {
             readonly has_password?: boolean;
             health?: components["schemas"]["MailboxHealth"];
             host: string;
-            /** Format: uuid */
-            readonly id: string;
+            id: components["schemas"]["ResourceId"];
             inbox_folder?: string;
             kind?: components["schemas"]["ProbeMailboxKind"];
             name: string;
             /** Format: int32 */
             port: number;
+            shared?: components["schemas"]["Shared"];
             spam_folder?: string;
             tls?: components["schemas"]["TLSMode"];
             /** Format: date-time */
@@ -2401,8 +2447,7 @@ export interface components {
             /** Format: uuid */
             id: string;
             latency?: components["schemas"]["Duration"];
-            /** Format: uuid */
-            mailbox_id: string;
+            mailbox_id: components["schemas"]["ResourceId"];
             observed_ip?: string;
             /**
              * @description True while the run is still waiting for its mail. A finished run
@@ -2419,8 +2464,7 @@ export interface components {
             reason?: string;
             /** Format: date-time */
             received_at?: string;
-            /** Format: uuid */
-            sender_id: string;
+            sender_id: components["schemas"]["ResourceId"];
             /** @description SPF verdict from `Authentication-Results`. */
             spf?: string;
             /** Format: date-time */
@@ -2434,15 +2478,14 @@ export interface components {
         };
         ProbeTriggerRequest: {
             /** @description Restrict the run to these mailboxes. Omit for every enabled one. */
-            mailbox_ids?: string[];
+            mailbox_ids?: components["schemas"]["ResourceId"][];
         };
         ProbeTriggerResult: {
             /** @description One entry per mailbox the probe was enqueued for. */
             runs: {
                 /** Format: uuid */
                 delivery_id?: string;
-                /** Format: uuid */
-                mailbox_id: string;
+                mailbox_id: components["schemas"]["ResourceId"];
                 /** Format: uuid */
                 run_id: string;
             }[];
@@ -2522,6 +2565,23 @@ export interface components {
             unsubscribe_url?: string;
             vars?: components["schemas"]["Vars"];
         };
+        /**
+         * @description An entity ID.
+         *
+         *     Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
+         *     *platform* resource the operator configured rather than stored:
+         *     `sys:` followed by the name from the `platform:` section of its
+         *     configuration (`sys:default`, `sys:shared-relay`). A colon cannot occur
+         *     in a UUID, so the two spaces never collide (ADR-0017).
+         *
+         *     A platform ID appears wherever a transport, sender, sending domain or
+         *     mailbox is named. It is read-only everywhere: a write that targets one
+         *     answers `403 platform_read_only`, because its configuration lives in
+         *     the operator's config file and the only way to change it is a deploy.
+         * @example 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55
+         * @example sys:default
+         */
+        ResourceId: string;
         /** @description Backoff schedule for transient failures (architecture 4.2). */
         RetryPolicy: {
             /**
@@ -2565,27 +2625,62 @@ export interface components {
             /** Format: int64 */
             requeued: number;
         };
-        /** @description A From identity bound to a transport and a sending domain. */
+        /**
+         * @description A From identity bound to a transport and a sending domain.
+         *
+         *     A `shared` sender is the operator's, resolved from configuration
+         *     (ADR-0017). Every tenant sees it and may send with it, subject to
+         *     `uses`, but three things differ:
+         *
+         *     * `from_name`, `from_email` and `reply_to` are Liquid templates over
+         *       the send's `tenant_vars` (`sender+{{ tenant.slug }}@mail.example.com`),
+         *       not literal addresses. A request whose `tenant_vars` do not supply
+         *       what they read is `422 tenant_vars_missing`.
+         *     * `transport_id` and `domain_id` are omitted: the relay and the domain
+         *       behind a shared sender are the operator's infrastructure.
+         *     * `health`, `health_reason` and `health_checked_at` are omitted. The
+         *       probe verdict of a shared identity is the platform's, and a campaign
+         *       blocked by it is told only `shared sender unavailable`.
+         *
+         *     All three are present for the system tenant, which is the operator's
+         *     own view.
+         */
         Sender: {
             /** Format: date-time */
             readonly created_at?: string;
-            /** Format: uuid */
-            domain_id?: string;
-            /** Format: email */
+            domain_id?: components["schemas"]["ResourceId"];
+            /**
+             * @description An address for a tenant's own sender, and a **Liquid template**
+             *     over the send's `tenant_vars` for a shared one
+             *     (`sender+{{ tenant.slug }}@mail.example.com`, ADR-0017). That is
+             *     why it is not declared `format: email`: a template is not an
+             *     address, and a client that validated it as one would reject the
+             *     shared sender it is meant to render. `from_name` and `reply_to`
+             *     are the same.
+             *
+             *     The rendered result is always a valid address or the send is
+             *     refused (`422 tenant_vars_missing`).
+             */
             from_email: string;
             from_name?: string;
             health?: components["schemas"]["HealthStatus"];
             /** Format: date-time */
             readonly health_checked_at?: string;
             readonly health_reason?: string;
-            /** Format: uuid */
-            readonly id: string;
+            id: components["schemas"]["ResourceId"];
             name: string;
             reply_to?: string;
-            /** Format: uuid */
-            transport_id: string;
+            shared?: components["schemas"]["Shared"];
+            transport_id?: components["schemas"]["ResourceId"];
             /** Format: date-time */
             readonly updated_at?: string;
+            /**
+             * @description What a shared sender may be used for, from the operator's
+             *     configuration. Absent for a tenant's own sender, which may be used
+             *     for anything. A send of a kind that is not listed is
+             *     `403 sender_use_denied`.
+             */
+            readonly uses?: ("campaign" | "transactional" | "probe")[];
             /** Format: int64 */
             readonly version: number;
         };
@@ -2597,14 +2692,18 @@ export interface components {
             /** @description Latest probe run per mailbox. */
             mailboxes?: components["schemas"]["ProbeRun"][];
             reason?: string;
-            /** Format: uuid */
-            sender_id: string;
+            sender_id: components["schemas"]["ResourceId"];
             status: components["schemas"]["HealthStatus"];
             transport_status?: components["schemas"]["TransportStatus"];
         };
         SenderInput: {
-            /** Format: uuid */
-            domain_id?: string;
+            /**
+             * @description A sending domain of this tenant; `422 transport_not_assignable`
+             *     for a platform one. `from_email` must be on the tenant's own
+             *     sending domains whichever it is, or the request is
+             *     `422 from_domain_not_owned`.
+             */
+            domain_id?: components["schemas"]["ResourceId"];
             /**
              * Format: email
              * @description CR and LF are rejected (header injection, architecture 16).
@@ -2613,15 +2712,24 @@ export interface components {
             from_name?: string;
             name: string;
             reply_to?: string;
-            /** Format: uuid */
-            transport_id: string;
+            /**
+             * @description A transport of this tenant. A platform transport (`sys:…`) cannot
+             *     be assigned: `422 transport_not_assignable`. Use the shared
+             *     *sender* the operator configured instead.
+             */
+            transport_id: components["schemas"]["ResourceId"];
         };
         SenderList: components["schemas"]["PageInfo"] & {
             items: components["schemas"]["Sender"][];
         };
         /** @description Sender replacement carrying the read version. */
         SenderUpdate: components["schemas"]["SenderInput"] & components["schemas"]["VersionRequired"];
-        /** @description DKIM material, the VERP return-path domain and observed outbound IPs. */
+        /**
+         * @description DKIM material, the VERP return-path domain and observed outbound IPs.
+         *
+         *     A `shared` domain is the operator's and is listed only for the system
+         *     tenant, like a shared transport (ADR-0017).
+         */
         SendingDomain: {
             /** Format: date-time */
             readonly created_at?: string;
@@ -2634,12 +2742,12 @@ export interface components {
             /** Format: date-time */
             readonly health_checked_at?: string;
             readonly health_reason?: string;
-            /** Format: uuid */
-            readonly id: string;
+            id: components["schemas"]["ResourceId"];
             /** @description Configured, or observed from probe `Received` headers (architecture 11.3). */
             outbound_ips?: string[];
             /** @description Carries the VERP bounce address `bounce+{deliveryID}.{hmac8}@...`. */
             return_path_domain?: string;
+            shared?: components["schemas"]["Shared"];
             /** Format: date-time */
             readonly updated_at?: string;
             /** Format: int64 */
@@ -2723,6 +2831,21 @@ export interface components {
             /** @description Build version of the running binary. */
             version?: string;
         };
+        /**
+         * @description Where the effective value of a setting comes from: `tenant` when the
+         *     tenant configured it, `platform` when it falls back to the operator's
+         *     `platform:` configuration (ADR-0017). Absent when the setting is empty
+         *     either way.
+         * @enum {string}
+         */
+        SettingSource: "tenant" | "platform";
+        /**
+         * @description True for a *platform* resource: one the operator configured rather
+         *     than a tenant created (ADR-0017). It is read-only in every sense —
+         *     the field is never accepted on a write, and neither is the object
+         *     (`403 platform_read_only`).
+         */
+        Shared: boolean;
         /** @description Tracking token HMAC key. The secret itself is never returned. */
         SigningKeyInfo: {
             /** Format: date-time */
@@ -2884,8 +3007,14 @@ export interface components {
              * @description Liquid evaluated per recipient, e.g.
              *     `https://app.example.com/u?e={{ recipient.email | url_encode }}`.
              *     A recipient's own `unsubscribe_url` wins over it.
+             *
+             *     The value returned is the *effective* one: the tenant's, or the
+             *     operator's platform default when the tenant has set none. Write it
+             *     empty to go back to the platform default;
+             *     `unsubscribe_url_template_source` says which one is in force.
              */
             unsubscribe_url_template?: string;
+            unsubscribe_url_template_source?: components["schemas"]["SettingSource"];
             /** Format: date-time */
             readonly updated_at?: string;
             /** Format: int64 */
@@ -2908,6 +3037,31 @@ export interface components {
         };
         /** @description Tenant settings replacement carrying the read version. */
         TenantSettingsUpdate: components["schemas"]["TenantSettingsInput"] & components["schemas"]["VersionRequired"];
+        /**
+         * @description The tenant's own attributes for this request: name, slug, plan,
+         *     whatever the operator's `TenantVars` hook admits.
+         *
+         *     They travel per request because sendplane keeps no tenant registry: it
+         *     stores no tenant name and no tenant slug, so the host's own database
+         *     stays the single authority and nothing here can go stale against it
+         *     (ADR-0017). What arrives here is *requested*; the host's hook decides
+         *     what is actually used, and a typical hook ignores the request and
+         *     substitutes the attributes it looked up itself, which is what stops one
+         *     tenant from sending as another.
+         *
+         *     They are bound as `tenant` in every template (`{{ tenant.name }}`) and
+         *     are what a shared sender's From templates resolve from. A variable such
+         *     a template reads and this does not supply is
+         *     `422 tenant_vars_missing`, listing the keys.
+         * @example {
+         *       "name": "Acme, Inc.",
+         *       "slug": "acme",
+         *       "plan": "pro"
+         *     }
+         */
+        TenantVars: {
+            [key: string]: unknown;
+        };
         /** @enum {string} */
         TLSMode: "none" | "starttls" | "tls";
         /** @description Tenant tracking setup (architecture 9). */
@@ -2919,12 +3073,19 @@ export interface components {
              *     routes. Required for opens, clicks and `unsubscribe_mode=sendplane`.
              */
             domain?: string;
+            domain_source?: components["schemas"]["SettingSource"];
             /** @description Insert the open pixel. */
             opens?: boolean;
             /** @description Newest key signs; older ones keep verifying. */
             signing_keys?: components["schemas"]["SigningKeyInfo"][];
         };
-        /** @description An SMTP account, its rate limits and its circuit state. */
+        /**
+         * @description An SMTP account, its rate limits and its circuit state.
+         *
+         *     A `shared` transport is the operator's, resolved from configuration
+         *     and listed only for the system tenant: an ordinary tenant never sees
+         *     the relay behind the shared sender it is allowed to use (ADR-0017).
+         */
         Transport: {
             /** Format: date-time */
             readonly created_at?: string;
@@ -2935,8 +3096,7 @@ export interface components {
             /** @description Whether a password is stored. The password itself is never returned. */
             readonly has_password?: boolean;
             host: string;
-            /** Format: uuid */
-            readonly id: string;
+            id: components["schemas"]["ResourceId"];
             /**
              * Format: int32
              * @description Connection pool size per sender replica.
@@ -2950,6 +3110,7 @@ export interface components {
              * @description Cluster-wide target rate, split across active sender replicas. 0 is unlimited.
              */
             rate_per_second?: number;
+            shared?: components["schemas"]["Shared"];
             status?: components["schemas"]["TransportStatus"];
             /** Format: date-time */
             readonly status_changed_at?: string;
@@ -2966,8 +3127,7 @@ export interface components {
             changed_at?: string;
             reason?: string;
             status: components["schemas"]["TransportStatus"];
-            /** Format: uuid */
-            transport_id: string;
+            transport_id: components["schemas"]["ResourceId"];
         };
         TransportInput: {
             domain_rate_per_second?: {
@@ -3054,6 +3214,31 @@ export interface components {
              * @description The `version` last read. A mismatch answers 409 `version_conflict`.
              */
             version: number;
+        };
+        /** @description The authenticated caller and the tenant this request resolved to. */
+        Whoami: {
+            /**
+             * @description True when the host's `TenantResolver` would honour a tenant header
+             *     from this caller, so a console may offer the switch.
+             */
+            can_switch_tenant: boolean;
+            /** @description The host's own identifier for the caller. */
+            principal_id: string;
+            /**
+             * @description The principal's roles, exactly as the host's `Authenticator`
+             *     supplied them. sendplane never interprets them.
+             */
+            roles?: string[];
+            /**
+             * @description True when `tenant_id` is the system tenant, the only view that
+             *     shows platform transports, domains, mailboxes and state.
+             */
+            system_tenant: boolean;
+            /**
+             * @description The tenant this request is bound to, as the host's `TenantResolver`
+             *     returned it. `_system` is the operator's own scope.
+             */
+            tenant_id: string;
         };
     };
     responses: {
@@ -3162,7 +3347,7 @@ export interface components {
         /** @description Bounce event ID. */
         BounceId: string;
         /** @description Bounce mailbox ID. */
-        BounceMailboxId: string;
+        BounceMailboxId: components["schemas"]["ResourceId"];
         /** @description Campaign ID. */
         CampaignId: string;
         /** @description Opaque `next_cursor` from the previous page; omit for the first page. */
@@ -3170,7 +3355,7 @@ export interface components {
         /** @description Delivery ID. */
         DeliveryId: string;
         /** @description Sending domain ID. */
-        DomainId: string;
+        DomainId: components["schemas"]["ResourceId"];
         /** @description Outbox event ID. */
         EventId: string;
         /**
@@ -3183,11 +3368,11 @@ export interface components {
         /** @description Page size. Clamped into 1-1000. */
         Limit: number;
         /** @description Probe mailbox ID. */
-        MailboxId: string;
+        MailboxId: components["schemas"]["ResourceId"];
         /** @description Probe run ID. */
         RunId: string;
         /** @description Sender ID. */
-        SenderId: string;
+        SenderId: components["schemas"]["ResourceId"];
         /**
          * @description The address, percent-encoded as one path segment. Encode it with
          *     `encodeURIComponent` (or the equivalent) rather than pasting it in:
@@ -3207,7 +3392,7 @@ export interface components {
          */
         TrackingToken: string;
         /** @description Transport ID. */
-        TransportId: string;
+        TransportId: components["schemas"]["ResourceId"];
         /** @description Message version ID. */
         VersionId: string;
     };
@@ -3285,6 +3470,7 @@ export type SchemaProbeTriggerResult = components['schemas']['ProbeTriggerResult
 export type SchemaPublishRequest = components['schemas']['PublishRequest'];
 export type SchemaRecipientIngestResult = components['schemas']['RecipientIngestResult'];
 export type SchemaRecipientLine = components['schemas']['RecipientLine'];
+export type SchemaResourceId = components['schemas']['ResourceId'];
 export type SchemaRetryPolicy = components['schemas']['RetryPolicy'];
 export type SchemaRetryRequest = components['schemas']['RetryRequest'];
 export type SchemaRetryResult = components['schemas']['RetryResult'];
@@ -3299,6 +3485,8 @@ export type SchemaSendingDomainList = components['schemas']['SendingDomainList']
 export type SchemaSendingDomainUpdate = components['schemas']['SendingDomainUpdate'];
 export type SchemaSendplaneInboundMessage = components['schemas']['SendplaneInboundMessage'];
 export type SchemaServiceHealth = components['schemas']['ServiceHealth'];
+export type SchemaSettingSource = components['schemas']['SettingSource'];
+export type SchemaShared = components['schemas']['Shared'];
 export type SchemaSigningKeyInfo = components['schemas']['SigningKeyInfo'];
 export type SchemaStartCampaignRequest = components['schemas']['StartCampaignRequest'];
 export type SchemaSuppression = components['schemas']['Suppression'];
@@ -3312,6 +3500,7 @@ export type SchemaTemplateUpdate = components['schemas']['TemplateUpdate'];
 export type SchemaTenantSettings = components['schemas']['TenantSettings'];
 export type SchemaTenantSettingsInput = components['schemas']['TenantSettingsInput'];
 export type SchemaTenantSettingsUpdate = components['schemas']['TenantSettingsUpdate'];
+export type SchemaTenantVars = components['schemas']['TenantVars'];
 export type SchemaTlsMode = components['schemas']['TLSMode'];
 export type SchemaTrackingConfig = components['schemas']['TrackingConfig'];
 export type SchemaTransport = components['schemas']['Transport'];
@@ -3325,6 +3514,7 @@ export type SchemaUnsubscribeNotice = components['schemas']['UnsubscribeNotice']
 export type SchemaUnsubscribeResult = components['schemas']['UnsubscribeResult'];
 export type SchemaVars = components['schemas']['Vars'];
 export type SchemaVersionRequired = components['schemas']['VersionRequired'];
+export type SchemaWhoami = components['schemas']['Whoami'];
 export type ResponseBadRequest = components['responses']['BadRequest'];
 export type ResponseConflict = components['responses']['Conflict'];
 export type ResponseForbidden = components['responses']['Forbidden'];
@@ -4788,7 +4978,7 @@ export interface operations {
                 /** @description Page size. Clamped into 1-1000. */
                 limit?: components["parameters"]["Limit"];
                 /** @description Probe history is always read per sender. */
-                sender_id: string;
+                sender_id: components["schemas"]["ResourceId"];
             };
             header?: never;
             path?: never;
@@ -5865,6 +6055,29 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getWhoami: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The authenticated caller. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Whoami"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

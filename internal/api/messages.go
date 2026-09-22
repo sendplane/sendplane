@@ -55,6 +55,9 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
+	if err := refuseSystemTenantSend(t, "send a message"); err != nil {
+		return nil, err
+	}
 	in := *req.Body
 	if len(in.To) == 0 {
 		return nil, errInvalid("to must name at least one recipient")
@@ -72,11 +75,26 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 	if err != nil {
 		return nil, err
 	}
-	snd, err := t.st.Senders().Get(ctx, idOf(in.SenderId))
+	snd, err := t.st.Senders().Get(ctx, string(in.SenderId))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, errInvalid("sender %s does not exist", in.SenderId)
 		}
+		return nil, err
+	}
+
+	// The tenant attributes this send carries, through the host's hook, then
+	// the two platform checks: may this sender be used for transactional mail,
+	// and do the variables satisfy a shared sender's From templates
+	// (ADR-0017). Both run before a single delivery row is written.
+	tenantVars, err := s.tenantVars(ctx, t, in.TenantVars)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkSenderUse(ctx, t, snd.ID, store.UseTransactional, tenantVars); err != nil {
+		return nil, err
+	}
+	if err := s.checkSharedFrom(snd.ID, snd.Shared, tenantVars); err != nil {
 		return nil, err
 	}
 
@@ -142,7 +160,10 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 			Status:    status,
 			Email:     string(r.Email), EmailNorm: norm,
 			Name: deref(r.Name), Locale: locale,
-			Vars:          mergeVars(varsOf(in.Vars), varsOf(r.Vars)),
+			Vars: mergeVars(varsOf(in.Vars), varsOf(r.Vars)),
+			// A transactional delivery has no campaign to inherit the tenant
+			// attributes from, so it carries them itself (ADR-0017).
+			TenantVars:    tenantVars,
 			Headers:       headers,
 			NextAttemptAt: now, CreatedAt: now, UpdatedAt: now,
 		}

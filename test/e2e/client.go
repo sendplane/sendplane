@@ -96,6 +96,47 @@ func (c *apiClient) postJSONWith(ctx context.Context, path string, in any, hdr m
 	return c.do(ctx, http.MethodPost, path, body, ct, hdr, out)
 }
 
+// The three "As" variants send the tenant header cmd/sendplane's resolver is
+// configured to honour (test/e2e/config.yaml, auth.tenant_header), which is
+// how the harness looks at the operator's own view — the only scope that shows
+// the platform resources and their state (ADR-0017). An empty tenant sends no
+// header, so a caller can parameterise over "as the tenant" and "as the
+// operator" without branching.
+func (c *apiClient) getJSONAs(ctx context.Context, tenant, path string, out any) error {
+	return c.do(ctx, http.MethodGet, path, nil, "", tenantHeaderOf(tenant), out)
+}
+
+func (c *apiClient) postJSONAs(ctx context.Context, tenant, path string, in, out any) error {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPost, path, bytes.NewReader(raw),
+		"application/json", tenantHeaderOf(tenant), out)
+}
+
+// doAs issues any method with an optional JSON body and an optional tenant
+// header. It is what the read-only assertions of scenario 9 loop over.
+func (c *apiClient) doAs(ctx context.Context, tenant, method, path string, in, out any) error {
+	var body io.Reader
+	contentType := ""
+	if in != nil {
+		raw, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body, contentType = bytes.NewReader(raw), "application/json"
+	}
+	return c.do(ctx, method, path, body, contentType, tenantHeaderOf(tenant), out)
+}
+
+func tenantHeaderOf(tenant string) map[string]string {
+	if tenant == "" {
+		return nil
+	}
+	return map[string]string{tenantHeader: tenant}
+}
+
 func (c *apiClient) putJSON(ctx context.Context, path string, in, out any) error {
 	raw, err := json.Marshal(in)
 	if err != nil {
@@ -303,6 +344,10 @@ type campaignInput struct {
 	Name      string `json:"name"`
 	VersionID string `json:"version_id,omitempty"`
 	SenderID  string `json:"sender_id"`
+	// TenantVars are the tenant attributes the campaign is created with
+	// (ADR-0017): bound as `tenant` in every template and, for a shared
+	// sender, what its From templates resolve from.
+	TenantVars map[string]any `json:"tenant_vars,omitempty"`
 }
 
 type campaignStats struct {
@@ -366,6 +411,9 @@ type delivery struct {
 	FirstClickedAt *time.Time `json:"first_clicked_at"`
 	UnsubscribedAt *time.Time `json:"unsubscribed_at"`
 	CreatedAt      *time.Time `json:"created_at"`
+	// TenantVars is set only on a delivery with no campaign to inherit them
+	// from: a transactional send or a probe (ADR-0017).
+	TenantVars map[string]any `json:"tenant_vars"`
 }
 
 type linkClick struct {
@@ -395,6 +443,7 @@ type messageRequest struct {
 	TemplateID string             `json:"template_id,omitempty"`
 	VersionID  string             `json:"version_id,omitempty"`
 	SenderID   string             `json:"sender_id"`
+	TenantVars map[string]any     `json:"tenant_vars,omitempty"`
 	To         []messageRecipient `json:"to"`
 	Headers    map[string]string  `json:"headers,omitempty"`
 }
@@ -499,12 +548,53 @@ type probeTriggerResult struct {
 	} `json:"runs"`
 }
 
+// transport and sender are the subsets scenario 9 asserts on. Both carry
+// `shared`, and a shared one's state fields are absent for a tenant.
+type transport struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Host        string `json:"host"`
+	Port        int32  `json:"port"`
+	Shared      bool   `json:"shared"`
+	HasPassword bool   `json:"has_password"`
+	Status      string `json:"status"`
+}
+
+type sender struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Shared      bool     `json:"shared"`
+	FromName    string   `json:"from_name"`
+	FromEmail   string   `json:"from_email"`
+	TransportID string   `json:"transport_id"`
+	DomainID    string   `json:"domain_id"`
+	Uses        []string `json:"uses"`
+	// Strings rather than typed values on purpose: the assertion is that they
+	// are *absent* for a tenant's view of a shared sender, and an absent
+	// enum and an absent timestamp both decode to "".
+	Health          string `json:"health"`
+	HealthReason    string `json:"health_reason"`
+	HealthCheckedAt string `json:"health_checked_at"`
+}
+
+// whoami mirrors the Whoami schema: what a console reads before it knows
+// which actions the caller holds.
+type whoami struct {
+	PrincipalID     string   `json:"principal_id"`
+	TenantID        string   `json:"tenant_id"`
+	Roles           []string `json:"roles"`
+	SystemTenant    bool     `json:"system_tenant"`
+	CanSwitchTenant bool     `json:"can_switch_tenant"`
+}
+
 type senderHealth struct {
-	SenderID  string     `json:"sender_id"`
-	Status    string     `json:"status"`
-	Reason    string     `json:"reason"`
-	CheckedAt *time.Time `json:"checked_at"`
-	Mailboxes []probeRun `json:"mailboxes"`
+	SenderID        string     `json:"sender_id"`
+	Status          string     `json:"status"`
+	Reason          string     `json:"reason"`
+	CheckedAt       *time.Time `json:"checked_at"`
+	TransportStatus string     `json:"transport_status"`
+	DomainStatus    string     `json:"domain_status"`
+	Mailboxes       []probeRun `json:"mailboxes"`
 }
 
 type outboxEvent struct {

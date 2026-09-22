@@ -57,6 +57,24 @@ type Provider interface {
 	//
 	// SystemTenantID is never returned, and the result is sorted.
 	Tenants(ctx context.Context) ([]string, error)
+	// LookupDeliveryTenant returns the tenant a delivery belongs to, by its
+	// globally unique ID alone.
+	//
+	// It exists for the bounce path (architecture 10). A VERP return path has
+	// to stay short enough to survive every MTA on the way back, so it carries
+	// the delivery ID and a truncated MAC and no tenant; a DSN that arrives in
+	// a *shared* bounce mailbox may belong to any tenant, and the mailbox
+	// cannot say which. The delivery ID can, because it is unique across
+	// tenants by construction (UUIDv7).
+	//
+	// ErrNotFound means no tenant has a delivery with that ID — it never
+	// existed, or retention removed it.
+	//
+	// A shared-mode Provider answers it with one primary-key lookup. A routed
+	// Provider that shards tenants across databases has to fan out over them,
+	// which costs one lookup per shard; such a Provider should cache or, better,
+	// encode the shard in the IDs it mints.
+	LookupDeliveryTenant(ctx context.Context, deliveryID string) (tenantID string, err error)
 	// Migrate brings the schema (or indexes) up to date.
 	Migrate(ctx context.Context) error
 	Close() error

@@ -7,6 +7,7 @@ import (
 
 	"github.com/sendplane/sendplane/store"
 	"github.com/sendplane/sendplane/store/memstore"
+	"github.com/sendplane/sendplane/store/platformtest"
 	"github.com/sendplane/sendplane/store/storetest"
 )
 
@@ -42,4 +43,15 @@ func TestWithClock(t *testing.T) {
 	if _, err := s.Transports().Get(ctx, tr.ID); err == nil {
 		t.Fatal("Get after Close: want an error")
 	}
+}
+
+// The platform overlay (store.WithPlatform, ADR-0017) is a wrapper, not a
+// backend, but it is only correct against a real Provider: memstore is the one
+// every unit test can run.
+func TestPlatformOverlay(t *testing.T) {
+	platformtest.Run(t, func(t *testing.T) store.Provider {
+		p := memstore.New()
+		t.Cleanup(func() { _ = p.Close() })
+		return p
+	})
 }

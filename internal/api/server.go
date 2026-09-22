@@ -28,6 +28,7 @@ import (
 
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/control"
+	"github.com/sendplane/sendplane/internal/platform"
 	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/internal/tracking"
 	"github.com/sendplane/sendplane/store"
@@ -62,6 +63,12 @@ type Deps struct {
 	// Renderer renders template previews through the same code path sending
 	// uses. New creates one if it is nil.
 	Renderer *render.Renderer
+	// Platform resolves the operator's shared senders: their templated From
+	// addresses and the tenant variables those need, so that a request whose
+	// tenant_vars do not supply one is refused here rather than failing every
+	// delivery it queued (ADR-0017). Nil in a deployment with no platform
+	// resources.
+	Platform *platform.Resolver
 	// Probe is optional; without it the manual probe trigger answers 501.
 	Probe ProbeTrigger
 	// ProbeInbound are the inbound probe webhooks to mount, one per provider
@@ -338,8 +345,9 @@ func (s *server) gate(f StrictHandlerFunc, operationID string) StrictHandlerFunc
 		if publicOps[operationID] {
 			return f(ctx, w, r, request)
 		}
+		authOnly := authOnlyOps[operationID]
 		action, ok := opActions[operationID]
-		if !ok {
+		if !ok && !authOnly {
 			// Unreachable while the table test passes. It is a refusal rather
 			// than a default-allow because the failure mode of the other
 			// choice is serving an operation nobody authorized.
@@ -364,15 +372,26 @@ func (s *server) gate(f StrictHandlerFunc, operationID string) StrictHandlerFunc
 			writeError(w, errorFor(err))
 			return nil, nil
 		}
-		if tenantID == "" || tenantID == store.SystemTenantID {
+		if tenantID == "" {
 			writeError(w, errorFor(fmt.Errorf("%w: no usable tenant", host.ErrForbidden)))
 			return nil, nil
 		}
+		// store.SystemTenantID used to be refused here. It is now reachable,
+		// because it is the operator's own view: the only scope that shows the
+		// platform transports, domains, mailboxes and state of ADR-0017, and
+		// the scope the platform probes run in. Getting there is still
+		// entirely the host's decision — the TenantResolver has to return it,
+		// and the reference resolver only does so for a principal holding a
+		// configured role (cmd/sendplane, auth.tenant_header). What the system
+		// tenant may then do is narrowed where it matters: it cannot create a
+		// campaign or send a message (refuseSystemTenantSend).
 
-		res := host.Resource{Kind: resourceKindFor(action), ID: resourceID(r), TenantID: tenantID}
-		if err := s.deps.Authz.Authorize(ctx, p, action, res); err != nil {
-			writeError(w, errorFor(fmt.Errorf("%w: %w", host.ErrForbidden, err)))
-			return nil, nil
+		if !authOnly {
+			res := host.Resource{Kind: resourceKindFor(action), ID: resourceID(r), TenantID: tenantID}
+			if err := s.deps.Authz.Authorize(ctx, p, action, res); err != nil {
+				writeError(w, errorFor(fmt.Errorf("%w: %w", host.ErrForbidden, err)))
+				return nil, nil
+			}
 		}
 
 		st, err := s.deps.Provider.ForTenant(ctx, tenantID)

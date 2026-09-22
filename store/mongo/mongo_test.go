@@ -7,6 +7,7 @@ import (
 
 	"github.com/sendplane/sendplane/store"
 	mongostore "github.com/sendplane/sendplane/store/mongo"
+	"github.com/sendplane/sendplane/store/platformtest"
 	"github.com/sendplane/sendplane/store/storetest"
 )
 
@@ -24,6 +25,28 @@ func TestMongo(t *testing.T) {
 		t.Skip("SENDPLANE_TEST_MONGO_URI is not set")
 	}
 	storetest.Run(t, func(t *testing.T) store.Provider {
+		p, err := mongostore.Open(context.Background(), uri, testDB)
+		if err != nil {
+			t.Fatalf("Open(%s): %v", uri, err)
+		}
+		t.Cleanup(func() {
+			if err := p.Close(); err != nil {
+				t.Errorf("Close: %v", err)
+			}
+		})
+		return p
+	})
+}
+
+// TestMongoPlatformOverlay runs the platform overlay suite (ADR-0017) against
+// MongoDB, for the same reason the Postgres one exists: the wrapper's logic is
+// covered by memstore, the document mapping is not.
+func TestMongoPlatformOverlay(t *testing.T) {
+	uri := os.Getenv("SENDPLANE_TEST_MONGO_URI")
+	if uri == "" {
+		t.Skip("SENDPLANE_TEST_MONGO_URI is not set")
+	}
+	platformtest.Run(t, func(t *testing.T) store.Provider {
 		p, err := mongostore.Open(context.Background(), uri, testDB)
 		if err != nil {
 			t.Fatalf("Open(%s): %v", uri, err)

@@ -39,6 +39,11 @@ strict: gate(operationID)
 
 `gate`가 chi 미들웨어가 아니라 **strict 미들웨어**인 이유는 오퍼레이션 ID를 아는 지점이 거기뿐이기 때문입니다.
 `opActions`에 없는 오퍼레이션은 500으로 **거부**합니다 — 기본 허용이면 아무도 인가하지 않은 라우트를 서비스하게 됩니다(§16).
+
+`authOnlyOps` 는 세 번째 분류입니다: `security` 는 그대로 두면서 `x-sendplane-action: none` 을 선언해
+**인증하고 테넌트까지 정하되 `Authorize` 는 호출하지 않는** 오퍼레이션. 지금 하나뿐이고(`GET /api/v1/whoami`)
+늘리기 어렵게 만들어 두었습니다 — 콘솔은 어떤 액션을 가졌는지 알기 전에 자기 화면을 그려야 하고, 그걸 권한으로
+막으면 role 하나 없는 것이 빈 화면이 됩니다. 테넌트 **데이터**를 돌려주는 것은 `opActions` 로 갑니다.
 `TestEveryOperationHasAnAction`이 스펙을 yaml.v3로 다시 읽어 표와 대조하므로, 스펙에 오퍼레이션을 추가하고 표를 잊으면 테스트가 깹니다.
 
 NDJSON 인제스트(`POST /campaigns/{id}/recipients`)만 바디 크기 제한에서 빠집니다.

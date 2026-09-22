@@ -76,6 +76,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 	t.Run("ActiveTenants", func(t *testing.T) { testActiveTenants(t, p) })
 	t.Run("ActiveTenantsCampaignOnly", func(t *testing.T) { testActiveTenantsCampaignOnly(t, p) })
 	t.Run("Tenants", func(t *testing.T) { testTenants(t, p) })
+	t.Run("LookupDeliveryTenant", func(t *testing.T) { testLookupDeliveryTenant(t, p) })
 	t.Run("LoadTenantSettings", func(t *testing.T) { testLoadTenantSettings(t, p) })
 }
 

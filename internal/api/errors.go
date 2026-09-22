@@ -9,6 +9,7 @@ import (
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/control"
 	"github.com/sendplane/sendplane/internal/ingest"
+	"github.com/sendplane/sendplane/internal/platform"
 	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/store"
 )
@@ -84,6 +85,11 @@ func errorFor(err error) *apiError {
 			message: "forbidden", cause: err}
 
 	// store sentinels.
+	case errors.Is(err, store.ErrReadOnly):
+		// A platform resource is defined in the operator's configuration, so
+		// there is nothing an API caller could change about it (ADR-0017).
+		return &apiError{status: http.StatusForbidden, code: ErrorCodePlatformReadOnly,
+			message: err.Error(), cause: err}
 	case errors.Is(err, store.ErrNotFound):
 		return &apiError{status: http.StatusNotFound, code: ErrorCodeNotFound,
 			message: "not found", cause: err}
@@ -110,6 +116,14 @@ func errorFor(err error) *apiError {
 		errors.Is(err, control.ErrNoSender),
 		errors.Is(err, control.ErrNoVersion):
 		return &apiError{status: http.StatusUnprocessableEntity, code: ErrorCodePreconditionFailed,
+			message: err.Error(), cause: err}
+
+	// sender-use policy and shared sender From templates (ADR-0017).
+	case errors.Is(err, host.ErrSenderUseDenied):
+		return &apiError{status: http.StatusForbidden, code: ErrorCodeSenderUseDenied,
+			message: err.Error(), cause: err}
+	case errors.Is(err, platform.ErrMissingVars), errors.Is(err, platform.ErrInvalidFrom):
+		return &apiError{status: http.StatusUnprocessableEntity, code: ErrorCodeTenantVarsMissing,
 			message: err.Error(), cause: err}
 
 	// render / publish.

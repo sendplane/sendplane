@@ -306,3 +306,112 @@ func ExtractKeys(subject, body, text string) ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
+
+// ExtractVars returns the variable paths under root that the given Liquid
+// sources read, sorted and deduplicated and with the root stripped:
+// ExtractVars("tenant", `{{ tenant.slug }}`) is ["slug"].
+//
+// It is a scanner, not an evaluator, so it sees what a template *mentions*
+// rather than what a render would actually need. That is the useful direction
+// for the one caller: a platform sender's From templates are checked against a
+// request's tenant variables before anything is queued, and a missing
+// variable has to be a 422 naming the key rather than a mail from
+// "sender+@example.com" (ADR-0017).
+//
+// Recognised forms are a bare `{{ root.path }}`, the same inside a filter
+// chain or a tag argument (`{% if tenant.plan == "pro" %}`), and the bracket
+// form `{{ root["slug"] }}`. A path built at render time
+// (`{{ tenant[key] }}`) cannot be known statically and is skipped, as is a
+// bare `{{ root }}` with no path at all.
+func ExtractVars(root string, srcs ...string) []string {
+	seen := map[string]struct{}{}
+	for _, src := range srcs {
+		for _, sp := range scanLiquidSpans(src) {
+			collectVars(root, sp.inner, seen)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collectVars finds every `root.<path>` and `root["path"]` reference in one
+// Liquid construct's inner text.
+func collectVars(root, inner string, seen map[string]struct{}) {
+	for i := 0; i+len(root) <= len(inner); {
+		j := strings.Index(inner[i:], root)
+		if j < 0 {
+			return
+		}
+		at := i + j
+		i = at + len(root)
+		// The match has to be a whole identifier: `subtenant.slug` is not a
+		// reference to `tenant`.
+		if at > 0 && isIdentByte(inner[at-1]) {
+			continue
+		}
+		if path, n := scanVarPath(inner[i:]); path != "" {
+			seen[path] = struct{}{}
+			i += n
+		}
+	}
+}
+
+// scanVarPath reads the `.a.b` / `["a"]` suffix at the start of s and returns
+// the dotted path it names plus how many bytes it consumed.
+func scanVarPath(s string) (string, int) {
+	var parts []string
+	i := 0
+	for i < len(s) {
+		switch s[i] {
+		case '.':
+			j := i + 1
+			for j < len(s) && isIdentByte(s[j]) {
+				j++
+			}
+			if j == i+1 {
+				return join(parts), i
+			}
+			parts = append(parts, s[i+1:j])
+			i = j
+		case '[':
+			if i+1 >= len(s) || (s[i+1] != '"' && s[i+1] != '\'') {
+				// A computed index: nothing static to record, and whatever
+				// follows it is not a path this scanner can continue.
+				return join(parts), i
+			}
+			q := s[i+1]
+			k := strings.IndexByte(s[i+2:], q)
+			if k < 0 {
+				return join(parts), i
+			}
+			key := s[i+2 : i+2+k]
+			end := i + 2 + k + 1
+			if end >= len(s) || s[end] != ']' {
+				return join(parts), i
+			}
+			if key == "" {
+				return join(parts), i
+			}
+			parts = append(parts, key)
+			i = end + 1
+		default:
+			return join(parts), i
+		}
+	}
+	return join(parts), i
+}
+
+func join(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ".")
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}

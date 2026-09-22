@@ -202,7 +202,7 @@ func buildSendplane(ctx context.Context, cfg *Config, provider store.Provider, l
 			"any mail in a probe mailbox can produce a verdict")
 	}
 
-	sp, err := sendplane.New(sendplane.Options{
+	opts := sendplane.Options{
 		Store:   provider,
 		Auth:    authenticator,
 		Authz:   authorizer,
@@ -210,8 +210,22 @@ func buildSendplane(ctx context.Context, cfg *Config, provider store.Provider, l
 		Secrets: cipher,
 		Limits:  cfg.Limits.ToHost(),
 		Probe:   probeCfg,
-		Logger:  logger,
-	})
+		// The operator's shared sending infrastructure. sendplane.New
+		// validates it and wraps the store in the overlay that resolves it;
+		// an empty section changes nothing (ADR-0017).
+		Platform: cfg.Platform.ToHost(),
+		Logger:   logger,
+	}
+	// Per-request tenant selection, off unless auth.tenant_header asks for
+	// it. Leaving Options.Tenants nil keeps sendplane's own default (the
+	// principal's tenant and nothing else), which is the right answer for
+	// every deployment without an operator console.
+	if r := newTenantResolver(cfg.Auth.TenantHeader, cfg.Auth.Mode); r != nil {
+		opts.Tenants = r
+		logger.Info("tenant selection by header is enabled",
+			"header", r.header, "roles", r.roles)
+	}
+	sp, err := sendplane.New(opts)
 	if err != nil {
 		return nil, err
 	}

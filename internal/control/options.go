@@ -202,6 +202,17 @@ type Loop struct {
 	// probe delivery went terminal, by which time the tenant is idle unless
 	// it happens to be busy with something else.
 	AllTenants bool
+	// IncludeSystem also ticks store.SystemTenantID, which no tenant listing
+	// ever returns.
+	//
+	// It exists for the platform resources of ADR-0017: a shared sender is
+	// probed once, in the system tenant, and a shared mailbox's credentials
+	// are checked there, because that is the only scope the platform overlay
+	// makes them visible in. A loop that does not set it never sees them, and
+	// a loop that does must be one whose work is genuinely the platform's -
+	// the system tenant has no campaigns and no deliveries of its own beyond
+	// probe mail.
+	IncludeSystem bool
 }
 
 // WithLoop registers an extra leader loop. It gets exactly the treatment the
@@ -224,7 +235,7 @@ func WithLoop(l Loop) Option {
 		}
 		c.extraLoops = append(c.extraLoops, loopSpec{
 			name: l.Name, interval: l.Interval, newTenant: l.NewTenant,
-			allTenants: l.AllTenants,
+			allTenants: l.AllTenants, includeSystem: l.IncludeSystem,
 		})
 	}
 }

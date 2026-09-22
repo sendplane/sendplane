@@ -120,7 +120,7 @@ func TestErrorMapping(t *testing.T) {
 	// published: the version is resolved at start, so the failure moves there.
 	t.Run("unpublished template fails at start, not at create", func(t *testing.T) {
 		c := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
-			Name: "c", SenderId: *snd.Id, TemplateId: tpl.Id,
+			Name: "c", SenderId: snd.Id, TemplateId: tpl.Id,
 		}), http.StatusCreated)
 		w := e.do(http.MethodPost, "/api/v1/campaigns/"+c.Id.String()+"/start", nil)
 		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodePreconditionFailed)
@@ -130,7 +130,7 @@ func TestErrorMapping(t *testing.T) {
 		v := decodeInto[MessageVersion](t, e.do(http.MethodPost,
 			"/api/v1/templates/"+tpl.Id.String()+"/publish", nil), http.StatusCreated)
 		c := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
-			Name: "c", SenderId: *snd.Id, VersionId: &v.Id,
+			Name: "c", SenderId: snd.Id, VersionId: &v.Id,
 		}), http.StatusCreated)
 		// draft cannot be paused.
 		w := e.do(http.MethodPost, "/api/v1/campaigns/"+c.Id.String()+"/pause", nil)
@@ -141,7 +141,7 @@ func TestErrorMapping(t *testing.T) {
 		v := decodeInto[MessageVersion](t, e.do(http.MethodPost,
 			"/api/v1/templates/"+tpl.Id.String()+"/publish", nil), http.StatusCreated)
 		c := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
-			Name: "empty", SenderId: *snd.Id, VersionId: &v.Id,
+			Name: "empty", SenderId: snd.Id, VersionId: &v.Id,
 		}), http.StatusCreated)
 		w := e.do(http.MethodPost, "/api/v1/campaigns/"+c.Id.String()+"/start", nil)
 		decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodePreconditionFailed)
@@ -183,7 +183,7 @@ func TestSecretsAreNeverEchoed(t *testing.T) {
 		t.Fatal("has_password is not set on the create response")
 	}
 
-	for _, path := range []string{"/api/v1/transports", "/api/v1/transports/" + created.Id.String()} {
+	for _, path := range []string{"/api/v1/transports", "/api/v1/transports/" + created.Id} {
 		w := e.do(http.MethodGet, path, nil)
 		if body := w.Body.String(); strings.Contains(body, password) {
 			t.Fatalf("GET %s leaked the password: %s", path, body)
@@ -191,7 +191,7 @@ func TestSecretsAreNeverEchoed(t *testing.T) {
 	}
 
 	// The stored bytes must be the ciphertext, not the plaintext.
-	stored, err := e.st.Transports().Get(t.Context(), created.Id.String())
+	stored, err := e.st.Transports().Get(t.Context(), created.Id)
 	if err != nil {
 		t.Fatalf("store get: %v", err)
 	}
@@ -206,14 +206,14 @@ func TestSecretsAreNeverEchoed(t *testing.T) {
 	// Omitting the field on an update keeps the stored secret; a round trip of
 	// a GET body through a PUT must not wipe it.
 	updated := decodeInto[Transport](t, e.do(http.MethodPut,
-		"/api/v1/transports/"+created.Id.String(), TransportUpdate{
+		"/api/v1/transports/"+created.Id, TransportUpdate{
 			Name: "relay-2", Host: "smtp.example.com", Port: 587,
 			Username: ptr("mailer"), Version: *created.Version,
 		}), http.StatusOK)
 	if updated.HasPassword == nil || !*updated.HasPassword {
 		t.Fatal("omitting password on update cleared it")
 	}
-	after, _ := e.st.Transports().Get(t.Context(), created.Id.String())
+	after, _ := e.st.Transports().Get(t.Context(), created.Id)
 	if string(after.Password) != string(stored.Password) {
 		t.Fatal("omitting password on update rewrote the stored value")
 	}
@@ -392,7 +392,7 @@ func equalStrings(a, b []string) bool {
 func TestProbeTriggerWithoutAProbeImplementationIs501(t *testing.T) {
 	e := newEnv(t)
 	snd := e.seedSender()
-	w := e.do(http.MethodPost, "/api/v1/senders/"+snd.Id.String()+"/probe", nil)
+	w := e.do(http.MethodPost, "/api/v1/senders/"+snd.Id+"/probe", nil)
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501; body: %s", w.Code, w.Body.String())
 	}

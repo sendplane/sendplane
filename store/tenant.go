@@ -91,6 +91,22 @@ type TenantSettings struct {
 	DefaultLocale string
 	Tracking      TrackingConfig
 
+	// PlatformDefaults names the fields whose value came from the operator's
+	// platform configuration rather than from this row, because the tenant
+	// had set none (PlatformCatalog.TrackingDomain,
+	// PlatformCatalog.UnsubscribeURLTemplate).
+	//
+	// It is computed on read by the platform overlay and is never stored: no
+	// backend has a column for it, and Update strips a field it names back out
+	// so that reading the effective value and writing it back does not turn
+	// the operator's default into the tenant's own copy of it (ADR-0017).
+	//
+	// It exists so that every consumer — the sender, the control plane, the
+	// settings endpoint — sees one effective value without each applying the
+	// fallback itself, while the settings endpoint can still say which one is
+	// in force.
+	PlatformDefaults []string
+
 	// EventTypes is the tenant's outbox subscription (architecture 12).
 	// Empty means the default set: everything sendplane emits except the
 	// per-recipient firehose that a bulk campaign turns into one outbox row
@@ -175,6 +191,21 @@ func DefaultTenantSettings(tenantID string, now time.Time) *TenantSettings {
 		CreatedAt: now.UTC(),
 		UpdatedAt: now.UTC(),
 	}
+}
+
+// The fields PlatformDefaults may name.
+const (
+	SettingTrackingDomain         = "tracking.domain"
+	SettingUnsubscribeURLTemplate = "unsubscribe_url_template"
+)
+
+// FromPlatform reports whether the named field's effective value came from the
+// platform configuration.
+func (s *TenantSettings) FromPlatform(field string) bool {
+	if s == nil {
+		return false
+	}
+	return slices.Contains(s.PlatformDefaults, field)
 }
 
 // TenantSettingsRepo is a singleton per tenant.

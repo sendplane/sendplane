@@ -200,17 +200,29 @@ func decodeError(t *testing.T, w *httptest.ResponseRecorder, wantStatus int, wan
 
 // --- fixtures ----------------------------------------------------------
 
+// seedSendingDomain registers domain as one of the test tenant's own sending
+// domains, which checkFromDomainOwned (ADR-0017) now requires before a sender
+// may use a from_email on it. It is idempotent per (env, domain) pair within a
+// test only in the sense that callers each seed the domain their sender needs;
+// seeding the same domain twice in one test would 409.
+func (e *env) seedSendingDomain(domain string) SendingDomain {
+	e.t.Helper()
+	return decodeInto[SendingDomain](e.t, e.do(http.MethodPost, "/api/v1/sending-domains",
+		SendingDomainInput{Domain: domain}), http.StatusCreated)
+}
+
 // seedSender creates a transport and a sender through the API, which is also
 // what keeps the create handlers exercised by every flow test.
 func (e *env) seedSender() Sender {
 	e.t.Helper()
+	e.seedSendingDomain("example.com")
 	tr := decodeInto[Transport](e.t, e.do(http.MethodPost, "/api/v1/transports", TransportInput{
 		Name: "relay", Host: "smtp.example.com", Port: 587, Password: ptr("s3cret"),
 		Username: ptr("mailer"),
 	}), http.StatusCreated)
 	return decodeInto[Sender](e.t, e.do(http.MethodPost, "/api/v1/senders", SenderInput{
 		Name: "marketing", FromEmail: "news@example.com", FromName: ptr("Example"),
-		TransportId: *tr.Id,
+		TransportId: tr.Id,
 	}), http.StatusCreated)
 }
 

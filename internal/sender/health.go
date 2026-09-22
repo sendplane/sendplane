@@ -185,8 +185,8 @@ func (h *healthTracker) due(now time.Time) []probeTarget {
 // recover marks a transport healthy after a successful probe.
 func (h *healthTracker) recover(ctx context.Context, t *tenantState, tr *store.Transport, s *Sender) {
 	now := s.cfg.Clock()
-	if status, changed := h.success(t.id, tr.ID, now); changed {
-		s.setTransportStatus(ctx, t, tr.ID, status, "probe succeeded", s.statusUntil(status, now))
+	if status, changed := h.success(limitScope(t.id, tr), tr.ID, now); changed {
+		s.setTransportStatus(ctx, t, tr, status, "probe succeeded", s.statusUntil(status, now))
 	}
 }
 
@@ -210,7 +210,7 @@ func (s *Sender) transportUsable(t *tenantState, tr *store.Transport, now time.T
 	if tr.Status == store.TransportUnhealthy {
 		return false
 	}
-	return s.health.usable(t.id, tr.ID, now)
+	return s.health.usable(limitScope(t.id, tr), tr.ID, now)
 }
 
 // statusUntil is how long a non-healthy transport status is trusted before any
@@ -226,9 +226,19 @@ func (s *Sender) statusUntil(status store.TransportStatus, now time.Time) time.T
 // setTransportStatus persists a transport status transition. It re-reads the
 // row first: the cached copy may be stale, and Update is optimistic on
 // Version, so writing the cached row would fight the API.
-func (s *Sender) setTransportStatus(ctx context.Context, t *tenantState, transportID string, status store.TransportStatus, reason string, until time.Time) {
+// A shared transport's status belongs to the platform, not to the tenant that
+// happened to observe it: the write goes to the system tenant's view, which is
+// where the overlay keeps the state shadow row (ADR-0017).
+func (s *Sender) setTransportStatus(ctx context.Context, t *tenantState, transport *store.Transport, status store.TransportStatus, reason string, until time.Time) {
+	transportID := transport.ID
+	st, err := s.configState(ctx, t, transportID)
+	if err != nil {
+		s.cfg.Logger.Warn("sendplane: cannot reach the platform view to record a transport status",
+			"transport", transportID, "err", err)
+		return
+	}
 	for attempt := 0; attempt < 2; attempt++ {
-		tr, err := t.st.Transports().Get(ctx, transportID)
+		tr, err := st.st.Transports().Get(ctx, transportID)
 		if err != nil {
 			return
 		}
@@ -244,17 +254,20 @@ func (s *Sender) setTransportStatus(ctx context.Context, t *tenantState, transpo
 		tr.StatusReason = reason
 		tr.StatusChangedAt = s.cfg.Clock()
 		tr.StatusUntil = until
-		if err := t.st.Transports().Update(ctx, tr); err == nil {
+		if err := st.st.Transports().Update(ctx, tr); err == nil {
+			st.transports.invalidate(transportID)
 			t.transports.invalidate(transportID)
 			s.cfg.Metrics.Count(MetricTransport, 1, "transport", transportID, "status", status.String())
 			if status == store.TransportUnhealthy {
 				s.pool.CloseTransport(transportID)
 			}
 			s.cfg.Logger.Warn("sendplane: transport status changed",
-				"tenant", t.id, "transport", transportID, "status", status.String(), "reason", reason)
+				"tenant", t.id, "transport", transportID, "shared", transport.Shared,
+				"status", status.String(), "reason", reason)
 			return
 		}
 		// A concurrent edit bumped Version: read it again and retry once.
+		st.transports.invalidate(transportID)
 		t.transports.invalidate(transportID)
 	}
 }

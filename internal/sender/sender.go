@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/sendplane/sendplane/host"
+	"github.com/sendplane/sendplane/internal/platform"
 	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/internal/tracking"
 	"github.com/sendplane/sendplane/store"
@@ -94,6 +95,11 @@ type Config struct {
 	Hooks    host.Hooks
 	Secrets  host.SecretCipher
 	Renderer *render.Renderer
+	// Platform resolves the shared senders of the operator's platform catalog:
+	// their templated From addresses, the uses they are allowed for, and the
+	// per-tenant rate share of the transport behind them (ADR-0017). Nil in a
+	// deployment with no platform resources, which is every single-tenant one.
+	Platform *platform.Resolver
 	Metrics  host.Metrics
 	Logger   *slog.Logger
 	Clock    func() time.Time
@@ -184,6 +190,9 @@ type Sender struct {
 	limiter  *Limiter
 	signer   tracking.Signer
 	health   *healthTracker
+	// platform is the lazily built system-tenant view the shared transports
+	// and domains are read through (platform.go).
+	platform platformSource
 
 	lanes []*lane
 
@@ -430,10 +439,24 @@ func (s *Sender) handle(ctx context.Context, j job) {
 }
 
 // refreshTenants reloads the active tenant list (ADR-0006).
+//
+// The system tenant is appended when the deployment has platform senders,
+// because no tenant listing ever returns it (store.Provider) and the loopback
+// probe of a shared sender runs there: one probe for everybody, in the one
+// scope the platform overlay makes the shared transport and mailboxes visible
+// in (ADR-0017). Without this the probe delivery would be queued in `_system`
+// and never claimed.
+//
+// It costs one idle tenant in the round-robin for a deployment that has
+// platform senders, and nothing at all for one that does not: the system
+// tenant has no campaigns and no deliveries of its own beyond probe mail.
 func (s *Sender) refreshTenants(ctx context.Context) error {
 	ids, err := s.provider.ActiveTenants(ctx)
 	if err != nil {
 		return err
+	}
+	if s.cfg.Platform != nil && len(s.cfg.Platform.Catalog().Senders) > 0 {
+		ids = append(ids, store.SystemTenantID)
 	}
 	s.mu.Lock()
 	s.order = ids

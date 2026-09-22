@@ -29,6 +29,19 @@ var publicOps = map[string]bool{
 	"TrackUnsubscribeClick": true,
 }
 
+// authOnlyOps are the operations that declare `x-sendplane-action: none`
+// while keeping `security`: they authenticate the caller, resolve its tenant
+// and then call no Authorizer at all.
+//
+// There is exactly one, and it is deliberately hard to add to. A console has
+// to know who it is talking to and which tenant it is looking at before it can
+// render anything, and gating that on a permission turns a missing role into a
+// blank page (GET /api/v1/whoami). Anything that returns tenant *data* belongs
+// in opActions instead.
+var authOnlyOps = map[string]bool{
+	"GetWhoami": true,
+}
+
 // opActions maps every authenticated operation to the Action a principal needs
 // for it. resourceKindFor names the object the Action is checked against.
 var opActions = map[string]host.Action{

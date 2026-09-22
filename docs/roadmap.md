@@ -15,6 +15,7 @@
 | 7. MongoDB 동등성 | 🟡 partial | storetest는 매 PR 매트릭스로 통과. e2e는 **nightly에서만** mongo 오버레이 실행 — PR 단위 mongo e2e 회귀는 못 잡음 |
 | 8. 프론트엔드 | 🟡 partial | api/ui/console 전부 구현·빌드됨. `examples/host-vue`(호스트 임베딩 예제)는 아직 없음 |
 | 9. 배포와 1M 부하 테스트 | 🟡 partial | Helm 차트·`load-1m.yml` 구현 완료, 로컬 100k 런 PASS(§15.1 실측). **GitHub Actions에서 한 번도 실행된 적 없음**(워크플로 실행 이력 0건), Helm 차트를 실 k8s 클러스터에 배포해 본 적 없음 |
+| 10. 멀티테넌트 SaaS (플랫폼 공유 자원) | ✅ done | ADR-0017. 공유 transport/domain/sender/메일박스를 설정에서 가상 엔티티로 해석(`store.WithPlatform`), 테넌트 속성은 요청 변수(`tenant_vars` + `Hooks.TenantVars`), sender 사용 정책(`Hooks.SenderPolicy`), deliveryID로 바운스 테넌트 조회, 공유 relay의 공정 분배와 공유 suppression, `GET /whoami` + 테넌트 헤더 전환. e2e 시나리오 9 |
 
 ## Phase 0 — 뼈대와 스토어 계약 (기반)
 1. 모듈 레이아웃, `sendplane.New` 시그니처와 `Options/Hooks/Principal/Action` 타입만 정의 (구현 없음, 컴파일만).
@@ -100,3 +101,20 @@
 4. `examples/host-vue`를 만들어 Phase 8의 완료 기준을 채운다.
 5. `probe.Trigger`의 그룹 조회(`ListByGroup`)와 `SendingDomain.OutboundIPs` 갱신 — 둘 다 architecture §18에 남겨 둔 구체적인 갭.
 6. 1M(전체 규모) 부하 테스트를 GitHub Actions에서 한 번 돌려 측정치를 회귀 기준선으로 남긴다(지금까지는 로컬 100k만 검증됨).
+
+## Phase 10 — 멀티테넌트 SaaS (플랫폼 공유 자원)
+
+ADR-0017. 운영자가 자기 릴레이·도메인·발신 신원을 테넌트에게 빌려주는 층입니다.
+
+1. `store/platform.go` + `store/overlay.go`: 공유 자원을 설정에서 가상 엔티티(`sys:<이름>`)로 해석하는
+   `store.WithPlatform` 오버레이. 설정 쓰기는 `ErrReadOnly`, 상태만 `_system` 의 shadow 행으로.
+2. `host.Hooks.TenantVars` + `tenant_vars`(캠페인/메시지/프리뷰) + 공유 sender의 Liquid `From` 템플릿.
+   테넌트 테이블은 만들지 않습니다.
+3. `host.Hooks.SenderPolicy` + `PlatformSender.Uses`(campaign/transactional/probe).
+4. `Provider.LookupDeliveryTenant` + 공유 바운스 메일박스, 공유 suppression, 공유 릴레이의 공정 분배.
+5. `GET /api/v1/whoami` + 참조 바이너리의 `auth.tenant_header` 테넌트 전환.
+
+**완료 기준**(전부 통과): `store/platformtest` 적합성 스위트(가시성·read-only·shadow 행·병합),
+`internal/api`/`internal/bounce`/`internal/sender`/`cmd/sendplane` 단위 테스트, e2e 시나리오 9
+(공유 sender가 테넌트별 `From` 을 렌더하고, `tenant_vars` 누락은 422, 공유 sender 캠페인은 403,
+플랫폼 쓰기는 403, shadow 행을 psql로 읽어 설정 컬럼이 전부 빈 값).

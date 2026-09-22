@@ -57,7 +57,7 @@ func (s *server) GetBounceMailbox(ctx context.Context, req GetBounceMailboxReque
 	if err != nil {
 		return nil, err
 	}
-	m, err := t.st.BounceMailboxes().Get(ctx, req.MailboxId.String())
+	m, err := t.st.BounceMailboxes().Get(ctx, req.MailboxId)
 	if err != nil {
 		return nil, err
 	}
@@ -69,10 +69,13 @@ func (s *server) UpdateBounceMailbox(ctx context.Context, req UpdateBounceMailbo
 	if err != nil {
 		return nil, err
 	}
+	if err := refusePlatformWrite("bounce mailbox", req.MailboxId); err != nil {
+		return nil, err
+	}
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	m, err := t.st.BounceMailboxes().Get(ctx, req.MailboxId.String())
+	m, err := t.st.BounceMailboxes().Get(ctx, req.MailboxId)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +94,10 @@ func (s *server) DeleteBounceMailbox(ctx context.Context, req DeleteBounceMailbo
 	if err != nil {
 		return nil, err
 	}
-	if err := t.st.BounceMailboxes().Delete(ctx, req.MailboxId.String()); err != nil {
+	if err := refusePlatformWrite("bounce mailbox", req.MailboxId); err != nil {
+		return nil, err
+	}
+	if err := t.st.BounceMailboxes().Delete(ctx, req.MailboxId); err != nil {
 		return nil, err
 	}
 	return DeleteBounceMailbox204Response{}, nil
@@ -160,7 +166,7 @@ func bounceMailboxOut(v *store.BounceMailbox) BounceMailbox {
 		protocol = MailboxProtocol(mailbox.ProtocolIMAP)
 	}
 	return BounceMailbox{
-		Id: uuidPtrOf(v.ID), Name: v.Name, Address: strPtr(v.Address),
+		Id: rid(v.ID), Shared: sharedOut(v.Shared), Name: v.Name, Address: strPtr(v.Address),
 		Protocol: &protocol,
 		Host:     v.Host, Port: clampInt32(v.Port), Tls: tlsModeOut(v.TLS),
 		Username: strPtr(v.Username),

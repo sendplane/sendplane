@@ -26,6 +26,12 @@ type TenantMailbox struct {
 	// PollInterval overrides the runner default for this mailbox. Zero uses
 	// the default.
 	PollInterval time.Duration
+	// Platform marks a *shared* bounce mailbox, one the operator runs for
+	// every tenant (store.PlatformCatalog). TenantID is then the system tenant
+	// — it is where the lock and the mailbox's health live — and the mail in it
+	// may belong to anybody, so the processor finds the tenant from the
+	// delivery ID rather than from this field (ADR-0017, architecture 10).
+	Platform bool
 }
 
 func (m TenantMailbox) key() string { return m.TenantID + "/" + m.MailboxID }
@@ -62,7 +68,8 @@ type RunnerConfig struct {
 	Owner    string
 	Provider store.Provider
 	Source   MailboxSource
-	// Processor is shared by every mailbox. Nil builds a default one.
+	// Processor is shared by every mailbox. Nil builds a default one, which is
+	// given Provider so the platform paths work.
 	Processor *Processor
 	Secrets   host.SecretCipher
 
@@ -133,7 +140,8 @@ func (c RunnerConfig) withDefaults() RunnerConfig {
 	}
 	if c.Processor == nil {
 		c.Processor = NewProcessor(Options{
-			Clock: c.Clock, Logger: c.Logger, Metrics: c.Metrics,
+			Provider: c.Provider,
+			Clock:    c.Clock, Logger: c.Logger, Metrics: c.Metrics,
 		})
 	}
 	return c
@@ -352,7 +360,15 @@ func (r *Runner) PollOnce(ctx context.Context, box TenantMailbox) (Stats, error)
 
 		handled := make([]string, 0, len(msgs))
 		for _, msg := range msgs {
-			out, err := r.cfg.Processor.Handle(sessionCtx, st, box.TenantID, msg)
+			// A shared mailbox's mail belongs to whoever sent the delivery it
+			// bounced, which only the delivery ID can say.
+			handle := r.cfg.Processor.Handle
+			if box.Platform {
+				handle = func(ctx context.Context, _ store.Store, _ string, m mailbox.Message) (Outcome, error) {
+					return r.cfg.Processor.HandlePlatform(ctx, r.cfg.Provider, m)
+				}
+			}
+			out, err := handle(sessionCtx, st, box.TenantID, msg)
 			if err != nil {
 				// The store failed. Acknowledge what did work and stop: the
 				// rest comes back on the next pass.

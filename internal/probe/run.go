@@ -332,6 +332,14 @@ func (r *Runner) Tick(ctx context.Context, st store.Store, now time.Time) error 
 	var firstErr error
 	for i := range senders {
 		s := &senders[i]
+		// A shared (platform) sender is probed once, in the system tenant, on
+		// the operator's behalf (ADR-0017). Every tenant's store shows it, so
+		// without this every tenant would send its own probe mail through the
+		// operator's relay and they would all fight over the one shared probe
+		// mailbox.
+		if s.Shared && s.TenantID != store.SystemTenantID {
+			continue
+		}
 		due, why := r.due(s, changed, now)
 		if !due {
 			continue

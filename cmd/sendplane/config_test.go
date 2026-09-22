@@ -355,3 +355,69 @@ func TestProbeWebhookToHost(t *testing.T) {
 }
 
 func ptrTo[T any](v T) *T { return &v }
+
+// `auth.tenant_header.enabled: true` with no roles is a feature that is on and
+// unusable: nobody could select a tenant, including the system tenant it
+// exists for, so the console it was switched on for would 403 on every
+// switch. auth.mode=none is the exception, where there is one fixed local
+// principal and the role list would only be ceremony (ADR-0017).
+func TestValidateRejectsTenantHeaderWithoutRoles(t *testing.T) {
+	cfg := &Config{
+		Store: StoreConfig{Driver: "postgres", DSN: "postgres://localhost/x"},
+		Auth: AuthConfig{
+			Mode: "apikey", APIKeys: []APIKeyEntry{{KeyHash: "abc", Tenant: "acme"}},
+			TenantHeader: TenantHeaderConfig{Enabled: ptrTo(true)},
+		},
+	}
+	cfg.applyDefaults()
+	err := cfg.Validate(false)
+	if err == nil {
+		t.Fatal("tenant_header.enabled with no roles was accepted under auth.mode=apikey")
+	}
+	if !strings.Contains(err.Error(), "auth.tenant_header.roles") {
+		t.Fatalf("error does not name the field to fix: %v", err)
+	}
+
+	// A role makes it legal.
+	cfg.Auth.TenantHeader.Roles = []string{"admin"}
+	if err := cfg.Validate(false); err != nil {
+		t.Fatalf("tenant_header with a role was rejected: %v", err)
+	}
+}
+
+func TestValidateAllowsTenantHeaderWithoutRolesInModeNone(t *testing.T) {
+	cfg := &Config{
+		Store: StoreConfig{Driver: "postgres", DSN: "postgres://localhost/x"},
+		Auth: AuthConfig{
+			Mode:         "none",
+			TenantHeader: TenantHeaderConfig{Enabled: ptrTo(true)},
+		},
+	}
+	cfg.applyDefaults()
+	if err := cfg.Validate(false); err != nil {
+		t.Fatalf("auth.mode=none needs no roles: %v", err)
+	}
+}
+
+// A header name with a space or a colon in it is not a header name, and the
+// symptom would be a header nothing ever sends and a switch that silently
+// never happens.
+func TestValidateRejectsABadTenantHeaderName(t *testing.T) {
+	cfg := &Config{
+		Store: StoreConfig{Driver: "postgres", DSN: "postgres://localhost/x"},
+		Auth: AuthConfig{
+			Mode: "none",
+			TenantHeader: TenantHeaderConfig{
+				Enabled: ptrTo(true), Header: "X-Sendplane Tenant:",
+			},
+		},
+	}
+	cfg.applyDefaults()
+	err := cfg.Validate(false)
+	if err == nil {
+		t.Fatal("a header name containing a space and a colon was accepted")
+	}
+	if !strings.Contains(err.Error(), "auth.tenant_header.header") {
+		t.Fatalf("error does not name the field to fix: %v", err)
+	}
+}

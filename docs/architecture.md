@@ -134,6 +134,12 @@ type Options struct {
     // Probe는 루프백 헬스 프로브(§11)를 켠다. 기본 off: 프로브 메일박스가
     // 없는데 트리거만 도는 것은 아예 없는 것보다 나쁘다.
     Probe   ProbeConfig
+    // Platform은 운영자가 테넌트에게 빌려주는 공유 인프라(§5.4, ADR-0017):
+    // 공유 transport / sending domain / sender / probe·bounce 메일박스.
+    // 설정이고 스토어에 기록되지 않는다. New가 검증(ID 유일성, 참조 해석,
+    // From 템플릿 파싱)하고 Store를 오버레이로 감싼다. 제로값이면 아무것도
+    // 감싸지 않는다(단일 테넌트 배포).
+    Platform Platform
     Logger  *slog.Logger      // 기본: slog.Default()
     Clock   func() time.Time
     Metrics Metrics           // sender가 방출하는 카운터/히스토그램. 기본: host.NopMetrics
@@ -157,6 +163,9 @@ type (
     EventSink                       = host.EventSink
     Limits                           = host.Limits
     Metrics                           = host.Metrics
+    Platform                           = host.Platform  // = store.PlatformCatalog
+    UseKind                             = host.UseKind   // campaign | transactional | probe
+    SenderUse                            = host.SenderUse // SenderPolicy가 받는 것
 )
 
 type Hooks struct { // host/hooks.go
@@ -166,6 +175,19 @@ type Hooks struct { // host/hooks.go
     Unsubscribed func(ctx context.Context, u UnsubscribeNotice) error
     // 발송 직전 거부/수정. ErrSkip 반환 시 delivery는 suppressed.
     BeforeSend func(ctx context.Context, m *OutboundMessage) error
+    // 요청이 들고 온 테넌트 속성(tenant_vars)을 검증·치환한다. 돌려준 것이
+    // 저장되고 모든 템플릿에서 `tenant` 로 바인딩되며, 공유 sender의 From
+    // 템플릿이 그걸 렌더한다. sendplane에는 테넌트 레지스트리가 없으므로
+    // (ADR-0006, ADR-0017) "acme가 이 테넌트의 slug인가"를 아는 것은 호스트뿐이다.
+    // 전형적인 구현은 요청 값을 무시하고 자기 DB에서 조회한 값을 돌려준다.
+    // nil이면 통과(단일 테넌트 배포에서 맞는 기본값이고 그 외에는 신뢰 결정).
+    TenantVars func(ctx context.Context, p *Principal, tenantID string, requested map[string]any) (map[string]any, error)
+    // 이 sender를 이 종류의 발송에 쓸 수 있는지. POST /campaigns(생성·시작),
+    // POST /messages, 프로브 트리거에서 호출된다. nil이면
+    // DefaultSenderPolicy(공유 sender의 설정된 `uses` 강제)이고, 훅은 그것을
+    // 대체하므로 둘 다 원하면 체이닝한다(sendplane.DefaultSenderPolicy).
+    // 에러는 곧 거부이고 403 sender_use_denied가 된다.
+    SenderPolicy func(ctx context.Context, u SenderUse) error
     Events EventSink // 기본: 아웃박스 → 테넌트 설정의 webhook URL
 }
 
@@ -393,6 +415,46 @@ UPDATE delivery d SET status = 2, lease_owner = $5, lease_until = now() + $6, up
 sender는 `Provider.ActiveTenants()`를 주기적으로 갱신해 테넌트를 라운드로빈하며 **테넌트별 동시성 상한**을 둡니다(한 테넌트의 1M 캠페인이 다른 테넌트의 transactional을 굶기지 않게).
 Postgres shared 모드에서 RLS(row-level security)는 선택 강화 항목으로 남겨둡니다.
 
+#### 플랫폼 자원 오버레이 (ADR-0017)
+
+SaaS로 운영하면 **운영자가 자기 인프라를 테넌트에게 빌려주는** 층이 하나 더 필요합니다: 릴레이 계정 하나,
+워밍업된 도메인 하나, 공유 발신 신원 하나. 이건 **설정**(`Options.Platform`, 참조 바이너리의 `platform:`)이고
+**스토어에 기록하지 않습니다**. `store.WithPlatform(provider, catalog, cipher, now)` 가 `Provider` 를 감싸서
+읽을 때마다 가상 엔티티로 해석합니다. 가상 ID는 `sys:<이름>` 이고(`store.IsPlatformID`),
+UUID에 콜론이 없으므로 두 ID 공간은 충돌하지 않습니다.
+
+- **읽기**에 설정 항목이 `Shared: true` 로 섞여 나옵니다. 비밀번호/DKIM 키는 감쌀 때 호스트의 `SecretCipher` 로
+  메모리에서 암호화되므로 sender·bounce·probe의 기존 복호화 경로가 그대로 동작합니다.
+- **설정 쓰기**는 `store.ErrReadOnly`(API `403 platform_read_only`)입니다. 유일한 예외는 **런타임 상태**
+  (transport 서킷, sender/domain 프로브 판정, 메일박스 도달성)이고, 그것만 `_system` 테넌트의 **shadow 행**으로 갑니다.
+- **shadow 행**은 가상 ID + `shared` + 상태 컬럼만 들고 **설정 컬럼은 전부 빈 값**입니다. 읽을 때 설정을 shadow 위에 덮습니다.
+  즉 공유 릴레이의 비밀번호는 **어느 DB에도 없습니다** — 교체는 마이그레이션이 아니라 배포이고,
+  한 테넌트의 DB 덤프에 다른 테넌트가 쓰는 자격증명이 들어갈 수 없습니다.
+  `store/platformtest` 가 모든 백엔드에서 이 불변식을 확인합니다.
+
+**가시성**:
+
+| | 일반 테넌트 | `_system` |
+|---|---|---|
+| 공유 sender | 보임(이름, 템플릿 주소, `uses`). 상태 필드 0, API는 `transport_id`/`domain_id` 생략 | 전부 + 병합된 상태 |
+| 공유 transport / domain / probe·bounce 메일박스 | `List`에 없음, `Get`은 `ErrNotFound` | 전부 + 병합된 상태 |
+
+sender 프로세스와 프로브/바운스 러너는 공유 transport·domain을 읽어야 하므로 **특권 접근자**
+`store.PlatformView(ctx, provider)`(= `_system` 스토어)를 씁니다. 테넌트용 규칙을 느슨하게 해서 통과시키지 않습니다.
+테넌트가 공유 신원에 대해 듣는 것은 "red인지" 한 비트뿐이고 이유는 항상 `shared sender unavailable` 입니다.
+
+**테넌트 속성은 요청 변수**입니다. 테넌트 테이블은 없습니다(ADR-0006). `tenant_vars` 가 캠페인/메시지/프리뷰 요청에
+실려 오고 `Hooks.TenantVars` 가 검증·치환하며, 결과가 `Campaign.TenantVars` / `Delivery.TenantVars` 에 저장되어
+모든 템플릿에서 `tenant` 로 바인딩됩니다. 공유 sender의 `from_name`/`from_email`/`reply_to` 는 그 위의 Liquid
+템플릿이고(`sender+{{ tenant.slug }}@mail.example.com`), 요청 시점에 렌더해 보고 변수가 없으면
+`422 tenant_vars_missing` 으로 키를 나열합니다. 캠페인의 `tenant_vars` 는 **캠페인 행에만** 있고 delivery로
+복사하지 않습니다(ADR-0002: 시작은 한 행 쓰기).
+
+`TenantSettings` 의 `tracking.domain` 과 `unsubscribe_url_template` 은 테넌트가 비워 두면 카탈로그의
+`tracking_domain` / `unsubscribe_url_template` 로 채워집니다. 채우는 곳은 **오버레이의 읽기 한 곳**이라
+sender와 API가 같은 값을 보고, 쓰기에서 다시 벗겨내므로 읽고 그대로 PUT해도 운영자의 기본값이 테넌트 사본으로
+굳지 않습니다. `GET /api/v1/settings` 가 `*_source: tenant|platform` 으로 어느 쪽이 유효한지 알려줍니다.
+
 ## 6. 콘텐츠 · i18n · 렌더링
 
 ### 6.1 템플릿 표현식: Liquid
@@ -504,6 +566,11 @@ for each tenant (round-robin, per-tenant concurrency cap):
 - Transport 단위 목표 rate(메일/초)는 **클러스터 전역 값**으로 설정하고, 각 sender 레플리카는 `Workers` heartbeat로 파악한 활성 레플리카 수로 나눠 자기 몫을 토큰 버킷에 적용합니다. 중앙 락 없이 근사치를 얻고, 레플리카 증감에 1 heartbeat 주기 내로 수렴합니다.
 - 수신 도메인별 상한(예: gmail.com 20/s)은 같은 방식으로 분배.
 - `rate_limited` 응답을 받으면 해당 transport(및 도메인) 버킷을 절반으로 줄이고 cooldown 후 서서히 복구(AIMD).
+- **공유 transport의 공정 분배**(ADR-0017): 공유 릴레이의 `rate_per_second` 는 **릴레이 전체의 용량**이므로
+  버킷을 `_system` 으로 키잉합니다. 테넌트별로 키잉하면 테넌트 수만큼 곱해져서 설정한 값이 의미를 잃습니다.
+  그 위에 `per_tenant_rate_per_second` 로 **(transport, tenant) 버킷**이 하나 더 올라가고, 한 발송은 두 버킷의
+  토큰을 모두 기다립니다 — 캠페인 하나가 다른 테넌트가 필요한 용량을 다 먹는 것을 막는 지점입니다.
+  서킷 상태(§8.3)도 같은 이유로 공유 transport는 클러스터 전역 하나이고, `_system` 의 shadow 행에 저장됩니다.
 
 ### 8.3 Transport 헬스
 
@@ -576,6 +643,23 @@ IP는 기본 저장하지 않고(테넌트 설정으로 해시 저장), UA는 �
 - 결과: `BounceEvent` 저장(raw 보존은 테넌트 설정) → delivery `bounced|complained` 전이(이미 `sent`인 경우만) → suppression 삽입(테넌트 설정) → 이벤트 발행.
 - 폴러: `emersion/go-imap/v2`(IDLE 지원 시 사용, 아니면 주기 폴링), POP3는 직접 구현(`internal/mailbox/pop3.go`). 처리 후 삭제/이동 정책 설정. 메일박스 하나당 폴러 하나(스토어 lock으로 보장) → 여러 레플리카가 같은 메일을 이중 처리하지 않음.
 - 메일박스는 테넌트 리소스입니다: `store.BounceMailbox`(프로토콜·호스트·자격증명·폴더·`after_process`·`enabled`) + `/api/v1/bounce-mailboxes`. 폴러는 `Provider.Tenants`(활성 여부와 무관한 전체 테넌트)를 돌며 각 테넌트의 enabled 메일박스를 읽습니다 — 바운스는 캠페인이 끝나고 한참 뒤에 옵니다.
+- **공유 바운스 메일박스와 deliveryID 조회**(ADR-0017): 운영자가 테넌트 전체를 위해 운영하는 메일박스는
+  설정(`platform.bounce_mailboxes`)에서 오고, `_system` 테넌트의 스코프에서만 보이며 lock과 health도 거기 있습니다.
+  그 안의 메일은 **어느 테넌트 것이든** 될 수 있고 메일박스는 그걸 모릅니다. VERP 리턴 패스에는 테넌트를 넣을 자리가
+  없습니다 — 주소는 돌아오는 길의 모든 MTA를 통과해야 해서 짧게 유지하기로 했고(이 절 첫 항목), 그 자리는
+  deliveryID와 MAC 8자가 전부입니다. 대신 **deliveryID가 테넌트를 넘어 유일**하므로(UUIDv7)
+  `Provider.LookupDeliveryTenant(ctx, deliveryID)` 로 찾습니다. shared 모드는 PK 조회 하나,
+  routed 모드는 Provider마다 fan-out이고 그 비용은 인터페이스 문서에 적어 두었습니다(그런 Provider는 자기가
+  발급하는 ID에 샤드를 인코딩하는 편이 낫습니다).
+
+  순서: `X-Sendplane-ID`(테넌트를 들고 오는 유일한 상관관계) → 없으면 VERP deliveryID(**미검증**) →
+  `LookupDeliveryTenant` → `ForTenant` → **그 테넌트의 키로 VERP HMAC 검증** → 이후는 위와 동일.
+  위조된 ID는 실제 테넌트로 해석되고 거기서 unverified로 기록됩니다 — 테넌트 자기 메일박스에 위조 VERP가 왔을 때와
+  같은 결과입니다. 아무것도 상관관계가 잡히지 않은 메일은 `_system` 에 증거로 기록됩니다: 그 메일박스는 `_system` 것이니까.
+- **공유 suppression**: `sys:` transport로 나간 메일의 hard bounce / complaint는 테넌트 목록과 함께
+  **`_system` suppression 목록**에도 올라가고, `sys:` transport로 보낼 때는 두 목록을 다 확인합니다.
+  테넌트가 자기 suppression을 껐어도 이 검사는 합니다 — 그 목록은 모두가 공유하는 릴레이를 보호하는 것이고
+  테넌트의 것이 아닙니다. `_system` 목록은 시스템 테넌트에서만 보이고 관리됩니다.
 - **폴링은 곧 자격증명 점검입니다.** 패스마다 다이얼 결과를 `BounceMailbox.Health`(§11.5)에 씁니다 — 성공하면 `ok`, 실패하면 단계(`dial`/`tls`/`auth`/`folder`)와 사유를 남기고 연속 실패를 셉니다. 바운스 메일박스를 주기적으로 들여다보는 건 이 폴러뿐이라, 여기서 못 보면 아무도 못 봅니다.
 - raw 보존은 `TenantSettings.BounceRetainRaw`(기본 off), suppression 보존기간은 `SuppressionRepo.DeleteBefore`로 control의 retention 루프가 정리합니다.
 - 프로바이더 webhook(SES/SendGrid 등)은 같은 `BounceEvent` 경로로 들어오는 어댑터로 후순위 추가.
@@ -606,6 +690,14 @@ DNS 레코드만 보는 검사는 "레코드가 있다"까지만 말해 줍니�
 - 판정 코드는 두 채널이 공유합니다: `probe.Evidence` → `Runner.CompleteRun`. 웹훅은 폴더를 모르므로 `unknown` 이고, **`unknown` 은 판정을 내리지 않습니다** — 모르는 것을 "스팸함"으로 읽으면 멀쩡한 sender가 영원히 yellow가 됩니다. 스팸 분류를 보려면 IMAP 메일박스를 하나는 함께 등록해야 합니다.
 
 ### 11.2 실행 흐름 (control 리더 루프, Sender 단위)
+
+> **공유 sender는 한 번만, `_system` 에서 프로브합니다**(ADR-0017). 공유 sender는 모든 테넌트의
+> `GET /senders` 에 나오지만, 테넌트마다 프로브를 돌리면 운영자의 릴레이로 같은 메일이 N번 나가고
+> 하나뿐인 공유 프로브 메일박스를 N개의 수집기가 서로 지웁니다. 그래서 `probe-trigger` / `probe-collect` /
+> `mailbox-check` 루프가 `IncludeSystem` 으로 `_system` 도 틱하고(테넌트 목록은 절대 그걸 반환하지 않습니다),
+> 러너는 `Shared` 이면서 `_system` 이 아닌 sender를 건너뜁니다. 템플릿 `From` 주소는 설정의
+> `probe_vars` 로 렌더합니다 — 프로브에는 요청이 없으니 변수가 어디선가는 와야 합니다.
+> 판정은 `_system` 의 shadow 행에 남고, 테넌트는 red 여부 한 비트만 `shared sender unavailable` 로 듣습니다.
 
 ```
 for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수동 트리거):
@@ -761,6 +853,16 @@ web/
 - 바운스 위조: VERP HMAC 검증 실패는 `unverified`로 기록만.
 - 트래킹 URL: 목적지가 서명에 포함되어 오픈 리다이렉트 불가, 토큰 위조 불가. 공개 라우트는 rate limit 적용, 픽셀/리다이렉트 외 응답 없음.
 - 개인정보: Delivery/BounceEvent/Suppression 보존기간(테넌트별), 캠페인 삭제 시 수신자 데이터 함께 삭제, raw 바운스 저장은 opt-in.
+- **플랫폼 자원**(ADR-0017): 공유 릴레이/도메인의 설정은 **DB에 없습니다** — 상태 shadow 행에도 설정 컬럼은
+  전부 빈 값이고, `store/platformtest` 와 e2e 시나리오 9가 그걸 검사합니다. 공유 transport/domain/메일박스는
+  `_system` 스코프에서만 보이고, 공유 sender는 모든 테넌트에 보이지만 상태 필드는 0이며 내부(transport/domain)는
+  API에서 생략됩니다. 플랫폼 자원에 대한 모든 쓰기는 읽기 **전에** `403 platform_read_only` 로 거부됩니다.
+- **테넌트 선택**: `_system` 을 포함해 요청이 테넌트를 고를 수 있는지는 전적으로 호스트의 `TenantResolver`
+  결정입니다. 참조 바이너리는 `auth.tenant_header` 의 role을 가진 principal에게만 허용하고, 기본은 꺼져 있습니다.
+  `GET /api/v1/whoami` 는 그 결정을 되읽어 주기만 하고 아무것도 허용하지 않습니다.
+- **테넌트 속성**: sendplane은 테넌트 이름·slug·플랜을 저장하지 않습니다. 요청이 들고 오고 호스트의
+  `Hooks.TenantVars` 훅이 치환하며, 훅이 없으면 요청 값을 그대로 씁니다 — 그래서 훅 없이 공유 sender를
+  운영하는 것은 신뢰 결정이고, 훅 문서와 `config.example.yaml` 이 그렇게 적어 두었습니다.
 
 ## 17. 주요 기술 선택 요약
 
@@ -802,4 +904,10 @@ Liquid 문법(ADR-0004)과 내장 suppression 기본 on(ADR-0008)은 사용자 �
 10. **큐 백엔드 교체(NATS 등)**: `DeliveryRepo.Claim/Complete`가 경계로 설계돼 있지만 현재는 DB-as-queue만 구현.
 11. **Postgres 파티셔닝/RLS**: 운영 데이터가 근거를 주면 도입.
 12. **첨부파일**: 아직 없음. transactional 소형 첨부(base64, 총 10MB)만 후보, 캠페인 첨부는 비권장.
-13. **프로브 메일박스 프로바이더 특이점**: Gmail/Outlook의 스팸 폴더 IMAP 이름과 `authserv-id` 값은 테스트 픽스처로만 관리되고, 새 프로바이더를 추가할 때마다 수동 검증이 필요.
+13. **플랫폼 카탈로그는 설정 파일 크기에 묶여 있습니다**(ADR-0017의 재검토 조건). 공유 자원이 수백 개가 되면
+    설정 파일로 관리하기 어렵고, 그때는 운영자 전용 스토어에서 카탈로그를 읽어 `Options.Platform` 을 채우는
+    형태를 검토합니다 — `store.WithPlatform` 오버레이 자체는 카탈로그가 어디서 왔는지 모르므로 그대로 쓸 수 있습니다.
+14. **공유 sender의 `from_email` 은 도메인 소유 검사를 받지 않습니다.** 테넌트 자기 sender는 자기 `SendingDomain`
+    위에 있어야 하지만(`422 from_domain_not_owned`), 공유 sender의 주소는 운영자가 설정에 쓴 것이라 검사 대상이
+    아닙니다. 운영자가 자기 것이 아닌 도메인을 적는 것은 막을 수 없고, 그건 설정 실수이지 테넌트가 할 수 있는 일이 아닙니다.
+15. **프로브 메일박스 프로바이더 특이점**: Gmail/Outlook의 스팸 폴더 IMAP 이름과 `authserv-id` 값은 테스트 픽스처로만 관리되고, 새 프로바이더를 추가할 때마다 수동 검증이 필요.

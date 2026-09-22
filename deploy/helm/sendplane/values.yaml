@@ -128,6 +128,15 @@ config:
       jwks_url: ""
       tenant_claim: tenant
       roles_claim: roles
+    # Per-request tenant selection (ADR-0017). Off by default; turn it on for
+    # an operator console that has to reach the system tenant (`_system`),
+    # which is the only view showing the shared `platform:` resources and
+    # their state. A role that can switch can read and write every tenant it
+    # names.
+    tenant_header:
+      enabled: false
+      header: X-Sendplane-Tenant
+      roles: [operator]
   authz:
     mode: allow_all          # allow_all | roles
     roles: {}
@@ -159,6 +168,41 @@ config:
   #     - provider: sendplane
   #       secrets:
   #         - ${SENDPLANE_PROBE_WEBHOOK_SECRET}
+  # The operator's shared sending infrastructure (ADR-0017,
+  # docs/architecture.md 5.4): the relay, domain, From identity and mailboxes
+  # it runs for its tenants. It is configuration, never data — nothing here is
+  # written to the database, so rotating the relay password is a chart upgrade
+  # and not a migration, and the secrets go through ${VAR} like every other
+  # one (secrets.platform* below).
+  #
+  # Omit the whole section for a single-tenant deployment.
+  # cmd/sendplane/config.example.yaml documents every field.
+  # platform:
+  #   transports:
+  #     - id: shared
+  #       name: Shared relay
+  #       host: smtp.example.net
+  #       port: 587
+  #       tls: starttls
+  #       username: sendplane
+  #       password: ${SENDPLANE_PLATFORM_RELAY_PASSWORD}
+  #       rate_per_second: 200
+  #       per_tenant_rate_per_second: 20
+  #   domains:
+  #     - id: shared
+  #       domain: mail.example.com
+  #       dkim_selector: sp1
+  #       dkim_private_key: ${SENDPLANE_PLATFORM_DKIM_KEY}
+  #       return_path_domain: bounce.example.com
+  #   senders:
+  #     - id: default
+  #       name: Shared sender
+  #       transport_id: shared
+  #       domain_id: shared
+  #       from_name: "{{ tenant.name }}"
+  #       from_email: "sender+{{ tenant.slug }}@mail.example.com"
+  #       uses: [transactional]
+  #   tracking_domain: t.example.com
   limits: {}
   log:
     level: info
@@ -181,3 +225,12 @@ secrets:
   # (ADR-0016).
   probeHMACKey: ""
   probeWebhookSecret: ""
+  # The platform catalog's secrets (ADR-0017), referenced from config.platform
+  # above as ${SENDPLANE_PLATFORM_RELAY_PASSWORD},
+  # ${SENDPLANE_PLATFORM_DKIM_KEY}, ${SENDPLANE_PLATFORM_PROBE_PASSWORD} and
+  # ${SENDPLANE_PLATFORM_BOUNCE_PASSWORD}. Only rendered into the Secret when
+  # set, so a deployment with no shared resources carries no empty keys.
+  platformRelayPassword: ""
+  platformDKIMKey: ""
+  platformProbePassword: ""
+  platformBouncePassword: ""

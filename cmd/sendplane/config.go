@@ -53,9 +53,12 @@ type Config struct {
 	Sender  SenderConfig  `yaml:"sender"`
 	Bounce  BounceConfig  `yaml:"bounce"`
 	Probe   ProbeConfig   `yaml:"probe"`
-	Limits  LimitsConfig  `yaml:"limits"`
-	Log     LogConfig     `yaml:"log"`
-	Console ConsoleConfig `yaml:"console"`
+	// Platform is the operator's shared sending infrastructure (ADR-0017).
+	// Omit it entirely for a single-tenant deployment.
+	Platform PlatformConfig `yaml:"platform"`
+	Limits   LimitsConfig   `yaml:"limits"`
+	Log      LogConfig      `yaml:"log"`
+	Console  ConsoleConfig  `yaml:"console"`
 }
 
 // StoreConfig selects and configures the store.Provider.
@@ -94,6 +97,29 @@ type AuthConfig struct {
 	Mode    string        `yaml:"mode"` // "apikey" | "jwt" | "none"
 	APIKeys []APIKeyEntry `yaml:"api_keys"`
 	JWT     JWTConfig     `yaml:"jwt"`
+	// TenantHeader lets a privileged caller select a tenant per request, which
+	// is how an operator console reaches the system tenant (ADR-0017).
+	TenantHeader TenantHeaderConfig `yaml:"tenant_header"`
+}
+
+// TenantHeaderConfig opts into per-request tenant selection.
+//
+// Off by default, and deliberately: with it on, a caller holding one of the
+// named roles can read and write any tenant it names. It exists for an
+// operator console, whose whole job is to look at tenants it does not belong
+// to and at the system tenant, which is the only scope that shows the shared
+// transports, domains, mailboxes and their state.
+//
+// An embedding application does not use this at all: it implements its own
+// host.TenantResolver and makes its own decision (cmd/sendplane/tenant.go).
+type TenantHeaderConfig struct {
+	Enabled *bool `yaml:"enabled"`
+	// Header is the request header naming the tenant. Empty uses
+	// X-Sendplane-Tenant.
+	Header string `yaml:"header"`
+	// Roles are the principal roles allowed to use it. Empty means nobody
+	// can, except in auth.mode=none where there is one fixed local principal.
+	Roles []string `yaml:"roles"`
 }
 
 // AuthzConfig selects the Authorizer.
@@ -440,6 +466,25 @@ func (c *Config) Validate(needSecrets bool) error {
 		}
 	}
 	errs = append(errs, validateProbeWebhooks(c.Probe.Webhooks)...)
+
+	// The platform catalog is validated by the library (sendplane.New calls
+	// PlatformCatalog.Validate and parses the sender templates), but reporting
+	// it here means a bad `platform:` block is listed alongside every other
+	// configuration error instead of surfacing one at a time after startup got
+	// past everything else.
+	if err := c.Platform.ToHost().Validate(); err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	if c.Auth.TenantHeader.Enabled != nil && *c.Auth.TenantHeader.Enabled {
+		if h := strings.TrimSpace(c.Auth.TenantHeader.Header); h != "" && strings.ContainsAny(h, " \t:") {
+			errs = append(errs, fmt.Sprintf("auth.tenant_header.header %q is not a header name", h))
+		}
+		if len(c.Auth.TenantHeader.Roles) == 0 && c.Auth.Mode != "none" {
+			errs = append(errs, "auth.tenant_header.roles must not be empty: without a role "+
+				"nobody could select a tenant, including "+systemTenantID)
+		}
+	}
 
 	switch c.Log.Format {
 	case "json", "text", "":

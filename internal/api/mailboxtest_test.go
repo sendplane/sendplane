@@ -172,14 +172,14 @@ func TestStoredProbeMailboxTestPersistsHealth(t *testing.T) {
 	}
 
 	got := decodeInto[MailboxTestResult](t,
-		e.do(http.MethodPost, "/api/v1/probe-mailboxes/"+m.Id.String()+"/test", nil),
+		e.do(http.MethodPost, "/api/v1/probe-mailboxes/"+m.Id+"/test", nil),
 		http.StatusOK)
 	if !got.Ok {
 		t.Fatalf("result = %+v", got)
 	}
 
 	after := decodeInto[ProbeMailbox](t,
-		e.do(http.MethodGet, "/api/v1/probe-mailboxes/"+m.Id.String(), nil), http.StatusOK)
+		e.do(http.MethodGet, "/api/v1/probe-mailboxes/"+m.Id, nil), http.StatusOK)
 	if after.Health == nil || after.Health.Status != "ok" {
 		t.Fatalf("health = %+v, want ok", after.Health)
 	}
@@ -204,7 +204,7 @@ func TestStoredBounceMailboxTestPersistsFailure(t *testing.T) {
 
 	for range 2 {
 		got := decodeInto[MailboxTestResult](t,
-			e.do(http.MethodPost, "/api/v1/bounce-mailboxes/"+m.Id.String()+"/test", nil),
+			e.do(http.MethodPost, "/api/v1/bounce-mailboxes/"+m.Id+"/test", nil),
 			http.StatusOK)
 		if got.Ok {
 			t.Fatal("a refused login was reported as ok")
@@ -212,7 +212,7 @@ func TestStoredBounceMailboxTestPersistsFailure(t *testing.T) {
 	}
 
 	after := decodeInto[BounceMailbox](t,
-		e.do(http.MethodGet, "/api/v1/bounce-mailboxes/"+m.Id.String(), nil), http.StatusOK)
+		e.do(http.MethodGet, "/api/v1/bounce-mailboxes/"+m.Id, nil), http.StatusOK)
 	if after.Health == nil || after.Health.Status != "error" {
 		t.Fatalf("health = %+v, want error", after.Health)
 	}
@@ -246,7 +246,7 @@ func TestStoredMailboxTestWithOverridePassword(t *testing.T) {
 	m := e.seedProbeMailbox()
 
 	decodeInto[MailboxTestResult](t,
-		e.do(http.MethodPost, "/api/v1/probe-mailboxes/"+m.Id.String()+"/test",
+		e.do(http.MethodPost, "/api/v1/probe-mailboxes/"+m.Id+"/test",
 			MailboxTestRequest{Password: ptr("a-typo")}), http.StatusOK)
 
 	cfg, _ := ft.seen()
@@ -255,12 +255,12 @@ func TestStoredMailboxTestWithOverridePassword(t *testing.T) {
 	}
 
 	after := decodeInto[ProbeMailbox](t,
-		e.do(http.MethodGet, "/api/v1/probe-mailboxes/"+m.Id.String(), nil), http.StatusOK)
+		e.do(http.MethodGet, "/api/v1/probe-mailboxes/"+m.Id, nil), http.StatusOK)
 	if after.Health == nil || after.Health.Status != "unknown" {
 		t.Fatalf("health = %+v: a typo in the form must not mark the mailbox broken", after.Health)
 	}
 	// The stored password is untouched, so the mailbox still works.
-	stored, err := e.st.ProbeMailboxes().Get(context.Background(), m.Id.String())
+	stored, err := e.st.ProbeMailboxes().Get(context.Background(), m.Id)
 	if err != nil {
 		t.Fatal(err)
 	}

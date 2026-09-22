@@ -67,7 +67,7 @@ func (s *server) TestProbeMailbox(ctx context.Context, req TestProbeMailboxReque
 	if err != nil {
 		return nil, err
 	}
-	m, err := t.st.ProbeMailboxes().Get(ctx, req.MailboxId.String())
+	m, err := t.st.ProbeMailboxes().Get(ctx, req.MailboxId)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,7 @@ func (s *server) TestBounceMailbox(ctx context.Context, req TestBounceMailboxReq
 	if err != nil {
 		return nil, err
 	}
-	m, err := t.st.BounceMailboxes().Get(ctx, req.MailboxId.String())
+	m, err := t.st.BounceMailboxes().Get(ctx, req.MailboxId)
 	if err != nil {
 		return nil, err
 	}

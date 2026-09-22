@@ -111,14 +111,14 @@ func (e *env) seedWebhookProbe(t *testing.T) (*store.ProbeMailbox, *store.ProbeR
 
 	snd := e.seedSender()
 	run := &store.ProbeRun{
-		ID: store.NewID(), SenderID: snd.Id.String(), MailboxID: box.Id.String(),
+		ID: store.NewID(), SenderID: snd.Id, MailboxID: box.Id,
 		GroupID: store.NewID(), Pending: true, Status: store.HealthUnknown,
 		StartedAt: e.now, CreatedAt: e.now,
 	}
 	if err := e.st.ProbeRuns().Create(ctx, run); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	stored, err := e.st.ProbeMailboxes().Get(ctx, box.Id.String())
+	stored, err := e.st.ProbeMailboxes().Get(ctx, box.Id)
 	if err != nil {
 		t.Fatalf("get mailbox: %v", err)
 	}

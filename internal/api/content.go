@@ -624,6 +624,15 @@ func (s *server) PreviewTemplate(ctx context.Context, req PreviewTemplateRequest
 	if err != nil {
 		return nil, err
 	}
+	// The preview sees the same `tenant` binding a real send would, so a
+	// template that reads {{ tenant.name }} can be checked before it is
+	// published. The hook runs here too: a preview must not be a way to see
+	// what a template renders with tenant attributes the host would refuse
+	// (ADR-0017).
+	tenantVars, err := s.tenantVars(ctx, t, body.TenantVars)
+	if err != nil {
+		return nil, err
+	}
 	out, renderWarnings, err := prepared.Render(ctx, render.Bindings{
 		Recipient: render.Recipient{
 			Email:  string(deref(rcp.Email)),
@@ -632,6 +641,7 @@ func (s *server) PreviewTemplate(ctx context.Context, req PreviewTemplateRequest
 			Vars:   varsOf(rcp.Vars),
 		},
 		Vars:           varsOf(body.Vars),
+		TenantVars:     tenantVars,
 		UnsubscribeURL: deref(rcp.UnsubscribeUrl),
 	})
 	if err != nil {

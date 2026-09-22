@@ -24,6 +24,15 @@ auth:
   # The harness talks to control without credentials; every request is tenant
   # "default", roles [admin]. Never outside a test stack.
   mode: none
+  # Scenario 9 needs the operator's own view (`_system`), which is the only
+  # scope the platform overlay makes the shared transport, domain and probe
+  # state visible in (ADR-0017). With auth.mode: none the one fixed local
+  # principal may switch; roles are listed anyway so the config matches what a
+  # real deployment would write.
+  tenant_header:
+    enabled: true
+    header: X-Sendplane-Tenant
+    roles: [admin]
 
 authz:
   mode: allow_all
@@ -73,6 +82,11 @@ probe:
   # Long enough that the periodic trigger does not fire a second probe in the
   # middle of a run; scenario 6 triggers explicitly.
   interval: 6h
+  # Well below the 15m default so scenario 9 gets a deterministic mailbox
+  # health write: the loop logs in to the shared probe mailbox and records the
+  # result, which is exactly the state-only shadow row the scenario reads back
+  # out of Postgres (ADR-0017).
+  mailbox_check_interval: 15s
   # The collect loop ticks once a minute, so a probe that really arrives is
   # judged inside ~65s. Two minutes is "it is not coming", not "wait longer".
   timeout: 2m
@@ -84,6 +98,74 @@ probe:
   webhooks:
     - provider: sendplane
       secret: whsec_e2e-probe-webhook
+
+# Scenario 9: the operator's shared sending infrastructure (ADR-0017).
+#
+# It is configuration and is never written to the database — the scenario
+# proves that by reading the shadow rows back out of Postgres and finding every
+# configuration column empty. The relay is the same chaos-smtp the bulk
+# campaign uses, so a transactional send through the shared sender really goes
+# out and the harness can read the rendered From header back off the wire.
+platform:
+  transports:
+    - id: relay
+      name: Shared e2e relay
+      host: chaos-smtp
+      port: 2525
+      tls: none
+      # No username/password: cmd/chaos-smtp answers AUTH with 5.5.1, so a
+      # credential here would make every send through the shared relay fail
+      # before DATA and the From assertion would have nothing to read. The
+      # "no configuration in the database" assertion reads the shadow rows of
+      # the shared *sender* and *probe mailbox* instead, which are written by
+      # the platform probe and the mailbox-check loop.
+      max_conns: 8
+      rate_per_second: 50
+      # One tenant's slice of the shared relay (architecture 8.2).
+      per_tenant_rate_per_second: 10
+
+  domains:
+    - id: dom
+      domain: platform.e2e.test
+      return_path_domain: bounce.platform.e2e.test
+
+  senders:
+    - id: default
+      name: Shared e2e sender
+      transport_id: relay
+      domain_id: dom
+      # Liquid over the request's tenant_vars: one entry, one address per
+      # tenant. A request with no `slug` is 422 tenant_vars_missing.
+      from_name: "{{ tenant.name }}"
+      from_email: "sender+{{ tenant.slug }}@platform.e2e.test"
+      # Transactional only: a campaign with this sender is 403
+      # sender_use_denied, which is the policy half of the scenario.
+      uses: [transactional]
+      probe_vars:
+        slug: probe
+        name: sendplane probe
+
+  # A shared probe mailbox on the same GreenMail the tenant's own probe uses,
+  # under its own address so the two runs never read each other's mail. The
+  # platform probe runs once, in `_system` (architecture 11.2).
+  #
+  # The mailbox is on GreenMail while the shared transport is chaos-smtp, so
+  # the probe mail is accepted and then never arrives: the run times out and
+  # the verdict is red. That is deliberate — it is the cheapest way to get a
+  # deterministic *state* write for the shared sender, which is one of the two
+  # shadow rows scenario 9 reads back out of Postgres. Pointing the shared
+  # relay at GreenMail instead would make the probe green and make the
+  # scenario's From assertion (read off chaos-smtp) impossible.
+  probe_mailboxes:
+    - id: probe
+      name: Shared e2e probe mailbox
+      address: platform-probe@sendplane.test
+      host: greenmail
+      port: 3143
+      tls: none
+      username: platform-probe@sendplane.test
+      password: e2e
+      inbox_folder: INBOX
 
 limits:
   max_recipients_per_campaign: 100000

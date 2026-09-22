@@ -20,8 +20,8 @@ var transportSpec = spec[store.Transport]{
 	table: "transport",
 	cols: []string{
 		"name", "host", "port", "tls", "username", "password", "max_conns",
-		"rate_per_second", "domain_rate_per_second", "status", "status_reason",
-		"status_changed_at", "status_until",
+		"rate_per_second", "domain_rate_per_second", "shared", "status",
+		"status_reason", "status_changed_at", "status_until",
 	},
 	args: func(v *store.Transport) ([]any, error) {
 		rates, err := jsonIn(v.DomainRatePerSecond)
@@ -30,8 +30,8 @@ var transportSpec = spec[store.Transport]{
 		}
 		return []any{
 			v.Name, v.Host, v.Port, string(v.TLS), v.Username, v.Password,
-			v.MaxConns, v.RatePerSecond, rates, i16(v.Status), v.StatusReason,
-			tsIn(v.StatusChangedAt), tsIn(v.StatusUntil),
+			v.MaxConns, v.RatePerSecond, rates, v.Shared, i16(v.Status),
+			v.StatusReason, tsIn(v.StatusChangedAt), tsIn(v.StatusUntil),
 		}, nil
 	},
 	scan: func(r rowScanner) (*store.Transport, error) {
@@ -42,7 +42,7 @@ var transportSpec = spec[store.Transport]{
 		var changed, until *time.Time
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Host, &v.Port, &tls,
 			&v.Username, &v.Password, &v.MaxConns, &v.RatePerSecond, &rates,
-			&status, &v.StatusReason, &changed, &until,
+			&v.Shared, &status, &v.StatusReason, &changed, &until,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
@@ -66,12 +66,13 @@ var senderSpec = spec[store.Sender]{
 	table: "sender",
 	cols: []string{
 		"name", "from_name", "from_email", "reply_to", "transport_id",
-		"domain_id", "health", "health_reason", "health_checked_at",
+		"domain_id", "shared", "health", "health_reason", "health_checked_at",
 	},
 	args: func(v *store.Sender) ([]any, error) {
 		return []any{
 			v.Name, v.FromName, v.FromEmail, v.ReplyTo, v.TransportID,
-			v.DomainID, i16(v.Health), v.HealthReason, tsIn(v.HealthCheckedAt),
+			v.DomainID, v.Shared, i16(v.Health), v.HealthReason,
+			tsIn(v.HealthCheckedAt),
 		}, nil
 	},
 	scan: func(r rowScanner) (*store.Sender, error) {
@@ -79,7 +80,7 @@ var senderSpec = spec[store.Sender]{
 		var health int16
 		var checked *time.Time
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.FromName, &v.FromEmail,
-			&v.ReplyTo, &v.TransportID, &v.DomainID, &health, &v.HealthReason,
+			&v.ReplyTo, &v.TransportID, &v.DomainID, &v.Shared, &health, &v.HealthReason,
 			&checked, &v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
@@ -101,13 +102,13 @@ var domainSpec = spec[store.SendingDomain]{
 	table: "sending_domain",
 	cols: []string{
 		"domain", "dkim_selector", "dkim_private_key", "return_path_domain",
-		"expected_spf", "outbound_ips", "health", "health_reason",
+		"expected_spf", "outbound_ips", "shared", "health", "health_reason",
 		"health_checked_at",
 	},
 	args: func(v *store.SendingDomain) ([]any, error) {
 		return []any{
 			v.Domain, v.DKIMSelector, v.DKIMPrivateKey, v.ReturnPathDomain,
-			v.ExpectedSPF, v.OutboundIPs, i16(v.Health), v.HealthReason,
+			v.ExpectedSPF, v.OutboundIPs, v.Shared, i16(v.Health), v.HealthReason,
 			tsIn(v.HealthCheckedAt),
 		}, nil
 	},
@@ -117,7 +118,7 @@ var domainSpec = spec[store.SendingDomain]{
 		var checked *time.Time
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Domain, &v.DKIMSelector,
 			&v.DKIMPrivateKey, &v.ReturnPathDomain, &v.ExpectedSPF,
-			&v.OutboundIPs, &health, &v.HealthReason, &checked,
+			&v.OutboundIPs, &v.Shared, &health, &v.HealthReason, &checked,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
@@ -200,12 +201,12 @@ var bounceMailboxSpec = spec[store.BounceMailbox]{
 	table: "bounce_mailbox",
 	cols: append([]string{
 		"name", "address", "protocol", "host", "port", "tls", "username",
-		"password", "folder", "after_process", "enabled",
+		"password", "folder", "after_process", "enabled", "shared",
 	}, healthColumns...),
 	args: func(v *store.BounceMailbox) ([]any, error) {
 		return append([]any{
 			v.Name, v.Address, v.Protocol, v.Host, v.Port, string(v.TLS),
-			v.Username, v.Password, v.Folder, v.AfterProcess, v.Enabled,
+			v.Username, v.Password, v.Folder, v.AfterProcess, v.Enabled, v.Shared,
 		}, healthArgs(v.Health)...), nil
 	},
 	scan: func(r rowScanner) (*store.BounceMailbox, error) {
@@ -214,7 +215,7 @@ var bounceMailboxSpec = spec[store.BounceMailbox]{
 		var h healthCols
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Address, &v.Protocol,
 			&v.Host, &v.Port, &tls, &v.Username, &v.Password, &v.Folder,
-			&v.AfterProcess, &v.Enabled,
+			&v.AfterProcess, &v.Enabled, &v.Shared,
 			&h.status, &h.stage, &h.reason, &h.checkedAt, &h.lastOKAt, &h.failures,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
@@ -268,12 +269,12 @@ var mailboxSpec = spec[store.ProbeMailbox]{
 	table: "probe_mailbox",
 	cols: append([]string{
 		"name", "kind", "address", "host", "port", "tls", "username", "password",
-		"inbox_folder", "spam_folder", "authserv_id", "enabled",
+		"inbox_folder", "spam_folder", "authserv_id", "enabled", "shared",
 	}, healthColumns...),
 	args: func(v *store.ProbeMailbox) ([]any, error) {
 		return append([]any{
 			v.Name, string(v.Kind), v.Address, v.Host, v.Port, string(v.TLS), v.Username,
-			v.Password, v.InboxFolder, v.SpamFolder, v.AuthServID, v.Enabled,
+			v.Password, v.InboxFolder, v.SpamFolder, v.AuthServID, v.Enabled, v.Shared,
 		}, healthArgs(v.Health)...), nil
 	},
 	scan: func(r rowScanner) (*store.ProbeMailbox, error) {
@@ -282,7 +283,7 @@ var mailboxSpec = spec[store.ProbeMailbox]{
 		var h healthCols
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &kind, &v.Address, &v.Host,
 			&v.Port, &tls, &v.Username, &v.Password, &v.InboxFolder,
-			&v.SpamFolder, &v.AuthServID, &v.Enabled,
+			&v.SpamFolder, &v.AuthServID, &v.Enabled, &v.Shared,
 			&h.status, &h.stage, &h.reason, &h.checkedAt, &h.lastOKAt, &h.failures,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
@@ -497,10 +498,15 @@ var campaignSpec = spec[store.Campaign]{
 	table: "campaign",
 	cols: []string{
 		"name", "template_id", "version_id", "sender_id", "default_locale",
-		"vars", "status", "schedule_at", "started_at", "completed_at", "stats",
+		"vars", "tenant_vars", "status", "schedule_at", "started_at",
+		"completed_at", "stats",
 	},
 	args: func(v *store.Campaign) ([]any, error) {
 		vars, err := jsonIn(v.Vars)
+		if err != nil {
+			return nil, err
+		}
+		tenantVars, err := jsonIn(v.TenantVars)
 		if err != nil {
 			return nil, err
 		}
@@ -510,19 +516,19 @@ var campaignSpec = spec[store.Campaign]{
 		}
 		return []any{
 			v.Name, v.TemplateID, v.VersionID, v.SenderID, v.DefaultLocale, vars,
-			i16(v.Status), tsIn(v.ScheduleAt), tsIn(v.StartedAt),
+			tenantVars, i16(v.Status), tsIn(v.ScheduleAt), tsIn(v.StartedAt),
 			tsIn(v.CompletedAt), stats,
 		}, nil
 	},
 	scan: func(r rowScanner) (*store.Campaign, error) {
 		var v store.Campaign
 		var status int16
-		var vars, stats []byte
+		var vars, tenantVars, stats []byte
 		var schedule, started, completed *time.Time
 		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.TemplateID, &v.VersionID,
 			&v.SenderID,
-			&v.DefaultLocale, &vars, &status, &schedule, &started, &completed,
-			&stats, &v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
+			&v.DefaultLocale, &vars, &tenantVars, &status, &schedule, &started,
+			&completed, &stats, &v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
 		v.Status = enumOut[store.CampaignStatus](status)
@@ -530,6 +536,9 @@ var campaignSpec = spec[store.Campaign]{
 		v.CompletedAt = tsOut(completed)
 		v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
 		if err := jsonOut(vars, &v.Vars); err != nil {
+			return nil, err
+		}
+		if err := jsonOut(tenantVars, &v.TenantVars); err != nil {
 			return nil, err
 		}
 		return &v, jsonOut(stats, &v.Stats)

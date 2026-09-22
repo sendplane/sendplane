@@ -24,6 +24,7 @@ import (
 	"github.com/sendplane/sendplane/host"
 	"github.com/sendplane/sendplane/internal/api"
 	"github.com/sendplane/sendplane/internal/control"
+	"github.com/sendplane/sendplane/internal/platform"
 	"github.com/sendplane/sendplane/internal/probe"
 	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/internal/sender"
@@ -54,6 +55,12 @@ type Sendplane struct {
 	// nil when Options.Probe.Enabled is false.
 	probeOnce sync.Once
 	probe     *probe.Runner
+
+	// platform resolves the shared senders of Options.Platform: their parsed
+	// From templates and the tenant variables those need. It is built by New,
+	// which is where a template that cannot be parsed becomes a refusal to
+	// start, and it stays nil when no platform sender is configured.
+	platform *platform.Resolver
 }
 
 // SenderConfig configures one sender process (RunSender). Every field except
@@ -93,6 +100,15 @@ type SenderConfig struct {
 }
 
 // New validates options and applies defaults.
+//
+// It is also where the platform catalog of ADR-0017 is checked and installed:
+// Options.Platform is validated (unique IDs, resolvable references, parseable
+// From templates), Options.Store is wrapped in the overlay that resolves it
+// into every tenant's reads, and Hooks.SenderPolicy is defaulted to the policy
+// that enforces the configured `uses`. A catalog that does not validate is a
+// refusal to start: a shared sender whose From template cannot be parsed would
+// otherwise fail every delivery it is used for, hours later and blamed on the
+// relay.
 func New(o Options) (*Sendplane, error) {
 	if o.Store == nil {
 		return nil, fmt.Errorf("sendplane: Options.Store is required")
@@ -116,7 +132,23 @@ func New(o Options) (*Sendplane, error) {
 		o.Metrics = host.NopMetrics{}
 	}
 	o.Limits = o.Limits.WithDefaults()
-	return &Sendplane{opts: o}, nil
+
+	o.Platform = o.Platform.Normalize()
+	if err := o.Platform.Validate(); err != nil {
+		return nil, fmt.Errorf("sendplane: %w", err)
+	}
+	resolver, err := platform.New(o.Platform)
+	if err != nil {
+		return nil, fmt.Errorf("sendplane: %w", err)
+	}
+	if o.Hooks.SenderPolicy == nil {
+		o.Hooks.SenderPolicy = host.DefaultSenderPolicy(o.Platform)
+	}
+	// The overlay is a no-op for an empty catalog, so an ordinary
+	// single-tenant deployment keeps the Provider it passed in.
+	o.Store = store.WithPlatform(o.Store, o.Platform, o.Secrets, o.Clock)
+
+	return &Sendplane{opts: o, platform: resolver}, nil
 }
 
 // Options returns the effective options, with defaults applied.
@@ -153,6 +185,7 @@ func (s *Sendplane) Handler() http.Handler {
 			Secrets:  s.opts.Secrets,
 			Control:  c,
 			Renderer: s.sharedRenderer(),
+			Platform: s.platform,
 			Logger:   s.opts.Logger,
 			Clock:    s.opts.Clock,
 			Metrics:  s.opts.Metrics,
@@ -214,12 +247,17 @@ func (s *Sendplane) probeLoopOptions() []control.Option {
 	return []control.Option{
 		control.WithLoop(control.Loop{
 			Name: "probe-trigger", Interval: probeTriggerInterval, AllTenants: true,
+			// IncludeSystem: a shared sender is probed once, in the system
+			// tenant, which is the only scope the platform overlay makes its
+			// transport, domain and probe mailboxes visible in (ADR-0017).
+			IncludeSystem: true,
 			NewTenant: func(st store.Store, _ string) control.TickLoop {
 				return probeTrigger{r: r, st: st}
 			},
 		}),
 		control.WithLoop(control.Loop{
 			Name: "probe-collect", Interval: probeCollectInterval, AllTenants: true,
+			IncludeSystem: true,
 			NewTenant: func(st store.Store, _ string) control.TickLoop {
 				return probeCollect{r: r, st: st, opener: opener}
 			},
@@ -262,11 +300,12 @@ func (s *Sendplane) RunSender(ctx context.Context, c SenderConfig) error {
 		EHLOName:             c.EHLOName,
 		TLSConfig:            c.TLSConfig,
 
-		Hooks:   s.opts.Hooks,
-		Secrets: s.opts.Secrets,
-		Metrics: s.opts.Metrics,
-		Logger:  s.opts.Logger,
-		Clock:   s.opts.Clock,
+		Hooks:    s.opts.Hooks,
+		Secrets:  s.opts.Secrets,
+		Platform: s.platform,
+		Metrics:  s.opts.Metrics,
+		Logger:   s.opts.Logger,
+		Clock:    s.opts.Clock,
 	})
 	if err != nil {
 		return err

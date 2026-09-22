@@ -53,6 +53,7 @@ type transportDoc struct {
 	MaxConns            int32              `bson:"max_conns"`
 	RatePerSecond       float64            `bson:"rate_per_second"`
 	DomainRatePerSecond map[string]float64 `bson:"domain_rate_per_second"`
+	Shared              bool               `bson:"shared"`
 	Status              int32              `bson:"status"`
 	StatusReason        string             `bson:"status_reason"`
 	StatusChangedAt     *time.Time         `bson:"status_changed_at"`
@@ -74,8 +75,8 @@ func transportMeta() meta[store.Transport, transportDoc] {
 				Name: v.Name, Host: v.Host, Port: i32(v.Port), TLS: string(v.TLS),
 				Username: v.Username, Password: v.Password,
 				MaxConns: i32(v.MaxConns), RatePerSecond: v.RatePerSecond,
-				DomainRatePerSecond: v.DomainRatePerSecond,
-				Status:              int32(v.Status), StatusReason: v.StatusReason,
+				DomainRatePerSecond: v.DomainRatePerSecond, Shared: v.Shared,
+				Status: int32(v.Status), StatusReason: v.StatusReason,
 				StatusChangedAt: encTime(v.StatusChangedAt), StatusUntil: encTime(v.StatusUntil),
 			}
 		},
@@ -85,8 +86,8 @@ func transportMeta() meta[store.Transport, transportDoc] {
 				Host: d.Host, Port: int(d.Port), TLS: store.TLSMode(d.TLS),
 				Username: d.Username, Password: d.Password,
 				MaxConns: int(d.MaxConns), RatePerSecond: d.RatePerSecond,
-				DomainRatePerSecond: d.DomainRatePerSecond,
-				Status:              store.TransportStatus(enum8(d.Status)), StatusReason: d.StatusReason,
+				DomainRatePerSecond: d.DomainRatePerSecond, Shared: d.Shared,
+				Status: store.TransportStatus(enum8(d.Status)), StatusReason: d.StatusReason,
 				StatusChangedAt: decTime(d.StatusChangedAt), StatusUntil: decTime(d.StatusUntil),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
@@ -104,6 +105,7 @@ type senderDoc struct {
 	ReplyTo         string     `bson:"reply_to"`
 	TransportID     string     `bson:"transport_id"`
 	DomainID        string     `bson:"domain_id"`
+	Shared          bool       `bson:"shared"`
 	Health          int32      `bson:"health"`
 	HealthReason    string     `bson:"health_reason"`
 	HealthCheckedAt *time.Time `bson:"health_checked_at"`
@@ -123,6 +125,7 @@ func senderMeta() meta[store.Sender, senderDoc] {
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, FromName: v.FromName, FromEmail: v.FromEmail,
 				ReplyTo: v.ReplyTo, TransportID: v.TransportID, DomainID: v.DomainID,
+				Shared: v.Shared,
 				Health: int32(v.Health), HealthReason: v.HealthReason,
 				HealthCheckedAt: encTime(v.HealthCheckedAt),
 			}
@@ -132,6 +135,7 @@ func senderMeta() meta[store.Sender, senderDoc] {
 				ID: d.ID, TenantID: d.TenantID, Name: d.Name,
 				FromName: d.FromName, FromEmail: d.FromEmail, ReplyTo: d.ReplyTo,
 				TransportID: d.TransportID, DomainID: d.DomainID,
+				Shared: d.Shared,
 				Health: store.HealthStatus(enum8(d.Health)), HealthReason: d.HealthReason,
 				HealthCheckedAt: decTime(d.HealthCheckedAt),
 				Version:         d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
@@ -150,6 +154,7 @@ type domainDoc struct {
 	ReturnPathDomain string     `bson:"return_path_domain"`
 	ExpectedSPF      string     `bson:"expected_spf"`
 	OutboundIPs      []string   `bson:"outbound_ips"`
+	Shared           bool       `bson:"shared"`
 	Health           int32      `bson:"health"`
 	HealthReason     string     `bson:"health_reason"`
 	HealthCheckedAt  *time.Time `bson:"health_checked_at"`
@@ -169,8 +174,8 @@ func domainMeta() meta[store.SendingDomain, domainDoc] {
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Domain: v.Domain, DKIMSelector: v.DKIMSelector, DKIMPrivateKey: v.DKIMPrivateKey,
 				ReturnPathDomain: v.ReturnPathDomain, ExpectedSPF: v.ExpectedSPF,
-				OutboundIPs: v.OutboundIPs,
-				Health:      int32(v.Health), HealthReason: v.HealthReason,
+				OutboundIPs: v.OutboundIPs, Shared: v.Shared,
+				Health: int32(v.Health), HealthReason: v.HealthReason,
 				HealthCheckedAt: encTime(v.HealthCheckedAt),
 			}
 		},
@@ -179,8 +184,8 @@ func domainMeta() meta[store.SendingDomain, domainDoc] {
 				ID: d.ID, TenantID: d.TenantID, Domain: d.Domain,
 				DKIMSelector: d.DKIMSelector, DKIMPrivateKey: d.DKIMPrivateKey,
 				ReturnPathDomain: d.ReturnPathDomain, ExpectedSPF: d.ExpectedSPF,
-				OutboundIPs: d.OutboundIPs,
-				Health:      store.HealthStatus(enum8(d.Health)), HealthReason: d.HealthReason,
+				OutboundIPs: d.OutboundIPs, Shared: d.Shared,
+				Health: store.HealthStatus(enum8(d.Health)), HealthReason: d.HealthReason,
 				HealthCheckedAt: decTime(d.HealthCheckedAt),
 				Version:         d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
@@ -233,6 +238,7 @@ type bounceMailboxDoc struct {
 	Folder       string    `bson:"folder"`
 	AfterProcess string    `bson:"after_process"`
 	Enabled      bool      `bson:"enabled"`
+	Shared       bool      `bson:"shared"`
 	Health       healthDoc `bson:"health"`
 }
 
@@ -252,6 +258,7 @@ func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
 				Host: v.Host, Port: i32(v.Port), TLS: string(v.TLS),
 				Username: v.Username, Password: v.Password,
 				Folder: v.Folder, AfterProcess: v.AfterProcess, Enabled: v.Enabled,
+				Shared: v.Shared,
 				Health: encHealth(v.Health),
 			}
 		},
@@ -261,6 +268,7 @@ func bounceMailboxMeta() meta[store.BounceMailbox, bounceMailboxDoc] {
 				Protocol: d.Protocol, Host: d.Host, Port: int(d.Port),
 				TLS: store.TLSMode(d.TLS), Username: d.Username, Password: d.Password,
 				Folder: d.Folder, AfterProcess: d.AfterProcess, Enabled: d.Enabled,
+				Shared:  d.Shared,
 				Health:  decHealth(d.Health),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
@@ -284,6 +292,7 @@ type probeMailboxDoc struct {
 	SpamFolder  string    `bson:"spam_folder"`
 	AuthServID  string    `bson:"auth_serv_id"`
 	Enabled     bool      `bson:"enabled"`
+	Shared      bool      `bson:"shared"`
 	Health      healthDoc `bson:"health"`
 }
 
@@ -303,7 +312,7 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 				Address: v.Address, Host: v.Host, Port: i32(v.Port),
 				TLS: string(v.TLS), Username: v.Username, Password: v.Password,
 				InboxFolder: v.InboxFolder, SpamFolder: v.SpamFolder,
-				AuthServID: v.AuthServID, Enabled: v.Enabled,
+				AuthServID: v.AuthServID, Enabled: v.Enabled, Shared: v.Shared,
 				Health: encHealth(v.Health),
 			}
 		},
@@ -314,7 +323,7 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 				Host: d.Host, Port: int(d.Port), TLS: store.TLSMode(d.TLS),
 				Username: d.Username, Password: d.Password,
 				InboxFolder: d.InboxFolder, SpamFolder: d.SpamFolder,
-				AuthServID: d.AuthServID, Enabled: d.Enabled,
+				AuthServID: d.AuthServID, Enabled: d.Enabled, Shared: d.Shared,
 				Health:  decHealth(d.Health),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
@@ -548,6 +557,7 @@ type campaignDoc struct {
 	SenderID      string         `bson:"sender_id"`
 	DefaultLocale string         `bson:"default_locale"`
 	Vars          map[string]any `bson:"vars"`
+	TenantVars    map[string]any `bson:"tenant_vars"`
 	Status        int32          `bson:"status"`
 	ScheduleAt    *time.Time     `bson:"schedule_at"`
 	StartedAt     *time.Time     `bson:"started_at"`
@@ -569,7 +579,8 @@ func campaignMeta() meta[store.Campaign, campaignDoc] {
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
 				Name: v.Name, TemplateID: v.TemplateID, VersionID: v.VersionID,
 				SenderID:      v.SenderID,
-				DefaultLocale: v.DefaultLocale, Vars: v.Vars, Status: int32(v.Status),
+				DefaultLocale: v.DefaultLocale, Vars: v.Vars, TenantVars: v.TenantVars,
+				Status:     int32(v.Status),
 				ScheduleAt: encTime(v.ScheduleAt), StartedAt: encTime(v.StartedAt),
 				CompletedAt: encTime(v.CompletedAt), Stats: encStats(v.Stats),
 			}
@@ -578,7 +589,7 @@ func campaignMeta() meta[store.Campaign, campaignDoc] {
 			return &store.Campaign{
 				ID: d.ID, TenantID: d.TenantID, Name: d.Name,
 				TemplateID: d.TemplateID, VersionID: d.VersionID, SenderID: d.SenderID,
-				DefaultLocale: d.DefaultLocale, Vars: d.Vars,
+				DefaultLocale: d.DefaultLocale, Vars: d.Vars, TenantVars: d.TenantVars,
 				Status:     store.CampaignStatus(enum8(d.Status)),
 				ScheduleAt: decTime(d.ScheduleAt), StartedAt: decTime(d.StartedAt),
 				CompletedAt: decTime(d.CompletedAt), Stats: decStats(d.Stats),
@@ -849,6 +860,7 @@ type deliveryDoc struct {
 	Name           string            `bson:"name"`
 	Locale         string            `bson:"locale"`
 	Vars           map[string]any    `bson:"vars"`
+	TenantVars     map[string]any    `bson:"tenant_vars"`
 	UnsubscribeURL string            `bson:"unsubscribe_url"`
 	Headers        map[string]string `bson:"headers"`
 	AttemptCount   int32             `bson:"attempt_count"`
@@ -875,7 +887,8 @@ func encDelivery(v *store.Delivery) *deliveryDoc {
 		CampaignID: v.CampaignID, VersionID: v.VersionID, SenderID: v.SenderID,
 		Lane: int32(v.Lane), Priority: i32(v.Priority), Status: int32(v.Status),
 		Email: v.Email, EmailNorm: v.EmailNorm, Name: v.Name, Locale: v.Locale,
-		Vars: v.Vars, UnsubscribeURL: v.UnsubscribeURL, Headers: v.Headers,
+		Vars: v.Vars, TenantVars: v.TenantVars,
+		UnsubscribeURL: v.UnsubscribeURL, Headers: v.Headers,
 		AttemptCount: i32(v.AttemptCount), RetryGen: i32(v.RetryGen),
 		NextAttemptAt: encTime(v.NextAttemptAt),
 		LeaseOwner:    v.LeaseOwner, LeaseUntil: encTime(v.LeaseUntil),
@@ -894,7 +907,8 @@ func decDelivery(d *deliveryDoc) *store.Delivery {
 		Lane: store.Lane(enum8(d.Lane)), Priority: int(d.Priority),
 		Status: store.DeliveryStatus(enum8(d.Status)),
 		Email:  d.Email, EmailNorm: d.EmailNorm, Name: d.Name, Locale: d.Locale,
-		Vars: d.Vars, UnsubscribeURL: d.UnsubscribeURL, Headers: d.Headers,
+		Vars: d.Vars, TenantVars: d.TenantVars,
+		UnsubscribeURL: d.UnsubscribeURL, Headers: d.Headers,
 		AttemptCount: int(d.AttemptCount), RetryGen: int(d.RetryGen),
 		NextAttemptAt: decTime(d.NextAttemptAt),
 		LeaseOwner:    d.LeaseOwner, LeaseUntil: decTime(d.LeaseUntil),

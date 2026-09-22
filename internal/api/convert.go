@@ -338,3 +338,43 @@ func jsonMap(raw []byte) (map[string]any, error) {
 	}
 	return m, nil
 }
+
+// --- resource IDs ------------------------------------------------------
+
+// A ResourceId is a plain string on the wire, not a UUID: a platform resource
+// is named by a virtual ID (`sys:default`) that no UUID parser accepts
+// (store.IsPlatformID, ADR-0017). These two are the whole conversion, and they
+// exist so that a handler reads as "this field is a resource ID" rather than
+// as a bare assignment that a later refactor could get wrong.
+
+func rid(s string) ResourceId { return s }
+
+// ridPtr omits an empty reference instead of sending "", which the schema's
+// pattern does not allow.
+func ridPtr(s string) *ResourceId {
+	if s == "" {
+		return nil
+	}
+	v := ResourceId(s)
+	return &v
+}
+
+// ridVal is the reverse: an absent optional reference is the empty string the
+// store uses for "no reference".
+func ridVal(p *ResourceId) string {
+	if p == nil {
+		return ""
+	}
+	return string(*p)
+}
+
+// sharedOut reports a platform resource on the wire. It omits the field for a
+// tenant's own object rather than sending `false`: `shared` is a marker, and a
+// UI that shows a badge for it should not have to compare against false.
+func sharedOut(shared bool) *Shared {
+	if !shared {
+		return nil
+	}
+	v := Shared(true)
+	return &v
+}

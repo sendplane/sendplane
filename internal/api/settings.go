@@ -233,12 +233,34 @@ func settingsOut(v *store.TenantSettings) TenantSettings {
 		infos = append(infos, SigningKeyInfo{Kid: k.KID, CreatedAt: timePtr(k.CreatedAt)})
 	}
 	out.Tracking = &TrackingConfig{
-		Domain:      strPtr(v.Tracking.Domain),
-		Opens:       ptr(v.Tracking.Opens),
-		Clicks:      ptr(v.Tracking.Clicks),
-		SigningKeys: &infos,
+		Domain:       strPtr(v.Tracking.Domain),
+		DomainSource: settingSource(v, store.SettingTrackingDomain, v.Tracking.Domain),
+		Opens:        ptr(v.Tracking.Opens),
+		Clicks:       ptr(v.Tracking.Clicks),
+		SigningKeys:  &infos,
 	}
+	out.UnsubscribeUrlTemplateSource = settingSource(
+		v, store.SettingUnsubscribeURLTemplate, v.UnsubscribeURLTemplate)
 	return out
+}
+
+// settingSource says whether the effective value of a setting is the tenant's
+// own or the operator's platform default (ADR-0017). It is omitted when the
+// setting is empty either way, because "where does nothing come from" has no
+// useful answer.
+//
+// The value itself is the effective one: the platform overlay filled it in on
+// read (store/overlay.go), which is the same value the sender uses, so the
+// console never shows a tracking domain that is not actually in force.
+func settingSource(v *store.TenantSettings, field, value string) *SettingSource {
+	if value == "" {
+		return nil
+	}
+	src := SettingSourceTenant
+	if v.FromPlatform(field) {
+		src = SettingSourcePlatform
+	}
+	return &src
 }
 
 // settingsFor is the read every handler that needs a tenant policy uses.

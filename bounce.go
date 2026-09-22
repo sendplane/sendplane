@@ -51,9 +51,14 @@ func (s *Sendplane) RunBounce(ctx context.Context, c BounceConfig) error {
 		Source:   bounceMailboxes{provider: s.opts.Store, log: s.opts.Logger},
 		Secrets:  s.opts.Secrets,
 		Processor: bounce.NewProcessor(bounce.Options{
-			Clock:   s.opts.Clock,
-			Logger:  s.opts.Logger,
-			Metrics: s.opts.Metrics,
+			// The Provider is what the platform paths need: resolving a
+			// delivery ID to its tenant for a shared bounce mailbox, and
+			// reaching the platform suppression list when a bounce came back
+			// through a shared transport (ADR-0017).
+			Provider: s.opts.Store,
+			Clock:    s.opts.Clock,
+			Logger:   s.opts.Logger,
+			Metrics:  s.opts.Metrics,
 		}),
 		PollInterval:    c.PollInterval,
 		RefreshInterval: c.RefreshInterval,
@@ -96,6 +101,11 @@ func (s bounceMailboxes) ListMailboxes(ctx context.Context) ([]bounce.TenantMail
 	if err != nil {
 		return nil, fmt.Errorf("sendplane: list tenants for bounce polling: %w", err)
 	}
+	// The system tenant is never in a tenant listing (store.Provider), and it
+	// is where the operator's shared bounce mailboxes live: the platform
+	// overlay makes them visible in that scope alone, and the mailbox lock and
+	// the mailbox's health belong there too (ADR-0017).
+	tenants = append(tenants, store.SystemTenantID)
 	var out []bounce.TenantMailbox
 	for _, tenantID := range tenants {
 		st, err := s.provider.ForTenant(ctx, tenantID)
@@ -126,6 +136,10 @@ func (s bounceMailboxes) ListMailboxes(ctx context.Context) ([]bounce.TenantMail
 				// Store IDs are unique across tenants, which is what the lock
 				// name needs (bounce.LockName).
 				MailboxID: m.ID,
+				// A shared mailbox's mail may belong to any tenant, so the
+				// processor resolves the tenant from the delivery ID instead
+				// of assuming this one (bounce.Processor.HandlePlatform).
+				Platform: store.IsPlatformID(m.ID),
 				Config: mailbox.Config{
 					Protocol: protocol,
 					Host:     m.Host, Port: m.Port, TLS: m.TLS,

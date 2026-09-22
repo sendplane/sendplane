@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/sendplane/sendplane/internal/sender"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -55,7 +56,7 @@ func (s *server) GetTransport(ctx context.Context, req GetTransportRequestObject
 	if err != nil {
 		return nil, err
 	}
-	tr, err := t.st.Transports().Get(ctx, req.TransportId.String())
+	tr, err := t.st.Transports().Get(ctx, req.TransportId)
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +68,13 @@ func (s *server) UpdateTransport(ctx context.Context, req UpdateTransportRequest
 	if err != nil {
 		return nil, err
 	}
+	if err := refusePlatformWrite("transport", req.TransportId); err != nil {
+		return nil, err
+	}
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	tr, err := t.st.Transports().Get(ctx, req.TransportId.String())
+	tr, err := t.st.Transports().Get(ctx, req.TransportId)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +93,10 @@ func (s *server) DeleteTransport(ctx context.Context, req DeleteTransportRequest
 	if err != nil {
 		return nil, err
 	}
-	if err := t.st.Transports().Delete(ctx, req.TransportId.String()); err != nil {
+	if err := refusePlatformWrite("transport", req.TransportId); err != nil {
+		return nil, err
+	}
+	if err := t.st.Transports().Delete(ctx, req.TransportId); err != nil {
 		return nil, err
 	}
 	return DeleteTransport204Response{}, nil
@@ -100,12 +107,12 @@ func (s *server) GetTransportHealth(ctx context.Context, req GetTransportHealthR
 	if err != nil {
 		return nil, err
 	}
-	tr, err := t.st.Transports().Get(ctx, req.TransportId.String())
+	tr, err := t.st.Transports().Get(ctx, req.TransportId)
 	if err != nil {
 		return nil, err
 	}
 	return GetTransportHealth200JSONResponse(TransportHealth{
-		TransportId: uuidOf(tr.ID),
+		TransportId: rid(tr.ID),
 		Status:      transportStatusOut(tr.Status),
 		Reason:      strPtr(tr.StatusReason),
 		ChangedAt:   timePtr(tr.StatusChangedAt),
@@ -144,7 +151,8 @@ func (s *server) applyTransport(ctx context.Context, tr *store.Transport, in Tra
 
 func transportOut(v *store.Transport) Transport {
 	out := Transport{
-		Id: uuidPtrOf(v.ID), Name: v.Name, Host: v.Host, Port: clampInt32(v.Port),
+		Id: rid(v.ID), Shared: sharedOut(v.Shared),
+		Name: v.Name, Host: v.Host, Port: clampInt32(v.Port),
 		Tls: tlsModeOut(v.TLS), Username: strPtr(v.Username),
 		// The password is writeOnly; only its presence is reported.
 		HasPassword:     ptr(len(v.Password) > 0),
@@ -177,7 +185,7 @@ func (s *server) ListSenders(ctx context.Context, req ListSendersRequestObject) 
 	}
 	items := make([]Sender, 0, len(res.Items))
 	for i := range res.Items {
-		items = append(items, senderOut(&res.Items[i]))
+		items = append(items, s.senderOut(t, &res.Items[i]))
 	}
 	return ListSenders200JSONResponse{Items: items, NextCursor: nextCursor(res.NextCursor)}, nil
 }
@@ -200,7 +208,7 @@ func (s *server) CreateSender(ctx context.Context, req CreateSenderRequestObject
 	if err := t.st.Senders().Create(ctx, snd); err != nil {
 		return nil, err
 	}
-	return CreateSender201JSONResponse(senderOut(snd)), nil
+	return CreateSender201JSONResponse(s.senderOut(t, snd)), nil
 }
 
 func (s *server) GetSender(ctx context.Context, req GetSenderRequestObject) (GetSenderResponseObject, error) {
@@ -208,11 +216,11 @@ func (s *server) GetSender(ctx context.Context, req GetSenderRequestObject) (Get
 	if err != nil {
 		return nil, err
 	}
-	snd, err := t.st.Senders().Get(ctx, req.SenderId.String())
+	snd, err := t.st.Senders().Get(ctx, req.SenderId)
 	if err != nil {
 		return nil, err
 	}
-	return GetSender200JSONResponse(senderOut(snd)), nil
+	return GetSender200JSONResponse(s.senderOut(t, snd)), nil
 }
 
 func (s *server) UpdateSender(ctx context.Context, req UpdateSenderRequestObject) (UpdateSenderResponseObject, error) {
@@ -220,10 +228,13 @@ func (s *server) UpdateSender(ctx context.Context, req UpdateSenderRequestObject
 	if err != nil {
 		return nil, err
 	}
+	if err := refusePlatformWrite("sender", req.SenderId); err != nil {
+		return nil, err
+	}
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	snd, err := t.st.Senders().Get(ctx, req.SenderId.String())
+	snd, err := t.st.Senders().Get(ctx, req.SenderId)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +245,7 @@ func (s *server) UpdateSender(ctx context.Context, req UpdateSenderRequestObject
 	if err := t.st.Senders().Update(ctx, snd); err != nil {
 		return nil, err
 	}
-	return UpdateSender200JSONResponse(senderOut(snd)), nil
+	return UpdateSender200JSONResponse(s.senderOut(t, snd)), nil
 }
 
 func (s *server) DeleteSender(ctx context.Context, req DeleteSenderRequestObject) (DeleteSenderResponseObject, error) {
@@ -242,7 +253,10 @@ func (s *server) DeleteSender(ctx context.Context, req DeleteSenderRequestObject
 	if err != nil {
 		return nil, err
 	}
-	if err := t.st.Senders().Delete(ctx, req.SenderId.String()); err != nil {
+	if err := refusePlatformWrite("sender", req.SenderId); err != nil {
+		return nil, err
+	}
+	if err := t.st.Senders().Delete(ctx, req.SenderId); err != nil {
 		return nil, err
 	}
 	return DeleteSender204Response{}, nil
@@ -262,15 +276,21 @@ func (s *server) applySender(ctx context.Context, t *tenant, snd *store.Sender, 
 	if err != nil {
 		return errInvalid("from_email: %v", err)
 	}
+	// The platform rules of ADR-0017, before the existence checks: a shared
+	// transport or domain is not assignable at all, and from_email has to be
+	// on a domain this tenant owns.
+	if err := s.checkSenderAssignable(ctx, t, from, string(in.TransportId), ridVal(in.DomainId)); err != nil {
+		return err
+	}
 	// A dangling transport or domain reference would only surface when the
 	// first delivery is claimed, so it is rejected here instead.
-	if _, err := t.st.Transports().Get(ctx, idOf(in.TransportId)); err != nil {
+	if _, err := t.st.Transports().Get(ctx, string(in.TransportId)); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return errInvalid("transport %s does not exist", in.TransportId)
 		}
 		return err
 	}
-	if domID := idPtrOf(in.DomainId); domID != "" {
+	if domID := ridVal(in.DomainId); domID != "" {
 		if _, err := t.st.Domains().Get(ctx, domID); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return errInvalid("sending domain %s does not exist", domID)
@@ -282,22 +302,43 @@ func (s *server) applySender(ctx context.Context, t *tenant, snd *store.Sender, 
 	snd.FromName = deref(in.FromName)
 	snd.FromEmail = from
 	snd.ReplyTo = deref(in.ReplyTo)
-	snd.TransportID = idOf(in.TransportId)
-	snd.DomainID = idPtrOf(in.DomainId)
+	snd.TransportID = string(in.TransportId)
+	snd.DomainID = ridVal(in.DomainId)
 	return nil
 }
 
-func senderOut(v *store.Sender) Sender {
-	return Sender{
-		Id: uuidPtrOf(v.ID), Name: v.Name,
-		FromName: strPtr(v.FromName), FromEmail: openapiEmail(v.FromEmail),
+// senderOut renders a sender for one tenant's eyes.
+//
+// A shared sender is shown to every tenant — it is what they send with — but
+// stripped of the operator's internals: the relay and the domain behind it,
+// and the probe verdict of a reputation they all share. What is left is the
+// identity and the `uses` that say what it is allowed for (ADR-0017).
+//
+// The system tenant is the operator's own view and sees all of it, which is
+// what makes a platform page in a console possible without a second API.
+func (s *server) senderOut(t *tenant, v *store.Sender) Sender {
+	out := Sender{
+		Id: rid(v.ID), Shared: sharedOut(v.Shared), Name: v.Name,
+		FromName: strPtr(v.FromName), FromEmail: v.FromEmail,
 		ReplyTo:     strPtr(v.ReplyTo),
-		TransportId: uuidOf(v.TransportID), DomainId: uuidPtrOf(v.DomainID),
+		TransportId: ridPtr(v.TransportID), DomainId: ridPtr(v.DomainID),
+		Uses:            s.senderUses(v),
 		Health:          ptr(healthOut(v.Health)),
 		HealthReason:    strPtr(v.HealthReason),
 		HealthCheckedAt: timePtr(v.HealthCheckedAt),
 		Version:         ptr(v.Version), CreatedAt: timePtr(v.CreatedAt), UpdatedAt: timePtr(v.UpdatedAt),
 	}
+	if v.Shared && t.id != store.SystemTenantID {
+		// Omitted, not blanked: `transport_id` is not in the schema's required
+		// set precisely so that a tenant's view of a shared sender can leave
+		// it out. What relay the operator routes it through is the operator's.
+		out.TransportId = nil
+		out.DomainId = nil
+		out.Health = nil
+		out.HealthReason = nil
+		out.HealthCheckedAt = nil
+	}
+	return out
 }
 
 // GetSenderHealth is the worst-of summary of architecture 11.4: the latest
@@ -307,15 +348,30 @@ func (s *server) GetSenderHealth(ctx context.Context, req GetSenderHealthRequest
 	if err != nil {
 		return nil, err
 	}
-	snd, err := t.st.Senders().Get(ctx, req.SenderId.String())
+	snd, err := t.st.Senders().Get(ctx, req.SenderId)
 	if err != nil {
 		return nil, err
 	}
 	out := SenderHealth{
-		SenderId:  uuidOf(snd.ID),
+		SenderId:  rid(snd.ID),
 		Status:    healthOut(snd.Health),
 		Reason:    strPtr(snd.HealthReason),
 		CheckedAt: timePtr(snd.HealthCheckedAt),
+	}
+	if snd.Shared && t.id != store.SystemTenantID {
+		// A tenant learns whether the shared identity works, and nothing
+		// else: no verdict, no timestamp, no per-mailbox detail
+		// (internal/api/platform.go).
+		status, err := s.sharedSenderStatus(ctx, snd)
+		if err != nil {
+			return nil, err
+		}
+		out.Status = healthOut(status)
+		out.Reason = nil
+		if status == store.HealthRed {
+			out.Reason = strPtr(sender.SharedSenderReason())
+		}
+		return GetSenderHealth200JSONResponse(out), nil
 	}
 	if tr, err := t.st.Transports().Get(ctx, snd.TransportID); err == nil {
 		out.TransportStatus = ptr(transportStatusOut(tr.Status))
@@ -382,13 +438,20 @@ func (s *server) TriggerProbeRun(ctx context.Context, req TriggerProbeRunRequest
 	if err != nil {
 		return nil, err
 	}
-	snd, err := t.st.Senders().Get(ctx, req.SenderId.String())
+	snd, err := t.st.Senders().Get(ctx, req.SenderId)
 	if err != nil {
 		return nil, err
 	}
 	if s.deps.Probe == nil {
 		return nil, newErr(http.StatusNotImplemented, ErrorCodeInternal,
 			"loopback probing is not configured in this deployment")
+	}
+	// A probe is a use like any other: an operator that restricted its shared
+	// sender to transactional mail has not offered its tenants the shared
+	// probe mailbox either. The system tenant is exempt, because the platform
+	// probe is the operator's own (host.DefaultSenderPolicy).
+	if err := s.checkSenderUse(ctx, t, snd.ID, store.UseProbe, s.probeTenantVars(snd)); err != nil {
+		return nil, err
 	}
 	runID, err := s.deps.Probe.Trigger(ctx, t.st, snd.ID)
 	if err != nil {
@@ -400,12 +463,12 @@ func (s *server) TriggerProbeRun(ctx context.Context, req TriggerProbeRunRequest
 	}
 	out := ProbeTriggerResult{}
 	out.Runs = append(out.Runs, struct {
-		DeliveryId *UUID `json:"delivery_id,omitempty"`
-		MailboxId  UUID  `json:"mailbox_id"`
-		RunId      UUID  `json:"run_id"`
+		DeliveryId *UUID      `json:"delivery_id,omitempty"`
+		MailboxId  ResourceId `json:"mailbox_id"`
+		RunId      UUID       `json:"run_id"`
 	}{
 		DeliveryId: uuidPtrOf(run.DeliveryID),
-		MailboxId:  uuidOf(run.MailboxID),
+		MailboxId:  rid(run.MailboxID),
 		RunId:      uuidOf(run.ID),
 	})
 	return TriggerProbeRun202JSONResponse(out), nil
@@ -456,7 +519,7 @@ func (s *server) GetSendingDomain(ctx context.Context, req GetSendingDomainReque
 	if err != nil {
 		return nil, err
 	}
-	d, err := t.st.Domains().Get(ctx, req.DomainId.String())
+	d, err := t.st.Domains().Get(ctx, req.DomainId)
 	if err != nil {
 		return nil, err
 	}
@@ -468,10 +531,13 @@ func (s *server) UpdateSendingDomain(ctx context.Context, req UpdateSendingDomai
 	if err != nil {
 		return nil, err
 	}
+	if err := refusePlatformWrite("sending domain", req.DomainId); err != nil {
+		return nil, err
+	}
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	d, err := t.st.Domains().Get(ctx, req.DomainId.String())
+	d, err := t.st.Domains().Get(ctx, req.DomainId)
 	if err != nil {
 		return nil, err
 	}
@@ -490,7 +556,10 @@ func (s *server) DeleteSendingDomain(ctx context.Context, req DeleteSendingDomai
 	if err != nil {
 		return nil, err
 	}
-	if err := t.st.Domains().Delete(ctx, req.DomainId.String()); err != nil {
+	if err := refusePlatformWrite("sending domain", req.DomainId); err != nil {
+		return nil, err
+	}
+	if err := t.st.Domains().Delete(ctx, req.DomainId); err != nil {
 		return nil, err
 	}
 	return DeleteSendingDomain204Response{}, nil
@@ -521,7 +590,7 @@ func (s *server) applyDomain(ctx context.Context, d *store.SendingDomain, in Sen
 
 func domainOut(v *store.SendingDomain) SendingDomain {
 	out := SendingDomain{
-		Id: uuidPtrOf(v.ID), Domain: v.Domain,
+		Id: rid(v.ID), Shared: sharedOut(v.Shared), Domain: v.Domain,
 		DkimSelector: strPtr(v.DKIMSelector),
 		// The DKIM private key is writeOnly (architecture 16).
 		HasDkimPrivateKey: ptr(len(v.DKIMPrivateKey) > 0),
@@ -586,7 +655,7 @@ func (s *server) GetProbeMailbox(ctx context.Context, req GetProbeMailboxRequest
 	if err != nil {
 		return nil, err
 	}
-	m, err := t.st.ProbeMailboxes().Get(ctx, req.MailboxId.String())
+	m, err := t.st.ProbeMailboxes().Get(ctx, req.MailboxId)
 	if err != nil {
 		return nil, err
 	}
@@ -598,10 +667,13 @@ func (s *server) UpdateProbeMailbox(ctx context.Context, req UpdateProbeMailboxR
 	if err != nil {
 		return nil, err
 	}
+	if err := refusePlatformWrite("probe mailbox", req.MailboxId); err != nil {
+		return nil, err
+	}
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	m, err := t.st.ProbeMailboxes().Get(ctx, req.MailboxId.String())
+	m, err := t.st.ProbeMailboxes().Get(ctx, req.MailboxId)
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +692,10 @@ func (s *server) DeleteProbeMailbox(ctx context.Context, req DeleteProbeMailboxR
 	if err != nil {
 		return nil, err
 	}
-	if err := t.st.ProbeMailboxes().Delete(ctx, req.MailboxId.String()); err != nil {
+	if err := refusePlatformWrite("probe mailbox", req.MailboxId); err != nil {
+		return nil, err
+	}
+	if err := t.st.ProbeMailboxes().Delete(ctx, req.MailboxId); err != nil {
 		return nil, err
 	}
 	return DeleteProbeMailbox204Response{}, nil
@@ -721,7 +796,7 @@ func webhookExtraField(in ProbeMailboxUpdate) string {
 
 func mailboxOut(v *store.ProbeMailbox) ProbeMailbox {
 	return ProbeMailbox{
-		Id: uuidPtrOf(v.ID), Name: v.Name,
+		Id: rid(v.ID), Shared: sharedOut(v.Shared), Name: v.Name,
 		Kind:    ptr(ProbeMailboxKind(v.Kind.Normalized())),
 		Address: openapiEmail(v.Address),
 		Host:    v.Host, Port: clampInt32(v.Port), Tls: tlsModeOut(v.TLS),
@@ -742,10 +817,10 @@ func (s *server) ListProbeRuns(ctx context.Context, req ListProbeRunsRequestObje
 	if err != nil {
 		return nil, err
 	}
-	if _, err := t.st.Senders().Get(ctx, req.Params.SenderId.String()); err != nil {
+	if _, err := t.st.Senders().Get(ctx, req.Params.SenderId); err != nil {
 		return nil, err
 	}
-	res, err := t.st.ProbeRuns().ListBySender(ctx, req.Params.SenderId.String(),
+	res, err := t.st.ProbeRuns().ListBySender(ctx, req.Params.SenderId,
 		pageOf(req.Params.Limit, req.Params.Cursor))
 	if err != nil {
 		return nil, err
@@ -780,7 +855,7 @@ func probeFolderOut(folder string) *ProbeRunFolder {
 
 func probeRunOut(v *store.ProbeRun) ProbeRun {
 	out := ProbeRun{
-		Id: uuidOf(v.ID), SenderId: uuidOf(v.SenderID), MailboxId: uuidOf(v.MailboxID),
+		Id: uuidOf(v.ID), SenderId: rid(v.SenderID), MailboxId: rid(v.MailboxID),
 		DeliveryId: uuidPtrOf(v.DeliveryID), GroupId: uuidPtrOf(v.GroupID),
 		Pending: ptr(v.Pending),
 		Status:  healthOut(v.Status), Reason: strPtr(v.Reason),

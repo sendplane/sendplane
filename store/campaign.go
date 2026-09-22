@@ -37,6 +37,14 @@ type Campaign struct {
 	// Vars are campaign-wide template variables, merged under each
 	// recipient's own vars.
 	Vars map[string]any
+	// TenantVars are the tenant attributes this send was requested with,
+	// validated by the host's TenantVars hook and bound as `tenant` in every
+	// template, including a platform sender's From templates (ADR-0017).
+	//
+	// They live on the campaign, not on its deliveries: a campaign has one set
+	// and copying it onto a million rows would be a million copies of the same
+	// object. The sender reads the campaign's.
+	TenantVars map[string]any
 
 	Status CampaignStatus
 	// ScheduleAt is zero for "start now".

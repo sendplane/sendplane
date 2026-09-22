@@ -55,6 +55,10 @@ func (s *Sendplane) mailboxCheckLoopOption() control.Option {
 		// ActiveTenants, and that is not the one whose bounce mailbox has
 		// been rejecting logins for a week.
 		AllTenants: true,
+		// IncludeSystem: the operator's shared probe and bounce mailboxes are
+		// only visible in the system tenant's view, and their credentials
+		// expire exactly like a tenant's (ADR-0017).
+		IncludeSystem: true,
 		NewTenant: func(st store.Store, _ string) control.TickLoop {
 			return mailboxCheck{
 				st:       st,

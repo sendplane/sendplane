@@ -36,8 +36,87 @@ secrets:
 auth:
   mode: none
 
+  # Per-request tenant selection (ADR-0017). With auth.mode: none there is one
+  # fixed local principal, so the role list is not what gates it here; the
+  # switch is on so that the console can flip between `default` and the system
+  # tenant `_system`, which is the only view that shows the shared platform
+  # transports, domains, mailboxes and their probe state.
+  #
+  #   curl -H 'X-Sendplane-Tenant: _system' localhost:8080/api/v1/senders
+  #
+  # In a real deployment this is off unless an operator console needs it, and
+  # then only for the roles named here: a caller holding one can read and
+  # write any tenant it names.
+  tenant_header:
+    enabled: true
+    header: X-Sendplane-Tenant
+    roles: [admin]
+
 authz:
   mode: allow_all
+
+# The operator's shared sending infrastructure (ADR-0017). It is configuration
+# and is never written to the database: a read resolves this section, and only
+# runtime state about it (circuit status, probe verdict, mailbox health) is
+# persisted, in the `_system` tenant, as a row that carries no configuration
+# column at all.
+#
+# `make dev` points it at the same chaos-smtp sink `make dev-smtp` runs, so a
+# transactional send through the shared sender actually completes and you can
+# read what arrived from http://localhost:12590/messages?body=1.
+#
+# Try it (auth is off, so no credentials):
+#
+#   curl -sS localhost:8080/api/v1/senders | jq '.items[] | select(.shared)'
+#   curl -sS -X POST localhost:8080/api/v1/messages \
+#     -H 'Content-Type: application/json' -d '{
+#       "sender_id": "sys:default",
+#       "template_id": "<a published template>",
+#       "tenant_vars": {"slug": "acme", "name": "Acme, Inc."},
+#       "to": [{"email": "someone@example.com"}]
+#     }'
+#
+# The From address comes out as `Acme, Inc. <sender+acme@dev.local>`: one
+# configured sender, one address per tenant, no tenant table anywhere.
+platform:
+  transports:
+    - id: shared
+      name: Shared dev relay
+      # cmd/chaos-smtp as `make dev-smtp` runs it: plaintext, no auth.
+      host: 127.0.0.1
+      port: 12525
+      tls: none
+      max_conns: 2
+      rate_per_second: 20
+      # One tenant's slice of the relay: the fair share of architecture 8.2.
+      # Set low on purpose here, so a burst through the shared transport is
+      # visibly paced in the logs.
+      per_tenant_rate_per_second: 5
+
+  domains:
+    - id: dev
+      domain: dev.local
+      return_path_domain: dev.local
+
+  senders:
+    - id: default
+      name: Shared dev sender
+      transport_id: shared
+      domain_id: dev
+      # Liquid over the request's tenant_vars: one entry, one address per
+      # tenant. A request whose tenant_vars carry no `slug` is a 422
+      # (tenant_vars_missing) rather than a mail from `sender+@dev.local`.
+      from_name: "{{ tenant.name }}"
+      from_email: "sender+{{ tenant.slug }}@dev.local"
+      # Transactional only: a tenant may send a password reset through the
+      # shared identity but not a newsletter over a reputation everybody
+      # shares. A campaign with this sender is 403 sender_use_denied.
+      uses: [transactional]
+      # What the loopback probe renders the templates with. The probe runs
+      # once, in `_system`, so its From address needs values from somewhere.
+      probe_vars:
+        slug: probe
+        name: sendplane probe
 
 # No events.webhook section: dev has nothing listening for it, and it's
 # optional (config.go only requires events.webhook.secret when

@@ -107,6 +107,23 @@ func TestEveryOperationHasAnAction(t *testing.T) {
 			t.Errorf("%s requires authentication in the spec but is listed in publicOps", id)
 			continue
 		}
+
+		// authOnlyOps keep security (unlike publicOps) but still declare
+		// x-sendplane-action: none: they authenticate and resolve a tenant,
+		// then call no Authorizer (architecture 16, GetWhoami being the one
+		// case of it).
+		if op.Action == "none" {
+			if !authOnlyOps[id] {
+				t.Errorf("%s declares x-sendplane-action none but is missing from authOnlyOps", id)
+			}
+			if _, ok := opActions[id]; ok {
+				t.Errorf("%s declares x-sendplane-action none but is also listed in opActions", id)
+			}
+			continue
+		}
+		if authOnlyOps[id] {
+			t.Errorf("%s is listed in authOnlyOps but the spec does not declare x-sendplane-action none", id)
+		}
 		action, ok := opActions[id]
 		if !ok {
 			t.Errorf("%s has no entry in opActions", id)
@@ -133,12 +150,17 @@ func TestEveryOperationHasAnAction(t *testing.T) {
 			t.Errorf("publicOps has %q, which is not an operation of the spec", id)
 		}
 	}
+	for id := range authOnlyOps {
+		if !seen[id] {
+			t.Errorf("authOnlyOps has %q, which is not an operation of the spec", id)
+		}
+	}
 }
 
 // The table must cover every method of the generated interface too, otherwise
 // an operation could be implemented and routed while the gate refuses it.
 func TestActionTableCoversTheGeneratedInterface(t *testing.T) {
-	total := len(opActions) + len(publicOps)
+	total := len(opActions) + len(publicOps) + len(authOnlyOps)
 	ops := loadSpecOperations(t)
 	if total != len(ops) {
 		t.Fatalf("action tables cover %d operations, the spec has %d", total, len(ops))

@@ -6,7 +6,7 @@
 //	docker compose -f test/e2e/docker-compose.yml up -d
 //	go run ./test/e2e
 //
-// Eight scenarios run in order, each printing PASS, FAIL or KNOWN-FAIL with
+// Nine scenarios run in order, each printing PASS, FAIL or KNOWN-FAIL with
 // its own timing. A scenario collects every failed assertion instead of
 // stopping at the first one, because a whole compose stack is expensive enough
 // that finding one difference per run would waste it.
@@ -344,6 +344,7 @@ func (r *runner) execute(ctx context.Context) error {
 	r.scenario(ctx, "6. loopback probe", r.scenarioProbe)
 	r.scenario(ctx, "6b. loopback probe over an inbound webhook", r.scenarioProbeWebhook)
 	r.scenario(ctx, "7. events", r.scenarioEvents)
+	r.scenario(ctx, "9. platform (shared resources)", r.scenarioPlatform)
 	return nil
 }
 

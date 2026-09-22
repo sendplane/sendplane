@@ -48,7 +48,7 @@ func TestCampaignFlow(t *testing.T) {
 
 	// template_id is kept and resolved at start; version_id would pin one now.
 	camp := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
-		Name: "spring", SenderId: *snd.Id, TemplateId: tpl.Id, DefaultLocale: ptr("en"),
+		Name: "spring", SenderId: snd.Id, TemplateId: tpl.Id, DefaultLocale: ptr("en"),
 	}), http.StatusCreated)
 	if camp.TemplateId == nil || *camp.TemplateId != *tpl.Id {
 		t.Fatalf("campaign template_id = %v, want %v", camp.TemplateId, *tpl.Id)
@@ -112,7 +112,7 @@ func TestCampaignFlow(t *testing.T) {
 		if d.Status != DeliveryStatusPending {
 			t.Fatalf("delivery %s status = %q, want pending", d.Id, d.Status)
 		}
-		if d.Lane != Bulk {
+		if d.Lane != LaneBulk {
 			t.Fatalf("delivery %s lane = %q, want bulk", d.Id, d.Lane)
 		}
 	}
@@ -157,7 +157,7 @@ func TestCampaignUnsubscribeNotification(t *testing.T) {
 	version := decodeInto[MessageVersion](t, e.do(http.MethodPost,
 		"/api/v1/templates/"+tpl.Id.String()+"/publish", nil), http.StatusCreated)
 	camp := decodeInto[Campaign](t, e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{
-		Name: "c", SenderId: *snd.Id, VersionId: &version.Id,
+		Name: "c", SenderId: snd.Id, VersionId: &version.Id,
 	}), http.StatusCreated)
 	e.do(http.MethodPost, "/api/v1/campaigns/"+camp.Id.String()+"/recipients",
 		strings.NewReader(`{"email":"a@example.com"}`+"\n"),

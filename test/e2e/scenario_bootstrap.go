@@ -89,6 +89,13 @@ func (r *runner) scenarioBootstrap(ctx context.Context) error {
 	if err := r.configureMailboxes(ctx); err != nil {
 		return err
 	}
+	// Checked here rather than in scenario 9: everything the operator's view
+	// asserts depends on the tenant header being honoured, and finding that
+	// out first turns "scenario 9 failed" into "the switch is not configured"
+	// (ADR-0017).
+	if err := r.whoamiCheck(ctx); err != nil {
+		return err
+	}
 	return r.publishTemplate(ctx)
 }
 
@@ -203,6 +210,18 @@ func (r *runner) configureSending(ctx context.Context) error {
 		return fmt.Errorf("create sending domain: %w", err)
 	}
 	r.domainMailID = dom.ID
+
+	// bulk.e2e.test is registered too, even though sender A does not need a
+	// VERP return path: a sender's from_email has to be on a sending domain
+	// the tenant owns, or the create is 422 from_domain_not_owned (ADR-0017).
+	// Without that rule a tenant could put another tenant's domain in its
+	// From address; with it, "the tenant owns this domain" is one row and the
+	// only way to say so.
+	if err := r.api.postJSON(ctx, "/api/v1/sending-domains", sendingDomainInput{
+		Domain: bulkDomain,
+	}, &idOnly{}); err != nil {
+		return fmt.Errorf("create bulk sending domain: %w", err)
+	}
 
 	var sndA idOnly
 	if err := r.api.postJSON(ctx, "/api/v1/senders", senderInput{

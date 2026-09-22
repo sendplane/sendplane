@@ -21,7 +21,7 @@ func TestBounceMailboxCRUD(t *testing.T) {
 			Folder: ptr("INBOX"), AfterProcess: ptr("move:Handled"),
 		}), http.StatusCreated)
 
-	if created.Id == nil {
+	if created.Id == "" {
 		t.Fatal("create returned no id")
 	}
 	if created.Protocol == nil || *created.Protocol != MailboxProtocolImap {
@@ -34,11 +34,11 @@ func TestBounceMailboxCRUD(t *testing.T) {
 	// The response carries no password at all, and the store holds the
 	// ciphertext rather than what the caller sent (architecture 16).
 	raw := decodeInto[map[string]any](t, e.do(http.MethodGet,
-		"/api/v1/bounce-mailboxes/"+created.Id.String(), nil), http.StatusOK)
+		"/api/v1/bounce-mailboxes/"+created.Id, nil), http.StatusOK)
 	if _, ok := raw["password"]; ok {
 		t.Error("the response body contains a password")
 	}
-	stored, err := e.st.BounceMailboxes().Get(context.Background(), created.Id.String())
+	stored, err := e.st.BounceMailboxes().Get(context.Background(), created.Id)
 	if err != nil {
 		t.Fatalf("store Get: %v", err)
 	}
@@ -54,14 +54,14 @@ func TestBounceMailboxCRUD(t *testing.T) {
 
 	list := decodeInto[BounceMailboxList](t, e.do(http.MethodGet,
 		"/api/v1/bounce-mailboxes", nil), http.StatusOK)
-	if len(list.Items) != 1 || *list.Items[0].Id != *created.Id {
+	if len(list.Items) != 1 || list.Items[0].Id != created.Id {
 		t.Fatalf("list = %+v, want the one mailbox", list.Items)
 	}
 
 	// Omitting the password on a replace keeps the stored one, so a GET body
 	// can be PUT back without wiping the secret.
 	updated := decodeInto[BounceMailbox](t, e.do(http.MethodPut,
-		"/api/v1/bounce-mailboxes/"+created.Id.String(), BounceMailboxUpdate{
+		"/api/v1/bounce-mailboxes/"+created.Id, BounceMailboxUpdate{
 			Name: "bounces", Host: "imap.example.com", Port: 993,
 			Tls: ptr(TLSMode("tls")), Username: ptr("bounces"),
 			AfterProcess: ptr("delete"), Enabled: ptr(false),
@@ -87,15 +87,15 @@ func TestBounceMailboxCRUD(t *testing.T) {
 	}
 
 	// A stale version is a 409, like every other optimistic-concurrency write.
-	w := e.do(http.MethodPut, "/api/v1/bounce-mailboxes/"+created.Id.String(),
+	w := e.do(http.MethodPut, "/api/v1/bounce-mailboxes/"+created.Id,
 		BounceMailboxUpdate{
 			Name: "bounces", Host: "imap.example.com", Port: 993,
 			Version: *created.Version,
 		})
 	decodeError(t, w, http.StatusConflict, ErrorCodeVersionConflict)
 
-	e.do(http.MethodDelete, "/api/v1/bounce-mailboxes/"+created.Id.String(), nil)
-	w = e.do(http.MethodGet, "/api/v1/bounce-mailboxes/"+created.Id.String(), nil)
+	e.do(http.MethodDelete, "/api/v1/bounce-mailboxes/"+created.Id, nil)
+	w = e.do(http.MethodGet, "/api/v1/bounce-mailboxes/"+created.Id, nil)
 	decodeError(t, w, http.StatusNotFound, ErrorCodeNotFound)
 }
 
