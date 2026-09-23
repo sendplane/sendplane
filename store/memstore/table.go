@@ -21,6 +21,49 @@ type meta[T any] struct {
 	// times lists the model's remaining timestamps, the ones a SQL backend
 	// would give a column of their own, so they can be truncated on write.
 	times func(*T) []*time.Time
+	// key is an optional per-tenant unique key, the stand-in for a partial
+	// unique index: an empty key is exempt (template and layout keys).
+	key func(*T) string
+	// scrub clears the fields a real backend has no column for (the
+	// overlay's computed ones), so the reference store does not persist more
+	// than the contract does.
+	scrub func(*T)
+}
+
+// keyTaken reports whether another row of the table already holds v's key.
+// The caller holds p.mu.
+func (t *table[T]) keyTaken(v *T, id string) bool {
+	if t.m.key == nil {
+		return false
+	}
+	k := t.m.key(v)
+	if k == "" {
+		return false
+	}
+	for rid, row := range t.rows {
+		if rid != id && t.m.key(row) == k {
+			return true
+		}
+	}
+	return false
+}
+
+// getByKey is the lookup behind TemplateRepo.GetByKey and LayoutRepo.GetByKey.
+func (t *table[T]) getByKey(key string) (*T, error) {
+	t.p.mu.Lock()
+	defer t.p.mu.Unlock()
+	if err := t.p.check(); err != nil {
+		return nil, err
+	}
+	if key != "" && t.m.key != nil {
+		for _, row := range t.rows {
+			if t.m.key(row) == key {
+				cp := *row
+				return &cp, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("%w: key %q", store.ErrNotFound, key)
 }
 
 // truncate reduces every time it is given to the resolution the contract
@@ -75,6 +118,9 @@ func (t *table[T]) Create(_ context.Context, v *T) error {
 	if _, ok := t.rows[*id]; ok {
 		return fmt.Errorf("%w: %s already exists", store.ErrConflict, *id)
 	}
+	if t.keyTaken(v, *id) {
+		return fmt.Errorf("%w: key %q already exists", store.ErrConflict, t.m.key(v))
+	}
 	*t.m.tenant(v) = t.tenant
 	now := t.p.now()
 	if t.m.created != nil && t.m.created(v).IsZero() {
@@ -88,6 +134,9 @@ func (t *table[T]) Create(_ context.Context, v *T) error {
 	}
 	cp := *v
 	t.truncateRow(&cp)
+	if t.m.scrub != nil {
+		t.m.scrub(&cp)
+	}
 	t.rows[*id] = &cp
 	return nil
 }
@@ -125,6 +174,11 @@ func (t *table[T]) Update(_ context.Context, v *T) error {
 			return fmt.Errorf("%w: %s version %d, have %d",
 				store.ErrConflict, id, *t.m.version(cur), *t.m.version(v))
 		}
+	}
+	if t.keyTaken(v, id) {
+		return fmt.Errorf("%w: key %q already exists", store.ErrConflict, t.m.key(v))
+	}
+	if t.m.version != nil {
 		*t.m.version(v) = *t.m.version(cur) + 1
 	}
 	*t.m.tenant(v) = t.tenant
@@ -136,6 +190,9 @@ func (t *table[T]) Update(_ context.Context, v *T) error {
 	}
 	cp := *v
 	t.truncateRow(&cp)
+	if t.m.scrub != nil {
+		t.m.scrub(&cp)
+	}
 	t.rows[id] = &cp
 	return nil
 }

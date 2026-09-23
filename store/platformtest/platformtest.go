@@ -14,6 +14,9 @@
 //   - The system tenant sees everything, with state merged in.
 //   - A configuration write to a shared entity is ErrReadOnly.
 //   - A state write lands in a shadow row that contains no configuration.
+//   - A system-tenant template or layout marked Shared is read through by
+//     every tenant, never copied into it, and is read-only there; a tenant's
+//     own row with the same key overrides it (ADR-0018).
 package platformtest
 
 import (
@@ -108,6 +111,10 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 	t.Run("ShadowRows", func(t *testing.T) { testShadowRows(t, inner, p) })
 	t.Run("MergeAndPassThrough", func(t *testing.T) { testMergeAndPassThrough(t, p) })
 	t.Run("ListPaging", func(t *testing.T) { testListPaging(t, p) })
+	t.Run("SharedTemplates", func(t *testing.T) { testSharedTemplates(t, inner, p) })
+	t.Run("SharedLayouts", func(t *testing.T) { testSharedLayouts(t, inner, p) })
+	t.Run("SharedVersions", func(t *testing.T) { testSharedVersions(t, p) })
+	t.Run("SharedContentWithoutCatalog", func(t *testing.T) { testSharedContentWithoutCatalog(t, inner) })
 }
 
 func must(t *testing.T, what string, err error) {

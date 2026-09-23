@@ -41,8 +41,9 @@ func (s *server) CreateLayout(ctx context.Context, req CreateLayoutRequestObject
 		return nil, errBadRequest("a request body is required")
 	}
 	l := &store.Layout{}
-	if err := s.applyLayout(l, LayoutUpdate{
-		Name: req.Body.Name, Mode: req.Body.Mode, Body: req.Body.Body, I18n: req.Body.I18n,
+	if err := s.applyLayout(t, l, LayoutUpdate{
+		Name: req.Body.Name, Key: req.Body.Key, Shared: req.Body.Shared,
+		Mode: req.Body.Mode, Body: req.Body.Body, I18n: req.Body.I18n,
 	}); err != nil {
 		return nil, err
 	}
@@ -76,7 +77,10 @@ func (s *server) UpdateLayout(ctx context.Context, req UpdateLayoutRequestObject
 	if err != nil {
 		return nil, err
 	}
-	if err := s.applyLayout(l, *req.Body); err != nil {
+	if err := refuseSharedWrite(t, l.TenantID, "layout", l.ID); err != nil {
+		return nil, err
+	}
+	if err := s.applyLayout(t, l, *req.Body); err != nil {
 		return nil, err
 	}
 	l.Version = req.Body.Version
@@ -97,8 +101,12 @@ func (s *server) DeleteLayout(ctx context.Context, req DeleteLayoutRequestObject
 	return DeleteLayout204Response{}, nil
 }
 
-func (s *server) applyLayout(l *store.Layout, in LayoutUpdate) error {
+func (s *server) applyLayout(t *tenant, l *store.Layout, in LayoutUpdate) error {
 	if err := requireNonEmpty("name", in.Name); err != nil {
+		return err
+	}
+	key, shared, err := contentKeyAndShared(t, "layout", in.Key, in.Shared)
+	if err != nil {
 		return err
 	}
 	mode, err := contentModeIn(in.Mode)
@@ -110,6 +118,7 @@ func (s *server) applyLayout(l *store.Layout, in LayoutUpdate) error {
 			"body exceeds the configured limit of %d bytes", s.deps.Limits.MaxBodyBytes)
 	}
 	l.Name, l.Mode, l.Body = in.Name, mode, in.Body
+	l.Key, l.Shared = key, shared
 	l.I18n = bundleIn(in.I18n)
 	return nil
 }
@@ -117,6 +126,7 @@ func (s *server) applyLayout(l *store.Layout, in LayoutUpdate) error {
 func layoutOut(v *store.Layout) Layout {
 	return Layout{
 		Id: uuidPtrOf(v.ID), Name: v.Name, Mode: ContentMode(v.Mode),
+		Key: strPtr(v.Key), Shared: ptr(v.Shared), Overridden: ptr(v.Overridden),
 		Body: strPtr(v.Body), I18n: bundleOut(v.I18n),
 		Version: ptr(v.Version), CreatedAt: timePtr(v.CreatedAt), UpdatedAt: timePtr(v.UpdatedAt),
 	}
@@ -150,7 +160,8 @@ func (s *server) CreateTemplate(ctx context.Context, req CreateTemplateRequestOb
 	}
 	tpl := &store.Template{}
 	if err := s.applyTemplate(ctx, t, tpl, TemplateUpdate{
-		Name: req.Body.Name, LayoutId: req.Body.LayoutId, Subject: req.Body.Subject,
+		Name: req.Body.Name, Key: req.Body.Key, Shared: req.Body.Shared, Uses: req.Body.Uses,
+		LayoutId: req.Body.LayoutId, Subject: req.Body.Subject,
 		Preheader: req.Body.Preheader, Mode: req.Body.Mode, Body: req.Body.Body,
 		Blocks: req.Body.Blocks, Text: req.Body.Text, I18n: req.Body.I18n,
 		DefaultLocale: req.Body.DefaultLocale,
@@ -185,6 +196,9 @@ func (s *server) UpdateTemplate(ctx context.Context, req UpdateTemplateRequestOb
 	}
 	tpl, err := t.st.Templates().Get(ctx, req.TemplateId.String())
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseSharedWrite(t, tpl.TenantID, "template", tpl.ID); err != nil {
 		return nil, err
 	}
 	if err := s.applyTemplate(ctx, t, tpl, *req.Body); err != nil {
@@ -228,15 +242,28 @@ func (s *server) applyTemplate(ctx context.Context, t *tenant, tpl *store.Templa
 		return newErr(http.StatusRequestEntityTooLarge, ErrorCodePayloadTooLarge,
 			"body exceeds the configured limit of %d bytes", s.deps.Limits.MaxBodyBytes)
 	}
+	key, shared, err := contentKeyAndShared(t, "template", in.Key, in.Shared)
+	if err != nil {
+		return err
+	}
+	uses, err := templateUsesIn(in.Uses)
+	if err != nil {
+		return err
+	}
 	if layoutID := idPtrOf(in.LayoutId); layoutID != "" {
-		if _, err := t.st.Layouts().Get(ctx, layoutID); err != nil {
+		l, err := t.st.Layouts().Get(ctx, layoutID)
+		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return errInvalid("layout %s does not exist", layoutID)
 			}
 			return err
 		}
+		if err := sharedLayoutRule(shared, l); err != nil {
+			return err
+		}
 	}
 	tpl.Name = in.Name
+	tpl.Key, tpl.Shared, tpl.Uses = key, shared, uses
 	tpl.LayoutID = idPtrOf(in.LayoutId)
 	tpl.Subject = in.Subject
 	tpl.Preheader = deref(in.Preheader)
@@ -259,7 +286,9 @@ func (s *server) applyTemplate(ctx context.Context, t *tenant, tpl *store.Templa
 func templateOut(v *store.Template) Template {
 	out := Template{
 		Id: uuidPtrOf(v.ID), Name: v.Name, LayoutId: uuidPtrOf(v.LayoutID),
-		Subject: v.Subject, Preheader: strPtr(v.Preheader),
+		Key: strPtr(v.Key), Shared: ptr(v.Shared), Overridden: ptr(v.Overridden),
+		OverriddenFromVersionId: uuidPtrOf(v.OverriddenFromVersion),
+		Subject:                 v.Subject, Preheader: strPtr(v.Preheader),
 		Mode: ContentMode(v.Mode), Body: strPtr(v.Body), Text: strPtr(v.Text),
 		I18n: bundleOut(v.I18n), DefaultLocale: strPtr(v.DefaultLocale),
 		PublishedVersionId: uuidPtrOf(v.PublishedVersionID),
@@ -269,6 +298,17 @@ func templateOut(v *store.Template) Template {
 		if m, err := jsonMap(v.Blocks); err == nil {
 			out.Blocks = &m
 		}
+	}
+	if len(v.Uses) > 0 {
+		uses := make([]string, len(v.Uses))
+		for i, u := range v.Uses {
+			uses[i] = string(u)
+		}
+		out.Uses = &uses
+	}
+	if v.Overridden {
+		// The shared original was published again after the copy was made.
+		out.SharedUpdatedSinceOverride = ptr(v.SharedPublishedVersionID != v.OverriddenFromVersion)
 	}
 	return out
 }
@@ -357,6 +397,9 @@ func (s *server) ReplaceTemplateI18n(ctx context.Context, req ReplaceTemplateI18
 	}
 	tpl, err := t.st.Templates().Get(ctx, req.TemplateId.String())
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseSharedWrite(t, tpl.TenantID, "template", tpl.ID); err != nil {
 		return nil, err
 	}
 
@@ -610,6 +653,16 @@ func (s *server) mergedBundle(ctx context.Context, t *tenant, tpl *store.Templat
 	return out, nil
 }
 
+// layoutOf loads the layout a template is rendered with.
+//
+// The reference is an ID, but a layout that has a key resolves *by key*, the
+// tenant's own layout first and the shared one second (ADR-0018): that is how
+// a tenant's override of a shared layout takes effect for every template of
+// the tenant that names the shared one, including its override of a shared
+// template, whose copied layout_id is the shared layout's ID. A shared
+// template viewed from a tenant is the exception: it renders with exactly the
+// layout the system tenant published it with, so its preview matches what it
+// sends.
 func (s *server) layoutOf(ctx context.Context, t *tenant, tpl *store.Template) (*store.Layout, error) {
 	if tpl.LayoutID == "" {
 		return nil, nil
@@ -621,7 +674,20 @@ func (s *server) layoutOf(ctx context.Context, t *tenant, tpl *store.Template) (
 		// the only thing it contributed.
 		return nil, nil
 	}
-	return l, err
+	if err != nil {
+		return nil, err
+	}
+	if l.Key == "" || tpl.TenantID != t.id {
+		return l, nil
+	}
+	byKey, err := t.st.Layouts().GetByKey(ctx, l.Key)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return l, nil
+	case err != nil:
+		return nil, err
+	}
+	return byKey, nil
 }
 
 // --- preview and publish -----------------------------------------------
@@ -720,9 +786,19 @@ func (s *server) PublishTemplate(ctx context.Context, req PublishTemplateRequest
 	if err != nil {
 		return nil, err
 	}
+	// A shared template is published in the system tenant only; a tenant
+	// publishes its override instead.
+	if err := refuseSharedWrite(t, tpl.TenantID, "template", tpl.ID); err != nil {
+		return nil, err
+	}
 	layout, err := s.layoutOf(ctx, t, tpl)
 	if err != nil {
 		return nil, err
+	}
+	if layout != nil {
+		if err := sharedLayoutRule(tpl.Shared, layout); err != nil {
+			return nil, err
+		}
 	}
 	allowMissing := false
 	if req.Body != nil && req.Body.AllowMissingI18nKeys != nil {
@@ -772,7 +848,7 @@ func (s *server) GetMessageVersion(ctx context.Context, req GetMessageVersionReq
 	if err != nil {
 		return nil, err
 	}
-	v, err := t.st.Versions().Get(ctx, req.VersionId.String())
+	v, err := s.visibleVersion(ctx, t, req.VersionId.String())
 	if err != nil {
 		return nil, err
 	}

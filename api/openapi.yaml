@@ -40,7 +40,7 @@ info:
     | --- | --- |
     | `settings.read` / `settings.write` | tenant settings |
     | `sender.read` / `sender.write` | transports, senders, sending domains, probe mailboxes, probe runs |
-    | `template.read` / `template.write` | layouts, templates, i18n bundles, previews, publishes, message versions |
+    | `template.read` / `template.write` | layouts, templates, i18n bundles, previews, publishes, message versions, overrides of shared templates and layouts |
     | `campaign.read` / `campaign.write` | campaign CRUD, recipient ingest, link report, unsubscribe notifications |
     | `campaign.send` | start, pause, resume, cancel, bulk retry |
     | `message.send` | transactional send |
@@ -1045,7 +1045,10 @@ paths:
     put:
       operationId: updateLayout
       summary: Replace a layout
-      description: Published message versions are unaffected; they carry their own merged copy.
+      description: |
+        Published message versions are unaffected; they carry their own merged
+        copy. A layout shared by the system tenant is read-only in every other
+        tenant (`403 platform_read_only`); override it instead.
       tags: [Layouts]
       x-sendplane-action: template.write
       requestBody:
@@ -1070,6 +1073,10 @@ paths:
     delete:
       operationId: deleteLayout
       summary: Delete a layout
+      description: |
+        Deleting a tenant's override of a shared layout returns the tenant to
+        the shared one. A shared layout itself cannot be deleted from a tenant
+        (`403 platform_read_only`).
       tags: [Layouts]
       x-sendplane-action: template.write
       responses:
@@ -1080,10 +1087,45 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/InternalError' }
 
+  /api/v1/layouts/{layoutId}/override:
+    parameters:
+      - { $ref: '#/components/parameters/LayoutId' }
+    post:
+      operationId: overrideLayout
+      summary: Override a shared layout for this tenant
+      description: |
+        Copies a layout the system tenant shares into the caller's tenant as a
+        layout of its own with the same `key` (ADR-0018). From then on the
+        tenant's templates that name the shared layout render with this copy,
+        because a layout reference resolves by key, own first. Deleting the
+        copy returns the tenant to the shared layout.
+
+        `409 duplicate` when the tenant already has a layout with that key;
+        `422 validation_failed` for a layout that is not shared or in the
+        system tenant itself.
+      tags: [Layouts]
+      x-sendplane-action: template.write
+      responses:
+        '201':
+          description: The tenant's new copy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Layout' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
   /api/v1/templates:
     get:
       operationId: listTemplates
       summary: List templates
+      description: |
+        The tenant's own templates plus the templates the system tenant shares
+        (`shared: true`), except a shared one the tenant has overridden: its
+        own copy stands in for it, marked `overridden` (ADR-0018).
       tags: [Templates]
       x-sendplane-action: template.read
       parameters:
@@ -1143,7 +1185,10 @@ paths:
     put:
       operationId: updateTemplate
       summary: Replace a template
-      description: Editing never affects a running campaign; it keeps its own message version.
+      description: |
+        Editing never affects a running campaign; it keeps its own message
+        version. A template shared by the system tenant is read-only in every
+        other tenant (`403 platform_read_only`); override it instead.
       tags: [Templates]
       x-sendplane-action: template.write
       requestBody:
@@ -1168,6 +1213,9 @@ paths:
     delete:
       operationId: deleteTemplate
       summary: Delete a template
+      description: |
+        Deleting a tenant's override of a shared template returns the tenant
+        to the shared template: a send by `template_key` resolves to it again.
       tags: [Templates]
       x-sendplane-action: template.write
       responses:
@@ -1176,6 +1224,43 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/templates/{templateId}/override:
+    parameters:
+      - { $ref: '#/components/parameters/TemplateId' }
+    post:
+      operationId: overrideTemplate
+      summary: Override a shared template for this tenant
+      description: |
+        Copies a template the system tenant shares into the caller's tenant as
+        a complete template of its own: same `key` and name, and a copy of the
+        subject, body, text, blocks, mode, i18n bundle, layout reference,
+        default locale and `uses` (ADR-0018). A send by `template_key` resolves
+        to the copy from now on; deleting it returns the tenant to the shared
+        template.
+
+        The copy starts out published with the shared template's current
+        version (`published_version_id`, `overridden_from_version_id`), which is
+        read through rather than copied, so sending does not stop between the
+        override and the tenant's first publish of its own.
+
+        `409 duplicate` when the tenant already has a template with that key;
+        `422 validation_failed` for a template that is not shared or in the
+        system tenant itself.
+      tags: [Templates]
+      x-sendplane-action: template.write
+      responses:
+        '201':
+          description: The tenant's new copy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Template' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
         '500': { $ref: '#/components/responses/InternalError' }
 
   /api/v1/templates/{templateId}/preview:
@@ -1219,6 +1304,12 @@ paths:
         Merges the layout slot and i18n bundles, compiles MJML once and extracts
         the trackable links. Missing i18n keys block the publish unless the
         tenant relaxed that (architecture 6.2, 6.3).
+
+        A layout reference with a `key` resolves by key, the tenant's own
+        layout first and the shared one second, so an overridden shared layout
+        is the one merged. A template shared by the system tenant is published
+        only there (`403 platform_read_only` elsewhere), and its layout must be
+        a shared layout.
       tags: [Templates]
       x-sendplane-action: template.write
       requestBody:
@@ -1404,7 +1495,14 @@ paths:
     post:
       operationId: createCampaign
       summary: Create a campaign
-      description: The campaign starts as `draft`; recipients are appended separately.
+      description: |
+        The campaign starts as `draft`; recipients are appended separately.
+
+        The template is named by `template_id` or `template_key` (at most one);
+        a key resolves to the tenant's own template first, then to a shared
+        one, and the campaign stores the ID it resolved to. The sender-use and
+        template-use policies run here and again at start
+        (`403 sender_use_denied`, `403 template_use_denied`).
       tags: [Campaigns]
       x-sendplane-action: campaign.write
       requestBody:
@@ -1963,6 +2061,12 @@ paths:
         immediately; sending happens asynchronously. Passing only `template_id`
         uses the template's currently published version and reports which one in
         `version_id`; pass `version_id` to pin an older one.
+
+        `template_key` names the template by key instead: the tenant's own
+        template with that key if there is one (an override), otherwise the
+        template the system tenant shares under it, resolved at request time
+        (ADR-0018). A shared template may be restricted to some uses
+        (`403 template_use_denied`).
 
         `Idempotency-Key` makes a replay return the original result instead of
         sending again. Suppressed recipients come back with status `suppressed`
@@ -2568,7 +2672,12 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     Forbidden:
-      description: The host's `Authorizer` denied the operation's action (`forbidden`).
+      description: |
+        The host's `Authorizer` denied the operation's action (`forbidden`),
+        a write targeted something the caller can only read
+        (`platform_read_only`: a platform resource, or a template or layout
+        shared by the system tenant), or a use policy refused the send
+        (`sender_use_denied`, `template_use_denied`).
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -2644,6 +2753,7 @@ components:
             - rate_limited
             - platform_read_only
             - sender_use_denied
+            - template_use_denied
             - tenant_vars_missing
             - from_domain_not_owned
             - transport_not_assignable
@@ -3726,6 +3836,52 @@ components:
           description: Locales that do not define the key.
           items: { type: string }
 
+    ContentKey:
+      type: string
+      description: |
+        Optional identifier of a template or layout that is the same in every
+        tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+        of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+        a shared template overrides it, and `template_key` on a send resolves
+        through it. A template without a key cannot be shared and is never
+        found by key. An empty string clears it.
+      pattern: '^([a-z0-9][a-z0-9._-]{0,63})?$'
+      maxLength: 64
+      examples: [welcome, receipt.v2]
+
+    ContentShared:
+      type: boolean
+      description: |
+        True for a template or layout the system tenant shares with every
+        tenant (ADR-0018). In any other tenant such an object is read through,
+        never copied, and read-only (`403 platform_read_only`); override it to
+        change it. In the system tenant this is the flag its author sets.
+
+    ContentSharedInput:
+      type: boolean
+      description: |
+        Share this template or layout with every tenant. Only the system
+        tenant may set it (`422 validation_failed` elsewhere), and it requires
+        a `key`. A shared template's layout must be shared too.
+
+    ContentOverridden:
+      type: boolean
+      readOnly: true
+      description: |
+        True on a tenant's own template or layout whose `key` equals a shared
+        one's: this copy overrides the shared original, which is therefore not
+        listed separately.
+
+    TemplateUses:
+      type: array
+      description: |
+        What the template may be used for. Empty or absent means anything.
+        The default template-use policy enforces it for shared templates only
+        (`403 template_use_denied`); an override carries a copy, which the
+        host's `TemplatePolicy` hook may enforce as well.
+      uniqueItems: true
+      items: { type: string, enum: [campaign, transactional] }
+
     Layout:
       type: object
       description: |
@@ -3736,6 +3892,9 @@ components:
       properties:
         id: { type: string, format: uuid, readOnly: true }
         name: { type: string }
+        key: { $ref: '#/components/schemas/ContentKey' }
+        shared: { $ref: '#/components/schemas/ContentShared' }
+        overridden: { $ref: '#/components/schemas/ContentOverridden' }
         mode: { $ref: '#/components/schemas/ContentMode' }
         body: { type: string, description: 'MJML or HTML containing `{{ content }}`.' }
         i18n: { $ref: '#/components/schemas/I18nBundle' }
@@ -3748,6 +3907,8 @@ components:
       required: [name, mode, body]
       properties:
         name: { type: string, minLength: 1 }
+        key: { $ref: '#/components/schemas/ContentKey' }
+        shared: { $ref: '#/components/schemas/ContentSharedInput' }
         mode:
           description: A layout is authored as `mjml` or `html`, never as blocks.
           allOf:
@@ -3781,6 +3942,23 @@ components:
       properties:
         id: { type: string, format: uuid, readOnly: true }
         name: { type: string }
+        key: { $ref: '#/components/schemas/ContentKey' }
+        shared: { $ref: '#/components/schemas/ContentShared' }
+        uses: { $ref: '#/components/schemas/TemplateUses' }
+        overridden: { $ref: '#/components/schemas/ContentOverridden' }
+        overridden_from_version_id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: |
+            On a tenant's override of a shared template: the shared template's
+            published version when the copy was made.
+        shared_updated_since_override:
+          type: boolean
+          readOnly: true
+          description: |
+            On an override: the shared template has been published again since
+            the copy was made, so the tenant may want to look at what changed.
         layout_id: { type: string, format: uuid }
         subject: { type: string }
         preheader: { type: string }
@@ -3809,6 +3987,9 @@ components:
       required: [name, subject, mode, body]
       properties:
         name: { type: string, minLength: 1 }
+        key: { $ref: '#/components/schemas/ContentKey' }
+        shared: { $ref: '#/components/schemas/ContentSharedInput' }
+        uses: { $ref: '#/components/schemas/TemplateUses' }
         layout_id: { type: string, format: uuid }
         subject:
           type: string
@@ -4032,6 +4213,13 @@ components:
             Resolve the version from this template's published one, at start
             rather than here: a template that is not published yet is accepted
             and start fails if it still is not.
+        template_key:
+          allOf: [{ $ref: '#/components/schemas/ContentKey' }]
+          description: |
+            Names the template by key instead of `template_id` (not both): the
+            tenant's own template with that key first, then the shared one.
+            The key is resolved here and the campaign stores the template ID it
+            resolved to.
         sender_id: { $ref: '#/components/schemas/ResourceId' }
         default_locale: { type: string }
         tenant_vars: { $ref: '#/components/schemas/TenantVars' }
@@ -4340,7 +4528,16 @@ components:
         template_id:
           type: string
           format: uuid
-          description: Uses the template's currently published version. Required unless `version_id` is given.
+          description: |
+            Uses the template's currently published version. One of
+            `template_id`, `template_key` or `version_id` is required, and
+            `template_id` and `template_key` exclude each other.
+        template_key:
+          allOf: [{ $ref: '#/components/schemas/ContentKey' }]
+          description: |
+            Names the template by key: the tenant's own template with that key
+            first (an override), then the one the system tenant shares.
+            Resolved at request time.
         version_id:
           type: string
           format: uuid

@@ -243,8 +243,8 @@ type tenantStore struct {
 	transports *table[store.Transport]
 	senders    *table[store.Sender]
 	domains    *table[store.SendingDomain]
-	layouts    *table[store.Layout]
-	templates  *table[store.Template]
+	layouts    *layoutRepo
+	templates  *templateRepo
 
 	bounceMailboxes *bounceMailboxRepo
 	probeMailboxes  *probeMailboxRepo
@@ -311,20 +311,27 @@ func newTenantStore(p *Provider, tenant string, d *tenantData) *tenantStore {
 			return []*time.Time{&v.Health.CheckedAt, &v.Health.LastOKAt}
 		},
 	}}}
-	s.layouts = &table[store.Layout]{p: p, tenant: tenant, rows: d.layouts, m: meta[store.Layout]{
+	s.layouts = &layoutRepo{table[store.Layout]{p: p, tenant: tenant, rows: d.layouts, m: meta[store.Layout]{
 		id:      func(v *store.Layout) *string { return &v.ID },
 		tenant:  func(v *store.Layout) *string { return &v.TenantID },
 		version: func(v *store.Layout) *int64 { return &v.Version },
 		created: func(v *store.Layout) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.Layout) *time.Time { return &v.UpdatedAt },
-	}}
-	s.templates = &table[store.Template]{p: p, tenant: tenant, rows: d.templates, m: meta[store.Template]{
+		key:     func(v *store.Layout) string { return v.Key },
+		scrub:   func(v *store.Layout) { v.Overridden = false },
+	}}}
+	s.templates = &templateRepo{table[store.Template]{p: p, tenant: tenant, rows: d.templates, m: meta[store.Template]{
 		id:      func(v *store.Template) *string { return &v.ID },
 		tenant:  func(v *store.Template) *string { return &v.TenantID },
 		version: func(v *store.Template) *int64 { return &v.Version },
 		created: func(v *store.Template) *time.Time { return &v.CreatedAt },
 		updated: func(v *store.Template) *time.Time { return &v.UpdatedAt },
-	}}
+		key:     func(v *store.Template) string { return v.Key },
+		scrub: func(v *store.Template) {
+			v.Overridden, v.SharedPublishedVersionID = false, ""
+			v.Uses = append([]store.UseKind(nil), v.Uses...)
+		},
+	}}}
 	s.probeRuns = &probeRunRepo{table[store.ProbeRun]{p: p, tenant: tenant, rows: d.probeRuns, m: meta[store.ProbeRun]{
 		id:      func(v *store.ProbeRun) *string { return &v.ID },
 		tenant:  func(v *store.ProbeRun) *string { return &v.TenantID },

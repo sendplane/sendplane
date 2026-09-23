@@ -5,12 +5,14 @@ import { computed } from 'vue'
 import SpButton from '../components/SpButton.vue'
 import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpLink from '../components/SpLink.vue'
+import SpContentBadges from '../components/SpContentBadges.vue'
 import SpPageHeader from '../components/SpPageHeader.vue'
 import SpTable, { type TableColumn } from '../components/SpTable.vue'
 import { useApiToast } from '../composables/useApiToast.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useCursorList } from '../composables/useCursorList.js'
 import { useSendplane } from '../context.js'
+import { isSharedReadOnly } from '../lib/content.js'
 import { formatDateTime } from '../lib/format.js'
 
 const { client, t, locale, navigate, systemTenant } = useSendplane()
@@ -23,6 +25,7 @@ const list = useCursorList<Layout>((params, signal) =>
 
 const columns = computed<TableColumn[]>(() => [
   { key: 'name', label: t('common.name'), width: 'minmax(200px, 3fr)' },
+  { key: 'key', label: t('content.key'), width: 'minmax(120px, 1fr)', mono: true },
   { key: 'mode', label: t('layout.mode'), width: '100px' },
   { key: 'updated', label: t('common.updated'), width: '200px', secondary: true },
   { key: 'actions', label: t('common.actions'), width: '90px', align: 'end' },
@@ -48,8 +51,8 @@ async function remove(layout: Layout) {
         <SpButton :loading="list.loading.value" @click="list.reload()">
           {{ t('common.refresh') }}
         </SpButton>
-        <!-- Content belongs to a tenant; the system tenant only reads it. -->
-        <SpButton v-if="!systemTenant" variant="primary" @click="navigate({ name: 'layout.new' })">
+        <!-- The system tenant authors layouts too, shared ones included (ADR-0018). -->
+        <SpButton variant="primary" @click="navigate({ name: 'layout.new' })">
           {{ t('layout.new') }}
         </SpButton>
       </template>
@@ -77,7 +80,9 @@ async function remove(layout: Layout) {
         <SpLink :to="{ name: 'layout', params: { layoutId: (row as Layout).id! } }">
           {{ (row as Layout).name }}
         </SpLink>
+        <SpContentBadges :item="row as Layout" class="sp-content__badges" />
       </template>
+      <template #[`cell-key`]="{ row }">{{ (row as Layout).key || '—' }}</template>
       <template #[`cell-mode`]="{ row }">{{
         t(`template.modes.${(row as Layout).mode}`)
       }}</template>
@@ -85,7 +90,13 @@ async function remove(layout: Layout) {
         {{ formatDateTime((row as Layout).updated_at, locale) }}
       </template>
       <template #[`cell-actions`]="{ row }">
-        <SpButton v-if="!systemTenant" size="sm" variant="ghost" @click="remove(row as Layout)">
+        <!-- A shared layout is read-only here: a delete would only 403. -->
+        <SpButton
+          v-if="!isSharedReadOnly(row as Layout, systemTenant)"
+          size="sm"
+          variant="ghost"
+          @click="remove(row as Layout)"
+        >
           {{ t('common.delete') }}
         </SpButton>
         <span v-else>—</span>
@@ -93,3 +104,9 @@ async function remove(layout: Layout) {
     </SpTable>
   </div>
 </template>
+
+<style scoped>
+.sp-content__badges {
+  margin-left: var(--sp-space-1);
+}
+</style>

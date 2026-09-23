@@ -56,7 +56,8 @@ func (s *server) CreateCampaign(ctx context.Context, req CreateCampaignRequestOb
 	c := &store.Campaign{Status: store.CampaignDraft}
 	if err := s.applyCampaign(ctx, t, c, CampaignUpdate{
 		Name: req.Body.Name, VersionId: req.Body.VersionId, TemplateId: req.Body.TemplateId,
-		SenderId: req.Body.SenderId, DefaultLocale: req.Body.DefaultLocale,
+		TemplateKey: req.Body.TemplateKey,
+		SenderId:    req.Body.SenderId, DefaultLocale: req.Body.DefaultLocale,
 		TenantVars: req.Body.TenantVars,
 		Vars:       req.Body.Vars, ScheduleAt: req.Body.ScheduleAt,
 	}); err != nil {
@@ -142,25 +143,33 @@ func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign
 	}
 	versionID := idPtrOf(in.VersionId)
 	templateID := ""
+	var tpl *store.Template
 	switch {
 	case versionID != "":
-		if _, err := t.st.Versions().Get(ctx, versionID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
+		if in.TemplateKey != nil {
+			return errInvalid("version_id pins a version; do not also name a template_key")
+		}
+		v, err := s.visibleVersion(ctx, t, versionID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) || isNotFoundAPI(err) {
 				return errInvalid("message version %s does not exist", versionID)
 			}
 			return err
 		}
-	case in.TemplateId != nil:
-		tpl, err := t.st.Templates().Get(ctx, idOf(*in.TemplateId))
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return errInvalid("template %s does not exist", *in.TemplateId)
-			}
+		if tpl, err = s.templateOfVersion(ctx, t, v); err != nil {
 			return err
 		}
-		templateID = tpl.ID
 	default:
-		return errInvalid("one of template_id or version_id is required")
+		// By ID or by key; a key is resolved here, own template first, and
+		// the campaign keeps the ID it resolved to (ADR-0018).
+		got, err := s.templateByRef(ctx, t, in.TemplateId, in.TemplateKey)
+		if err != nil {
+			return err
+		}
+		if got == nil {
+			return errInvalid("one of template_id, template_key or version_id is required")
+		}
+		tpl, templateID = got, got.ID
 	}
 	snd, err := t.st.Senders().Get(ctx, string(in.SenderId))
 	if err != nil {
@@ -187,6 +196,9 @@ func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign
 		return err
 	}
 	if err := s.checkSharedFrom(snd.ID, snd.Shared, tenantVars); err != nil {
+		return err
+	}
+	if err := s.checkTemplateUse(ctx, t, tpl, store.UseCampaign, tenantVars); err != nil {
 		return err
 	}
 
@@ -312,6 +324,13 @@ func (s *server) StartCampaign(ctx context.Context, req StartCampaignRequestObje
 	// what its shared sender is allowed for in between (ADR-0017).
 	if err := s.checkCampaignSenderUse(ctx, t, req.CampaignId.String()); err != nil {
 		return nil, err
+	}
+	// The template half of the same re-check (ADR-0018): the operator may
+	// have restricted a shared template to transactional mail since.
+	if c, err := t.st.Campaigns().Get(ctx, req.CampaignId.String()); err == nil {
+		if err := s.checkCampaignTemplateUse(ctx, t, c); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.deps.Control.StartCampaign(ctx, t.st, req.CampaignId.String(), at); err != nil {
 		return nil, err

@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 
 import SpButton from '../components/SpButton.vue'
 import SpCard from '../components/SpCard.vue'
+import SpCheckbox from '../components/SpCheckbox.vue'
 import SpEmptyState from '../components/SpEmptyState.vue'
 import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpField from '../components/SpField.vue'
@@ -18,9 +19,11 @@ import TenantVarsEditor from '../components/TenantVarsEditor.vue'
 import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useSendplane } from '../context.js'
+import { templateOption, templateReference, templateUseBlocked } from '../lib/content.js'
 import { safeJson, shortId, tryParseJson } from '../lib/format.js'
 import {
   isSenderUseDenied,
+  isTemplateUseDenied,
   isTenantVarsMissing,
   looksTemplated,
   missingTenantVarKeys,
@@ -50,6 +53,8 @@ let nextId = 1
 
 const senderId = ref('')
 const templateId = ref('')
+// Name the template by key (`template_key`) rather than by ID (ADR-0018).
+const byKey = ref(false)
 const defaultLocale = ref('')
 const varsText = ref('{}')
 const tenantVars = ref<TenantVars>({})
@@ -69,6 +74,7 @@ const result = ref<MessageResult | undefined>()
 // to change the very input they are about.
 const missingTenantVars = ref<string[]>([])
 const senderUseError = ref('')
+const templateUseError = ref('')
 
 const senders = useAsync((signal) =>
   client.get('/api/v1/senders', { params: { query: { limit: 200 } }, signal }),
@@ -120,19 +126,47 @@ const senderTemplates = computed(() => {
   }
 })
 
-/** Only a published template can be sent; the send would 422 otherwise. */
+/**
+ * Only a published template can be sent; the send would 422 otherwise. The
+ * list holds the tenant's own templates and the shared ones (ADR-0018); a
+ * shared one restricted to campaigns stays listed but disabled, so the
+ * operator sees why it cannot be picked.
+ */
 const templateOptions = computed(() =>
   (templates.data.value?.items ?? [])
     .filter((template) => Boolean(template.published_version_id))
-    .map((template) => ({
-      value: template.id ?? '',
-      label: `${template.name} — ${shortId(template.published_version_id)}`,
-    })),
+    .map((template) =>
+      templateOption(template, {
+        use: 'transactional',
+        byKey: byKey.value,
+        t,
+        detail: shortId(template.published_version_id),
+      }),
+    ),
 )
 
 const selectedTemplate = computed(() =>
   (templates.data.value?.items ?? []).find((template) => template.id === templateId.value),
 )
+
+const templateBlocked = computed(
+  () => !!selectedTemplate.value && templateUseBlocked(selectedTemplate.value, 'transactional'),
+)
+
+/** Selecting by key needs a template that has one. */
+const templateKeyMissing = computed(
+  () => byKey.value && !!selectedTemplate.value && !selectedTemplate.value.key,
+)
+
+const templateError = computed(() => {
+  if (templateBlocked.value) {
+    return t('content.templateUseBlocked', {
+      uses: (selectedTemplate.value?.uses ?? []).join(', '),
+    })
+  }
+  if (templateKeyMissing.value) return t('content.selectedHasNoKey')
+  return templateUseError.value || undefined
+})
 
 const varsError = computed(() => tryParseJson<Vars>(varsText.value, {}).error)
 
@@ -154,6 +188,8 @@ const canSend = computed(
     !tooManyRecipients.value &&
     !varsError.value &&
     senderAllowsTransactional.value &&
+    !templateBlocked.value &&
+    !templateKeyMissing.value &&
     Object.values(rowVarsErrors.value).every((error) => !error),
 )
 
@@ -230,7 +266,7 @@ function requestBody() {
   const vars = tryParseJson<Vars>(varsText.value, {}).value
   const extraHeaders = headerRecord()
   return {
-    template_id: templateId.value,
+    ...templateReference(selectedTemplate.value, templateId.value, byKey.value),
     sender_id: senderId.value,
     to: filledRecipients.value.map(toRecipient),
     ...(Object.keys(tenantVars.value).length ? { tenant_vars: tenantVars.value } : {}),
@@ -243,6 +279,7 @@ function requestBody() {
 function clearFieldErrors() {
   missingTenantVars.value = []
   senderUseError.value = ''
+  templateUseError.value = ''
 }
 
 /**
@@ -258,6 +295,10 @@ function handleSendError(error: unknown) {
   }
   if (isSenderUseDenied(error)) {
     senderUseError.value = error instanceof Error ? error.message : String(error)
+    return
+  }
+  if (isTemplateUseDenied(error)) {
+    templateUseError.value = error instanceof Error ? error.message : String(error)
     return
   }
   toast.fail(error)
@@ -386,6 +427,7 @@ const exampleVars = safeJson({ order: { total: 1200 } }, 0)
             v-slot="{ id, describedBy }"
             :label="t('template.one')"
             :hint="t('message.templateHint')"
+            :error="templateError"
             required
           >
             <SpSelect
@@ -396,6 +438,11 @@ const exampleVars = safeJson({ order: { total: 1200 } }, 0)
               :described-by="describedBy"
             />
           </SpField>
+          <SpCheckbox
+            v-model="byKey"
+            :label="t('content.selectByKey')"
+            :hint="t('content.selectByKeyHint')"
+          />
           <SpField v-slot="{ id }" :label="t('campaign.defaultLocale')">
             <SpInput :id="id" v-model="defaultLocale" placeholder="en" />
           </SpField>

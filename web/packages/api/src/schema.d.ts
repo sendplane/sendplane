@@ -161,6 +161,12 @@ export interface paths {
         /**
          * Create a campaign
          * @description The campaign starts as `draft`; recipients are appended separately.
+         *
+         *     The template is named by `template_id` or `template_key` (at most one);
+         *     a key resolves to the tenant's own template first, then to a shared
+         *     one, and the campaign stores the ID it resolved to. The sender-use and
+         *     template-use policies run here and again at start
+         *     (`403 sender_use_denied`, `403 template_use_denied`).
          */
         post: operations["createCampaign"];
         delete?: never;
@@ -675,12 +681,50 @@ export interface paths {
         get: operations["getLayout"];
         /**
          * Replace a layout
-         * @description Published message versions are unaffected; they carry their own merged copy.
+         * @description Published message versions are unaffected; they carry their own merged
+         *     copy. A layout shared by the system tenant is read-only in every other
+         *     tenant (`403 platform_read_only`); override it instead.
          */
         put: operations["updateLayout"];
         post?: never;
-        /** Delete a layout */
+        /**
+         * Delete a layout
+         * @description Deleting a tenant's override of a shared layout returns the tenant to
+         *     the shared one. A shared layout itself cannot be deleted from a tenant
+         *     (`403 platform_read_only`).
+         */
         delete: operations["deleteLayout"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/layouts/{layoutId}/override": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Layout ID. */
+                layoutId: components["parameters"]["LayoutId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Override a shared layout for this tenant
+         * @description Copies a layout the system tenant shares into the caller's tenant as a
+         *     layout of its own with the same `key` (ADR-0018). From then on the
+         *     tenant's templates that name the shared layout render with this copy,
+         *     because a layout reference resolves by key, own first. Deleting the
+         *     copy returns the tenant to the shared layout.
+         *
+         *     `409 duplicate` when the tenant already has a layout with that key;
+         *     `422 validation_failed` for a layout that is not shared or in the
+         *     system tenant itself.
+         */
+        post: operations["overrideLayout"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -724,6 +768,12 @@ export interface paths {
          *     immediately; sending happens asynchronously. Passing only `template_id`
          *     uses the template's currently published version and reports which one in
          *     `version_id`; pass `version_id` to pin an older one.
+         *
+         *     `template_key` names the template by key instead: the tenant's own
+         *     template with that key if there is one (an override), otherwise the
+         *     template the system tenant shares under it, resolved at request time
+         *     (ADR-0018). A shared template may be restricted to some uses
+         *     (`403 template_use_denied`).
          *
          *     `Idempotency-Key` makes a replay return the original result instead of
          *     sending again. Suppressed recipients come back with status `suppressed`
@@ -1089,7 +1139,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List templates */
+        /**
+         * List templates
+         * @description The tenant's own templates plus the templates the system tenant shares
+         *     (`shared: true`), except a shared one the tenant has overridden: its
+         *     own copy stands in for it, marked `overridden` (ADR-0018).
+         */
         get: operations["listTemplates"];
         put?: never;
         /** Create a template */
@@ -1114,11 +1169,17 @@ export interface paths {
         get: operations["getTemplate"];
         /**
          * Replace a template
-         * @description Editing never affects a running campaign; it keeps its own message version.
+         * @description Editing never affects a running campaign; it keeps its own message
+         *     version. A template shared by the system tenant is read-only in every
+         *     other tenant (`403 platform_read_only`); override it instead.
          */
         put: operations["updateTemplate"];
         post?: never;
-        /** Delete a template */
+        /**
+         * Delete a template
+         * @description Deleting a tenant's override of a shared template returns the tenant
+         *     to the shared template: a send by `template_key` resolves to it again.
+         */
         delete: operations["deleteTemplate"];
         options?: never;
         head?: never;
@@ -1180,6 +1241,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/templates/{templateId}/override": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template ID. */
+                templateId: components["parameters"]["TemplateId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Override a shared template for this tenant
+         * @description Copies a template the system tenant shares into the caller's tenant as
+         *     a complete template of its own: same `key` and name, and a copy of the
+         *     subject, body, text, blocks, mode, i18n bundle, layout reference,
+         *     default locale and `uses` (ADR-0018). A send by `template_key` resolves
+         *     to the copy from now on; deleting it returns the tenant to the shared
+         *     template.
+         *
+         *     The copy starts out published with the shared template's current
+         *     version (`published_version_id`, `overridden_from_version_id`), which is
+         *     read through rather than copied, so sending does not stop between the
+         *     override and the tenant's first publish of its own.
+         *
+         *     `409 duplicate` when the tenant already has a template with that key;
+         *     `422 validation_failed` for a template that is not shared or in the
+         *     system tenant itself.
+         */
+        post: operations["overrideTemplate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/templates/{templateId}/preview": {
         parameters: {
             query?: never;
@@ -1222,6 +1320,12 @@ export interface paths {
          * @description Merges the layout slot and i18n bundles, compiles MJML once and extracts
          *     the trackable links. Missing i18n keys block the publish unless the
          *     tenant relaxed that (architecture 6.2, 6.3).
+         *
+         *     A layout reference with a `key` resolves by key, the tenant's own
+         *     layout first and the shared one second, so an overridden shared layout
+         *     is the one merged. A template shared by the system tenant is published
+         *     only there (`403 platform_read_only` elsewhere), and its layout must be
+         *     a shared layout.
          */
         post: operations["publishTemplate"];
         delete?: never;
@@ -1679,6 +1783,13 @@ export interface components {
              *     and start fails if it still is not.
              */
             template_id?: string;
+            /**
+             * @description Names the template by key instead of `template_id` (not both): the
+             *     tenant's own template with that key first, then the shared one.
+             *     The key is resolved here and the campaign stores the template ID it
+             *     resolved to.
+             */
+            template_key?: components["schemas"]["ContentKey"];
             tenant_vars?: components["schemas"]["TenantVars"];
             vars?: components["schemas"]["Vars"];
             /**
@@ -1743,11 +1854,41 @@ export interface components {
         /** @description Campaign replacement carrying the read version. */
         CampaignUpdate: components["schemas"]["CampaignInput"] & components["schemas"]["VersionRequired"];
         /**
+         * @description Optional identifier of a template or layout that is the same in every
+         *     tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+         *     of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+         *     a shared template overrides it, and `template_key` on a send resolves
+         *     through it. A template without a key cannot be shared and is never
+         *     found by key. An empty string clears it.
+         * @example welcome
+         * @example receipt.v2
+         */
+        ContentKey: string;
+        /**
          * @description `blocks` keeps the block-editor project alongside the MJML it exported;
          *     the server only ever compiles the MJML.
          * @enum {string}
          */
         ContentMode: "blocks" | "mjml" | "html";
+        /**
+         * @description True on a tenant's own template or layout whose `key` equals a shared
+         *     one's: this copy overrides the shared original, which is therefore not
+         *     listed separately.
+         */
+        ContentOverridden: boolean;
+        /**
+         * @description True for a template or layout the system tenant shares with every
+         *     tenant (ADR-0018). In any other tenant such an object is read through,
+         *     never copied, and read-only (`403 platform_read_only`); override it to
+         *     change it. In the system tenant this is the flag its author sets.
+         */
+        ContentShared: boolean;
+        /**
+         * @description Share this template or layout with every tenant. Only the system
+         *     tenant may set it (`422 validation_failed` elsewhere), and it requires
+         *     a `key`. A shared template's layout must be shared too.
+         */
+        ContentSharedInput: boolean;
         /**
          * @description One recipient of one message version, and at the same time the queue
          *     item senders claim (ADR-0002, ADR-0003). It has no `version`: every
@@ -1895,7 +2036,7 @@ export interface components {
              *     message.
              * @enum {string}
              */
-            code: "invalid_request" | "invalid_cursor" | "unauthenticated" | "forbidden" | "not_found" | "duplicate" | "version_conflict" | "invalid_state" | "payload_too_large" | "validation_failed" | "limit_exceeded" | "missing_i18n_keys" | "template_not_published" | "render_failed" | "precondition_failed" | "rate_limited" | "platform_read_only" | "sender_use_denied" | "tenant_vars_missing" | "from_domain_not_owned" | "transport_not_assignable" | "internal";
+            code: "invalid_request" | "invalid_cursor" | "unauthenticated" | "forbidden" | "not_found" | "duplicate" | "version_conflict" | "invalid_state" | "payload_too_large" | "validation_failed" | "limit_exceeded" | "missing_i18n_keys" | "template_not_published" | "render_failed" | "precondition_failed" | "rate_limited" | "platform_read_only" | "sender_use_denied" | "template_use_denied" | "tenant_vars_missing" | "from_domain_not_owned" | "transport_not_assignable" | "internal";
             /** @description Per-field or per-item detail, when the failure has any. */
             details?: components["schemas"]["ErrorDetail"][];
             /** @description Human-readable English explanation; not for display to end users. */
@@ -2004,8 +2145,11 @@ export interface components {
             i18n?: components["schemas"]["I18nBundle"];
             /** Format: uuid */
             readonly id: string;
+            key?: components["schemas"]["ContentKey"];
             mode: components["schemas"]["ContentMode"];
             name: string;
+            overridden?: components["schemas"]["ContentOverridden"];
+            shared?: components["schemas"]["ContentShared"];
             /** Format: date-time */
             readonly updated_at?: string;
             /** Format: int64 */
@@ -2014,9 +2158,11 @@ export interface components {
         LayoutInput: {
             body: string;
             i18n?: components["schemas"]["I18nBundle"];
+            key?: components["schemas"]["ContentKey"];
             /** @description A layout is authored as `mjml` or `html`, never as blocks. */
             mode: components["schemas"]["ContentMode"];
             name: string;
+            shared?: components["schemas"]["ContentSharedInput"];
         };
         LayoutList: components["schemas"]["PageInfo"] & {
             items: components["schemas"]["Layout"][];
@@ -2188,9 +2334,17 @@ export interface components {
             sender_id: components["schemas"]["ResourceId"];
             /**
              * Format: uuid
-             * @description Uses the template's currently published version. Required unless `version_id` is given.
+             * @description Uses the template's currently published version. One of
+             *     `template_id`, `template_key` or `version_id` is required, and
+             *     `template_id` and `template_key` exclude each other.
              */
             template_id?: string;
+            /**
+             * @description Names the template by key: the tenant's own template with that key
+             *     first (an override), then the one the system tenant shares.
+             *     Resolved at request time.
+             */
+            template_key?: components["schemas"]["ContentKey"];
             tenant_vars?: components["schemas"]["TenantVars"];
             /**
              * @description Each entry becomes its own delivery with its own envelope; they are
@@ -2918,21 +3072,36 @@ export interface components {
             i18n?: components["schemas"]["I18nBundle"];
             /** Format: uuid */
             readonly id: string;
+            key?: components["schemas"]["ContentKey"];
             /** Format: uuid */
             layout_id?: string;
             mode: components["schemas"]["ContentMode"];
             name: string;
+            overridden?: components["schemas"]["ContentOverridden"];
+            /**
+             * Format: uuid
+             * @description On a tenant's override of a shared template: the shared template's
+             *     published version when the copy was made.
+             */
+            readonly overridden_from_version_id?: string;
             preheader?: string;
             /**
              * Format: uuid
              * @description The version transactional sends use when no version is pinned.
              */
             readonly published_version_id?: string;
+            shared?: components["schemas"]["ContentShared"];
+            /**
+             * @description On an override: the shared template has been published again since
+             *     the copy was made, so the tenant may want to look at what changed.
+             */
+            readonly shared_updated_since_override?: boolean;
             subject: string;
             /** @description Optional plain-text part; empty derives it from the HTML. */
             text?: string;
             /** Format: date-time */
             readonly updated_at?: string;
+            uses?: components["schemas"]["TemplateUses"];
             /** Format: int64 */
             readonly version: number;
         };
@@ -2943,20 +3112,30 @@ export interface components {
             body: string;
             default_locale?: string;
             i18n?: components["schemas"]["I18nBundle"];
+            key?: components["schemas"]["ContentKey"];
             /** Format: uuid */
             layout_id?: string;
             mode: components["schemas"]["ContentMode"];
             name: string;
             preheader?: string;
+            shared?: components["schemas"]["ContentSharedInput"];
             /** @description Liquid. CR and LF are rejected. */
             subject: string;
             text?: string;
+            uses?: components["schemas"]["TemplateUses"];
         };
         TemplateList: components["schemas"]["PageInfo"] & {
             items: components["schemas"]["Template"][];
         };
         /** @description Template replacement carrying the read version. */
         TemplateUpdate: components["schemas"]["TemplateInput"] & components["schemas"]["VersionRequired"];
+        /**
+         * @description What the template may be used for. Empty or absent means anything.
+         *     The default template-use policy enforces it for shared templates only
+         *     (`403 template_use_denied`); an override carries a copy, which the
+         *     host's `TemplatePolicy` hook may enforce as well.
+         */
+        TemplateUses: ("campaign" | "transactional")[];
         /**
          * @description Everything sendplane knows about a tenant. sendplane does not manage
          *     tenant lifecycle: the row is created with defaults on first access
@@ -3263,7 +3442,13 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
-        /** @description The host's `Authorizer` denied the operation's action (`forbidden`). */
+        /**
+         * @description The host's `Authorizer` denied the operation's action (`forbidden`),
+         *     a write targeted something the caller can only read
+         *     (`platform_read_only`: a platform resource, or a template or layout
+         *     shared by the system tenant), or a use policy refused the send
+         *     (`sender_use_denied`, `template_use_denied`).
+         */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
@@ -3414,7 +3599,11 @@ export type SchemaCampaignList = components['schemas']['CampaignList'];
 export type SchemaCampaignStats = components['schemas']['CampaignStats'];
 export type SchemaCampaignStatus = components['schemas']['CampaignStatus'];
 export type SchemaCampaignUpdate = components['schemas']['CampaignUpdate'];
+export type SchemaContentKey = components['schemas']['ContentKey'];
 export type SchemaContentMode = components['schemas']['ContentMode'];
+export type SchemaContentOverridden = components['schemas']['ContentOverridden'];
+export type SchemaContentShared = components['schemas']['ContentShared'];
+export type SchemaContentSharedInput = components['schemas']['ContentSharedInput'];
 export type SchemaDelivery = components['schemas']['Delivery'];
 export type SchemaDeliveryAttempt = components['schemas']['DeliveryAttempt'];
 export type SchemaDeliveryAttemptList = components['schemas']['DeliveryAttemptList'];
@@ -3497,6 +3686,7 @@ export type SchemaTemplate = components['schemas']['Template'];
 export type SchemaTemplateInput = components['schemas']['TemplateInput'];
 export type SchemaTemplateList = components['schemas']['TemplateList'];
 export type SchemaTemplateUpdate = components['schemas']['TemplateUpdate'];
+export type SchemaTemplateUses = components['schemas']['TemplateUses'];
 export type SchemaTenantSettings = components['schemas']['TenantSettings'];
 export type SchemaTenantSettingsInput = components['schemas']['TenantSettingsInput'];
 export type SchemaTenantSettingsUpdate = components['schemas']['TenantSettingsUpdate'];
@@ -4703,6 +4893,35 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    overrideLayout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Layout ID. */
+                layoutId: components["parameters"]["LayoutId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's new copy. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Layout"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["UnprocessableEntity"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     getMessageVersion: {
         parameters: {
             query?: never;
@@ -5786,6 +6005,35 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            422: components["responses"]["UnprocessableEntity"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    overrideTemplate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Template ID. */
+                templateId: components["parameters"]["TemplateId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's new copy. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Template"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             422: components["responses"]["UnprocessableEntity"];
             500: components["responses"]["InternalError"];
         };

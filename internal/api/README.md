@@ -15,6 +15,7 @@
 | `settings.go` | `/healthz`, 테넌트 설정 |
 | `sending.go` | transport / sender / sending-domain / probe mailbox / probe run / health |
 | `content.go` | layout / template / i18n / preview / publish / message version |
+| `shared.go` | 공유 템플릿·레이아웃(ADR-0018): `key`/`shared` 검증, `template_key` 해석, 재정의 엔드포인트, 템플릿 사용 정책 |
 | `campaigns.go` | 캠페인 CRUD · 인제스트 · 수명주기 · 링크 리포트 · 수신거부 통지 |
 | `deliveries.go` | 테넌트 전역 delivery 목록 · delivery · attempt · bounce · retry |
 | `messages.go` | 트랜잭셔널 발송과 멱등 재생 |

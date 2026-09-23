@@ -139,3 +139,60 @@ func joinUses(uses []UseKind) string {
 	}
 	return strings.Join(out, ", ")
 }
+
+// ErrTemplateUseDenied is what a TemplatePolicy returns to refuse a send. The
+// API answers 403 template_use_denied with the error's message.
+var ErrTemplateUseDenied = errors.New("sendplane: template use denied")
+
+// TemplateUse is one request to send with a template, handed to
+// Hooks.TemplatePolicy before anything is written or queued (ADR-0018).
+type TemplateUse struct {
+	TenantID string
+	// Principal is the authenticated caller.
+	Principal *Principal
+
+	TemplateID string
+	// TemplateKey is the template's key, empty for a template without one.
+	TemplateKey string
+	// Shared is true when the template is the system tenant's shared one,
+	// read through by this tenant. A tenant's own template — including its
+	// override of a shared one — is not shared.
+	Shared bool
+	// Uses is the template's own `uses` list: what its author restricted it
+	// to. Empty means unrestricted.
+	Uses []UseKind
+
+	Kind UseKind
+	// TenantVars are the tenant attributes the request carried, after
+	// Hooks.TenantVars.
+	TenantVars map[string]any
+}
+
+// DefaultTemplatePolicy is the policy sendplane applies when
+// Hooks.TemplatePolicy is nil: a shared template may only be used for what its
+// `uses` names, and a tenant's own template for anything.
+//
+// It is exported so a host replacing the hook can keep it and add to it, the
+// same way DefaultSenderPolicy is chained:
+//
+//	opts.Hooks.TemplatePolicy = func(ctx context.Context, u host.TemplateUse) error {
+//	    if err := host.DefaultTemplatePolicy(ctx, u); err != nil {
+//	        return err
+//	    }
+//	    if u.Shared && plan(u.TenantVars) == "free" && u.Kind == host.UseCampaign {
+//	        return fmt.Errorf("%w: the free plan cannot run campaigns from shared templates",
+//	            host.ErrTemplateUseDenied)
+//	    }
+//	    return nil
+//	}
+func DefaultTemplatePolicy(_ context.Context, u TemplateUse) error {
+	if !u.Shared || len(u.Uses) == 0 || slices.Contains(u.Uses, u.Kind) {
+		return nil
+	}
+	name := u.TemplateKey
+	if name == "" {
+		name = u.TemplateID
+	}
+	return fmt.Errorf("%w: the shared template %s may only be used for %s, not %s",
+		ErrTemplateUseDenied, name, joinUses(u.Uses), u.Kind)
+}

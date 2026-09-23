@@ -166,6 +166,7 @@ type (
     Platform                           = host.Platform  // = store.PlatformCatalog
     UseKind                             = host.UseKind   // campaign | transactional | probe
     SenderUse                            = host.SenderUse // SenderPolicy가 받는 것
+    TemplateUse                           = host.TemplateUse // TemplatePolicy가 받는 것 (ADR-0018)
 )
 
 type Hooks struct { // host/hooks.go
@@ -188,6 +189,11 @@ type Hooks struct { // host/hooks.go
     // 대체하므로 둘 다 원하면 체이닝한다(sendplane.DefaultSenderPolicy).
     // 에러는 곧 거부이고 403 sender_use_denied가 된다.
     SenderPolicy func(ctx context.Context, u SenderUse) error
+    // 이 템플릿을 이 종류의 발송에 쓸 수 있는지(ADR-0018). POST /messages,
+    // POST /campaigns(생성·시작)에서 템플릿이 해석된 뒤 호출된다. nil이면
+    // DefaultTemplatePolicy(공유 템플릿의 `uses` 만 강제, 테넌트 자기 템플릿과
+    // 재정의 사본은 제한 없음)이고, 훅은 그것을 대체한다. 에러는 403 template_use_denied.
+    TemplatePolicy func(ctx context.Context, u TemplateUse) error
     Events EventSink // 기본: 아웃박스 → 테넌트 설정의 webhook URL
 }
 
@@ -450,6 +456,13 @@ sender 프로세스와 프로브/바운스 러너는 공유 transport·domain을
 `422 tenant_vars_missing` 으로 키를 나열합니다. 캠페인의 `tenant_vars` 는 **캠페인 행에만** 있고 delivery로
 복사하지 않습니다(ADR-0002: 시작은 한 행 쓰기).
 
+**공유 템플릿과 레이아웃**(ADR-0018)도 같은 오버레이가 제공합니다. 설정이 아니라 `_system` 테넌트의 **행**이고
+(`Shared: true`, `Key` 필수), 일반 테넌트는 **read-through** 로 읽습니다 — 복사하지 않습니다.
+`List` 는 재정의하지 않은 공유 행 + 자기 행, `Get(id)` 는 자기 것 → 공유, `GetByKey` 는 **자기 것 먼저**(그래서 같은 키의
+테넌트 템플릿이 공유본을 재정의합니다), 공유 행으로의 쓰기는 `ErrReadOnly`. 버전은 `_system` 의 어떤 버전이든 ID로
+읽히지만(불변이고, in-flight delivery가 계속 읽어야 하므로) 목록으로는 넘어가지 않으며, 호출자가 넘긴 버전 ID는 API가
+"그 템플릿이 지금 공유 중"일 때만 받아 줍니다. 그래서 오버레이는 카탈로그가 비어 있어도 적용됩니다.
+
 `TenantSettings` 의 `tracking.domain` 과 `unsubscribe_url_template` 은 테넌트가 비워 두면 카탈로그의
 `tracking_domain` / `unsubscribe_url_template` 로 채워집니다. 채우는 곳은 **오버레이의 읽기 한 곳**이라
 sender와 API가 같은 값을 보고, 쓰기에서 다시 벗겨내므로 읽고 그대로 PUT해도 운영자의 기본값이 테넌트 사본으로
@@ -501,6 +514,23 @@ Template.body
 - **MJML은 publish 시 1회 컴파일**하고 Liquid는 그 뒤에 수신자별로 실행합니다(Keila v0.30은 반대 순서로 바꿨지만 그 방식은 수신자마다 MJML 컴파일이 필요해 1M 규모에 부적합). MJML 구조 사이의 Liquid 제어문은 `<mj-raw>{% if %}</mj-raw>` 컨벤션을 사용하고, 블록 에디터는 "조건부 블록" 속성으로 이를 생성합니다.
 - 컴파일 산출물은 불변. Template을 수정해도 진행 중 캠페인은 자기 MessageVersion을 씁니다. Transactional은 `template_id`로 호출하면 "현재 publish된 버전"을 사용하고, 응답에 `version_id`를 돌려줍니다.
 - 미리보기(`POST /templates/{id}/preview {locale, vars, recipient}`)는 **서버에서 발송과 동일한 코드 경로**로 렌더합니다. 에디터의 즉시 미리보기만 liquidjs로 근사하고, 최종 확인은 서버 결과를 씁니다.
+
+### 6.4 공유 템플릿과 테넌트 재정의 (ADR-0018)
+
+- `Template` / `Layout` 에 선택적 **`key`**(`^[a-z0-9][a-z0-9._-]{0,63}$`, 테넌트 안에서 유일, 빈 값은 "키 없음")와
+  **`shared`** 가 있습니다. 공유는 `_system` 테넌트에서만, 키가 있을 때만 켤 수 있고, 공유 템플릿의 레이아웃은 공유 레이아웃이어야 합니다.
+- 공유 템플릿과 그 버전은 `_system` 에 **한 번만** 있고 테넌트는 read-through로 읽습니다(§5.4). 테넌트에서는 읽기 전용이며
+  preview·버전 목록·i18n 조회는 됩니다.
+- **키로 보내기**: `POST /messages`, `POST /campaigns` 가 `template_id` 대신 `template_key` 를 받습니다. 테넌트 자기 템플릿이 먼저,
+  없으면 공유 템플릿입니다. 트랜잭션은 요청 시점, 캠페인은 생성 시점에 해석해 그 ID를 저장합니다.
+- **재정의**: `POST /templates/{id}/override` 가 공유 템플릿을 테넌트 소유의 **전체 사본**(같은 key)으로 만들고,
+  이것이 유일한 복사입니다. 사본은 공유 버전(참조)으로 publish된 상태로 시작하므로 키로 보내는 메일이 끊기지 않습니다.
+  목록은 재정의된 공유 행을 숨기고 사본에 `overridden`, 공유본이 그 뒤 다시 publish되었으면 `shared_updated_since_override` 를 붙입니다.
+  **재정의를 지우면 공유 템플릿으로 돌아갑니다.** 레이아웃도 같고(`POST /layouts/{id}/override`), 템플릿의 레이아웃 참조는
+  **키로 자기 것 먼저** 해석되므로 테넌트의 레이아웃 재정의가 그 테넌트의 모든 템플릿 publish에 적용됩니다.
+- **용도 제한**: `Template.uses`(`campaign` | `transactional`, 비면 전부)와 `host.Hooks.TemplatePolicy`.
+  기본 `host.DefaultTemplatePolicy` 는 공유 템플릿에만 `uses` 를 강제하고(재정의 사본은 테넌트 소유라 제한하지 않음 — 훅이 할 수 있음),
+  `POST /messages`, 캠페인 생성과 시작에서 검사해 `403 template_use_denied` 로 거부합니다.
 
 ## 7. 캠페인 수명주기와 1M 수신자 인제스트
 

@@ -35,9 +35,14 @@ import (
 //     it, are the system tenant's alone. Whatever needs the internals uses
 //     PlatformView, not a relaxed rule here.
 //
+// The same wrapper serves the system tenant's *shared templates and layouts*
+// to every other tenant, read-through (ADR-0018, overlay_content.go). Those
+// are rows, not configuration, so the wrapper is applied even when the
+// catalog is empty: a deployment with no shared relay can still share a
+// template.
+//
 // now supplies the CreatedAt/UpdatedAt the virtual entities report; nil means
-// time.Now. An empty catalog returns p unchanged, so a deployment with no
-// platform resources pays nothing.
+// time.Now.
 //
 // cipher may be nil, in which case the configured secrets are handed out
 // as-is — the same rule the sender reads a stored password under. An
@@ -46,7 +51,11 @@ import (
 // so it is remembered and returned by ForTenant, which makes every request
 // fail loudly with the cause instead of silently sending unauthenticated.
 func WithPlatform(p Provider, cfg PlatformCatalog, cipher SecretCipher, now func() time.Time) Provider {
-	if p == nil || cfg.Empty() {
+	if p == nil {
+		return p
+	}
+	if _, ok := p.(*platformProvider); ok {
+		// Wrapping twice would serve every virtual entity twice.
 		return p
 	}
 	if now == nil {

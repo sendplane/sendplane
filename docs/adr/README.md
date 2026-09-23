@@ -24,3 +24,4 @@
 | 0015 | 메일박스 헬스는 프로브/바운스 결과와 분리 | accepted |
 | 0016 | 프로브 수신 채널: IMAP + 전역 inbound webhook | accepted |
 | 0017 | 플랫폼 자원은 설정에서 코드로 해석, 테넌트 속성은 요청 변수 | accepted |
+| 0018 | 공유 템플릿과 테넌트 재정의 | accepted |

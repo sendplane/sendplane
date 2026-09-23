@@ -334,11 +334,13 @@ func probeMailboxMeta() meta[store.ProbeMailbox, probeMailboxDoc] {
 // --- layout ------------------------------------------------------------
 
 type layoutDoc struct {
-	Base `bson:",inline"`
-	Name string  `bson:"name"`
-	Mode string  `bson:"mode"`
-	Body string  `bson:"body"`
-	I18n i18nDoc `bson:"i18n"`
+	Base   `bson:",inline"`
+	Name   string  `bson:"name"`
+	Key    string  `bson:"key"`
+	Shared bool    `bson:"shared"`
+	Mode   string  `bson:"mode"`
+	Body   string  `bson:"body"`
+	I18n   i18nDoc `bson:"i18n"`
 }
 
 func layoutMeta() meta[store.Layout, layoutDoc] {
@@ -353,12 +355,13 @@ func layoutMeta() meta[store.Layout, layoutDoc] {
 			return &layoutDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
-				Name: v.Name, Mode: string(v.Mode), Body: v.Body, I18n: encI18n(v.I18n),
+				Name: v.Name, Key: v.Key, Shared: v.Shared,
+				Mode: string(v.Mode), Body: v.Body, I18n: encI18n(v.I18n),
 			}
 		},
 		dec: func(d *layoutDoc) *store.Layout {
 			return &store.Layout{
-				ID: d.ID, TenantID: d.TenantID, Name: d.Name,
+				ID: d.ID, TenantID: d.TenantID, Name: d.Name, Key: d.Key, Shared: d.Shared,
 				Mode: store.ContentMode(d.Mode), Body: d.Body, I18n: decI18n(d.I18n),
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
@@ -370,17 +373,21 @@ func layoutMeta() meta[store.Layout, layoutDoc] {
 
 type templateDoc struct {
 	Base               `bson:",inline"`
-	Name               string  `bson:"name"`
-	LayoutID           string  `bson:"layout_id"`
-	Subject            string  `bson:"subject"`
-	Preheader          string  `bson:"preheader"`
-	Mode               string  `bson:"mode"`
-	Body               string  `bson:"body"`
-	Blocks             []byte  `bson:"blocks"`
-	Text               string  `bson:"text"`
-	I18n               i18nDoc `bson:"i18n"`
-	DefaultLocale      string  `bson:"default_locale"`
-	PublishedVersionID string  `bson:"published_version_id"`
+	Name               string   `bson:"name"`
+	Key                string   `bson:"key"`
+	Shared             bool     `bson:"shared"`
+	Uses               []string `bson:"uses,omitempty"`
+	OverriddenFrom     string   `bson:"overridden_from_version"`
+	LayoutID           string   `bson:"layout_id"`
+	Subject            string   `bson:"subject"`
+	Preheader          string   `bson:"preheader"`
+	Mode               string   `bson:"mode"`
+	Body               string   `bson:"body"`
+	Blocks             []byte   `bson:"blocks"`
+	Text               string   `bson:"text"`
+	I18n               i18nDoc  `bson:"i18n"`
+	DefaultLocale      string   `bson:"default_locale"`
+	PublishedVersionID string   `bson:"published_version_id"`
 }
 
 func templateMeta() meta[store.Template, templateDoc] {
@@ -395,7 +402,9 @@ func templateMeta() meta[store.Template, templateDoc] {
 			return &templateDoc{
 				Base: Base{ID: v.ID, TenantID: v.TenantID, Version: v.Version,
 					CreatedAt: ts(v.CreatedAt), UpdatedAt: encTime(v.UpdatedAt)},
-				Name: v.Name, LayoutID: v.LayoutID, Subject: v.Subject,
+				Name: v.Name, Key: v.Key, Shared: v.Shared, Uses: encUses(v.Uses),
+				OverriddenFrom: v.OverriddenFromVersion,
+				LayoutID:       v.LayoutID, Subject: v.Subject,
 				Preheader: v.Preheader, Mode: string(v.Mode), Body: v.Body,
 				Blocks: encRaw(v.Blocks), Text: v.Text, I18n: encI18n(v.I18n),
 				DefaultLocale: v.DefaultLocale, PublishedVersionID: v.PublishedVersionID,
@@ -404,13 +413,37 @@ func templateMeta() meta[store.Template, templateDoc] {
 		dec: func(d *templateDoc) *store.Template {
 			return &store.Template{
 				ID: d.ID, TenantID: d.TenantID, Name: d.Name, LayoutID: d.LayoutID,
-				Subject: d.Subject, Preheader: d.Preheader, Mode: store.ContentMode(d.Mode),
+				Key: d.Key, Shared: d.Shared, Uses: decUses(d.Uses),
+				OverriddenFromVersion: d.OverriddenFrom,
+				Subject:               d.Subject, Preheader: d.Preheader, Mode: store.ContentMode(d.Mode),
 				Body: d.Body, Blocks: decRaw(d.Blocks), Text: d.Text, I18n: decI18n(d.I18n),
 				DefaultLocale: d.DefaultLocale, PublishedVersionID: d.PublishedVersionID,
 				Version: d.Version, CreatedAt: decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 			}
 		},
 	}
+}
+
+func encUses(uses []store.UseKind) []string {
+	if len(uses) == 0 {
+		return nil
+	}
+	out := make([]string, len(uses))
+	for i, u := range uses {
+		out[i] = string(u)
+	}
+	return out
+}
+
+func decUses(uses []string) []store.UseKind {
+	if len(uses) == 0 {
+		return nil
+	}
+	out := make([]store.UseKind, len(uses))
+	for i, u := range uses {
+		out[i] = store.UseKind(u)
+	}
+	return out
 }
 
 // --- message version (immutable) ---------------------------------------

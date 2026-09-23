@@ -11,8 +11,11 @@ import type {
 } from '@sendplane/api'
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import SharedContentNotice from '../components/SharedContentNotice.vue'
 import SpButton from '../components/SpButton.vue'
 import SpCard from '../components/SpCard.vue'
+import SpCheckbox from '../components/SpCheckbox.vue'
+import SpContentBadges from '../components/SpContentBadges.vue'
 import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpField from '../components/SpField.vue'
 import SpInput from '../components/SpInput.vue'
@@ -25,6 +28,12 @@ import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useConfirm } from '../composables/useConfirm.js'
 import { useSendplane } from '../context.js'
+import {
+  isSharedReadOnly,
+  isValidContentKey,
+  TEMPLATE_USES,
+  type TemplateUse,
+} from '../lib/content.js'
 import { downloadText, tryParseJson } from '../lib/format.js'
 import { buildI18nMatrix, i18nSummaryKind } from '../lib/i18n-matrix.js'
 import { extractI18nKeys } from '../lib/mjml-blocks.js'
@@ -41,6 +50,9 @@ const SpBlockEditorSlot = defineAsyncComponent(() => import('../components/SpBlo
 
 const draft = ref({
   name: '',
+  key: '',
+  shared: false,
+  uses: [] as TemplateUse[],
   subject: '',
   preheader: '',
   mode: 'mjml' as ContentMode,
@@ -71,6 +83,9 @@ watch(loaded.data, (template) => {
   current.value = template
   draft.value = {
     name: template.name,
+    key: template.key ?? '',
+    shared: template.shared === true,
+    uses: [...(template.uses ?? [])],
     subject: template.subject,
     preheader: template.preheader ?? '',
     mode: template.mode,
@@ -81,6 +96,33 @@ watch(loaded.data, (template) => {
   }
   blocks.value = template.blocks
 })
+
+/**
+ * A template the system tenant shares, seen from a tenant (ADR-0018): GET,
+ * preview, versions and the i18n reads work, every write answers
+ * `403 platform_read_only`. So the editor shows it disabled, keeps preview,
+ * and offers an override (`SharedContentNotice`) instead of save and publish.
+ */
+const readOnly = computed(() => isSharedReadOnly(current.value, systemTenant.value))
+
+const keyError = computed(() => {
+  const key = draft.value.key.trim()
+  if (!isValidContentKey(key)) return t('content.keyInvalid')
+  if (systemTenant.value && draft.value.shared && !key) return t('content.shareNeedsKey')
+  return undefined
+})
+
+function hasUse(use: TemplateUse): boolean {
+  return draft.value.uses.includes(use)
+}
+
+function setUse(use: TemplateUse, on: boolean) {
+  const next = new Set(draft.value.uses)
+  if (on) next.add(use)
+  else next.delete(use)
+  // Kept in the spec's order so an unchanged selection saves unchanged.
+  draft.value.uses = TEMPLATE_USES.filter((u) => next.has(u))
+}
 
 const layouts = useAsync((signal) =>
   client.get('/api/v1/layouts', { params: { query: { limit: 200 } }, signal }),
@@ -119,6 +161,7 @@ const modeTabs = computed<TabItem[]>(() =>
   (['blocks', 'mjml', 'html'] as const).map((mode) => ({
     value: mode,
     label: t(`template.modes.${mode}`),
+    disabled: readOnly.value && mode !== draft.value.mode,
   })),
 )
 
@@ -132,7 +175,7 @@ const modeTabs = computed<TabItem[]>(() =>
  */
 async function changeMode(next: string) {
   const mode = next as ContentMode
-  if (mode === draft.value.mode) return
+  if (readOnly.value || mode === draft.value.mode) return
   const leavingBlocks = draft.value.mode === 'blocks'
   const enteringBlocks = mode === 'blocks'
   if (draft.value.body.trim() && (leavingBlocks || enteringBlocks)) {
@@ -145,7 +188,7 @@ async function changeMode(next: string) {
 const layoutOptions = computed(() =>
   (layouts.data.value?.items ?? []).map((layout) => ({
     value: layout.id ?? '',
-    label: layout.name,
+    label: layout.shared ? `${layout.name} — ${t('shared.badge')}` : layout.name,
   })),
 )
 
@@ -429,6 +472,12 @@ async function runPreview() {
 function body() {
   return {
     name: draft.value.name,
+    // PUT replaces the whole template, so these three always go out as they
+    // stand: an empty key clears it, and `uses` a tenant cannot see here (an
+    // override's copy) survives the save. Only the system tenant may share.
+    key: draft.value.key.trim(),
+    shared: systemTenant.value && draft.value.shared,
+    uses: [...draft.value.uses],
     subject: draft.value.subject,
     mode: draft.value.mode,
     body: draft.value.body,
@@ -522,21 +571,25 @@ async function importYaml(event: Event) {
       </template>
       <template #actions>
         <!--
-          Content is a tenant's, and the system tenant never sends: editing and
-          publishing are hidden there rather than failing on submit.
+          A shared template is read-only in a tenant: saving and publishing
+          are hidden rather than failing with 403; the notice below offers the
+          override instead.
         -->
         <SpButton
-          v-if="!systemTenant"
+          v-if="!readOnly"
           variant="primary"
           :loading="saving"
-          :disabled="!draft.name || !draft.subject"
+          :disabled="!draft.name || !draft.subject || !!keyError"
           @click="save"
         >
           {{ t('common.save') }}
         </SpButton>
-        <SpButton v-if="templateId && !systemTenant" :loading="publishing" @click="publish">
+        <SpButton v-if="templateId && !readOnly" :loading="publishing" @click="publish">
           {{ t('template.publish') }}
         </SpButton>
+      </template>
+      <template #badge>
+        <SpContentBadges v-if="current" :item="current" />
       </template>
     </SpPageHeader>
 
@@ -546,16 +599,32 @@ async function importYaml(event: Event) {
       class="sp-page__block"
     />
 
+    <SharedContentNotice kind="template" :item="current" class="sp-page__block" />
+
     <SpCard class="sp-page__block">
       <div class="sp-form-grid">
         <SpField v-slot="{ id }" :label="t('common.name')" required>
-          <SpInput :id="id" v-model="draft.name" />
+          <SpInput :id="id" v-model="draft.name" :disabled="readOnly" />
+        </SpField>
+        <SpField
+          v-slot="{ id, describedBy }"
+          :label="t('content.key')"
+          :hint="t('content.keyHint')"
+          :error="keyError"
+        >
+          <SpInput
+            :id="id"
+            v-model="draft.key"
+            class="sp-mono"
+            :disabled="readOnly"
+            :described-by="describedBy"
+          />
         </SpField>
         <SpField v-slot="{ id }" :label="t('template.subject')" required>
-          <SpInput :id="id" v-model="draft.subject" />
+          <SpInput :id="id" v-model="draft.subject" :disabled="readOnly" />
         </SpField>
         <SpField v-slot="{ id }" :label="t('template.preheader')">
-          <SpInput :id="id" v-model="draft.preheader" />
+          <SpInput :id="id" v-model="draft.preheader" :disabled="readOnly" />
         </SpField>
         <SpField v-slot="{ id }" :label="t('template.layout')">
           <SpSelect
@@ -563,8 +632,32 @@ async function importYaml(event: Event) {
             v-model="draft.layout_id"
             :options="layoutOptions"
             :placeholder="t('common.none')"
+            :disabled="readOnly"
           />
         </SpField>
+      </div>
+
+      <!--
+        Sharing is the system tenant's to decide (a tenant's `shared` is a
+        422), and so is restricting what a shared template may be used for.
+      -->
+      <div v-if="systemTenant" class="sp-form-grid sp-template__sharing">
+        <SpCheckbox
+          v-model="draft.shared"
+          :label="t('content.share')"
+          :hint="t('content.shareHint')"
+        />
+        <fieldset class="sp-template__uses">
+          <legend class="sp-template__legend">{{ t('content.uses') }}</legend>
+          <SpCheckbox
+            v-for="use in TEMPLATE_USES"
+            :key="use"
+            :model-value="hasUse(use)"
+            :label="t(`content.use.${use}`)"
+            @update:model-value="setUse(use, $event)"
+          />
+          <p class="sp-template__hint">{{ t('content.usesHint') }}</p>
+        </fieldset>
       </div>
     </SpCard>
 
@@ -582,8 +675,13 @@ async function importYaml(event: Event) {
           </template>
 
           <div class="sp-editor__body">
+            <!--
+              A read-only template shows its compiled source in a read-only
+              code editor, whatever it was authored in: the block editor has
+              no read-only mode.
+            -->
             <SpBlockEditorSlot
-              v-if="draft.mode === 'blocks'"
+              v-if="draft.mode === 'blocks' && !readOnly"
               v-model="blocks"
               :mjml="draft.body"
               :locale="draft.default_locale"
@@ -592,10 +690,13 @@ async function importYaml(event: Event) {
             >
               <slot name="block-editor" />
             </SpBlockEditorSlot>
+            <!-- `readonly` is read once when the editor mounts, hence the key. -->
             <SpCodeEditor
               v-else
+              :key="readOnly ? 'read-only' : 'editable'"
               v-model="draft.body"
-              :language="draft.mode === 'mjml' ? 'mjml' : 'html'"
+              :language="draft.mode === 'html' ? 'html' : 'mjml'"
+              :readonly="readOnly"
               :aria-label="t('template.body')"
             />
           </div>
@@ -607,7 +708,7 @@ async function importYaml(event: Event) {
           class="sp-page__block"
         >
           <SpField v-slot="{ id }" :label="t('template.text')">
-            <SpTextarea :id="id" v-model="draft.text" mono :rows="6" />
+            <SpTextarea :id="id" v-model="draft.text" mono :rows="6" :disabled="readOnly" />
           </SpField>
         </SpCard>
       </div>
@@ -616,6 +717,7 @@ async function importYaml(event: Event) {
         <SpCard :title="t('template.i18n')" :padded="false" class="sp-page__block">
           <template #actions>
             <SpButton
+              v-if="!readOnly"
               size="sm"
               variant="primary"
               :loading="savingI18n"
@@ -627,7 +729,12 @@ async function importYaml(event: Event) {
             <SpButton size="sm" :disabled="!templateId" @click="exportYaml">
               {{ t('template.exportYaml') }}
             </SpButton>
-            <SpButton size="sm" :disabled="!templateId" @click="yamlInput?.click()">
+            <SpButton
+              v-if="!readOnly"
+              size="sm"
+              :disabled="!templateId"
+              @click="yamlInput?.click()"
+            >
               {{ t('template.importYaml') }}
             </SpButton>
             <input
@@ -659,10 +766,10 @@ async function importYaml(event: Event) {
                 :id="id"
                 v-model="draft.default_locale"
                 :options="localeSelectOptions"
-                :disabled="!templateId"
+                :disabled="!templateId || readOnly"
               />
             </SpField>
-            <SpField v-slot="{ id }" :label="t('template.i18nAddLocale')" inline>
+            <SpField v-if="!readOnly" v-slot="{ id }" :label="t('template.i18nAddLocale')" inline>
               <SpInput
                 :id="id"
                 v-model="newLocaleInput"
@@ -672,6 +779,7 @@ async function importYaml(event: Event) {
               />
             </SpField>
             <SpButton
+              v-if="!readOnly"
               size="sm"
               :disabled="!templateId || !newLocaleInput.trim() || !!newLocaleError"
               @click="addLocale"
@@ -696,7 +804,7 @@ async function importYaml(event: Event) {
                   <th v-for="loc in matrix.locales" :key="loc" scope="col">
                     {{ loc }}
                     <button
-                      v-if="loc !== effectiveDefaultLocale"
+                      v-if="loc !== effectiveDefaultLocale && !readOnly"
                       type="button"
                       class="sp-i18n__removelocale"
                       :disabled="!templateId"
@@ -735,7 +843,7 @@ async function importYaml(event: Event) {
                       :placeholder="cell.inherited ? cell.value : undefined"
                       :rows="textRows(ownTranslation(row.key, cell.locale) || cell.value)"
                       mono
-                      :disabled="!templateId"
+                      :disabled="!templateId || readOnly"
                       :aria-label="`${row.key} (${cell.locale})`"
                       class="sp-i18n__input"
                       @update:model-value="setTranslation(row.key, cell.locale, $event)"
@@ -752,7 +860,7 @@ async function importYaml(event: Event) {
             <ul class="sp-i18n__unusedlist">
               <li v-for="key in matrix.unusedKeys" :key="key">
                 <span class="sp-mono">{{ key }}</span>
-                <SpButton size="sm" variant="ghost" @click="removeUnusedKey(key)">
+                <SpButton v-if="!readOnly" size="sm" variant="ghost" @click="removeUnusedKey(key)">
                   {{ t('common.delete') }}
                 </SpButton>
               </li>
@@ -839,6 +947,34 @@ async function importYaml(event: Event) {
 
 .sp-i18n__note {
   margin: var(--sp-space-3);
+}
+
+.sp-template__sharing {
+  margin-top: var(--sp-space-3);
+}
+
+.sp-template__uses {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.sp-template__legend {
+  margin-bottom: var(--sp-space-1);
+  padding: 0;
+  color: var(--sp-text-muted);
+  font-size: var(--sp-font-size-sm);
+  font-weight: 600;
+}
+
+.sp-template__hint {
+  margin: 0;
+  color: var(--sp-text-muted);
+  font-size: var(--sp-font-size-sm);
 }
 
 .sp-i18n__locales {

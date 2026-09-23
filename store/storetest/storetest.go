@@ -42,6 +42,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 	t.Run("ProbeRuns", func(t *testing.T) { testProbeRuns(t, p) })
 	t.Run("Layouts", func(t *testing.T) { testLayouts(t, p) })
 	t.Run("Templates", func(t *testing.T) { testTemplates(t, p) })
+	t.Run("ContentKeys", func(t *testing.T) { testContentKeys(t, p) })
 	t.Run("Versions", func(t *testing.T) { testVersions(t, p) })
 	t.Run("Campaigns", func(t *testing.T) { testCampaigns(t, p) })
 	t.Run("RecipientChunks", func(t *testing.T) { testRecipientChunks(t, p) })
@@ -726,6 +727,80 @@ func testTemplates(t *testing.T, p store.Provider) {
 		mutate: func(v *store.Template) { v.Subject = "changed" },
 		label:  func(v *store.Template) string { return v.Subject },
 	})
+}
+
+// testContentKeys covers the optional template and layout key (ADR-0018):
+// the fields round-trip, a key is unique within a tenant but not across
+// tenants, the empty key is exempt from uniqueness, and GetByKey finds by it.
+func testContentKeys(t *testing.T, p store.Provider) {
+	ctx := context.Background()
+	a, _ := fresh(t, p)
+	b, _ := fresh(t, p)
+
+	tpl := &store.Template{
+		Name: "welcome", Key: "welcome", Shared: true,
+		Uses:                  []store.UseKind{store.UseTransactional},
+		OverriddenFromVersion: "0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55",
+		Subject:               "hi", Mode: store.ContentHTML, Body: "<p>hi</p>",
+	}
+	must(t, "Create keyed template", a.Templates().Create(ctx, tpl))
+	back, err := a.Templates().Get(ctx, tpl.ID)
+	must(t, "Get keyed template", err)
+	eq(t, "template key", back.Key, "welcome")
+	eq(t, "template shared", back.Shared, true)
+	eq(t, "template uses", len(back.Uses), 1)
+	eq(t, "template uses[0]", back.Uses[0], store.UseTransactional)
+	eq(t, "template overridden_from", back.OverriddenFromVersion, tpl.OverriddenFromVersion)
+
+	byKey, err := a.Templates().GetByKey(ctx, "welcome")
+	must(t, "GetByKey", err)
+	eq(t, "GetByKey id", byKey.ID, tpl.ID)
+	_, err = a.Templates().GetByKey(ctx, "nope")
+	mustBe(t, "GetByKey unknown", err, store.ErrNotFound)
+	_, err = a.Templates().GetByKey(ctx, "")
+	mustBe(t, "GetByKey empty", err, store.ErrNotFound)
+	_, err = b.Templates().GetByKey(ctx, "welcome")
+	mustBe(t, "GetByKey other tenant", err, store.ErrNotFound)
+
+	dup := &store.Template{Name: "dup", Key: "welcome", Subject: "s", Mode: store.ContentHTML}
+	mustBe(t, "duplicate key in one tenant", a.Templates().Create(ctx, dup), store.ErrConflict)
+	other := &store.Template{Name: "same key", Key: "welcome", Subject: "s", Mode: store.ContentHTML}
+	must(t, "same key in another tenant", b.Templates().Create(ctx, other))
+
+	// The empty key means "no key": any number of templates may have it.
+	for i := range 2 {
+		must(t, fmt.Sprintf("keyless template %d", i), a.Templates().Create(ctx,
+			&store.Template{Name: fmt.Sprintf("plain-%d", i), Subject: "s", Mode: store.ContentHTML}))
+	}
+	// Renaming a key onto a taken one is refused too.
+	second := &store.Template{Name: "second", Key: "second", Subject: "s", Mode: store.ContentHTML}
+	must(t, "Create second", a.Templates().Create(ctx, second))
+	second.Key = "welcome"
+	mustBe(t, "Update onto a taken key", a.Templates().Update(ctx, second), store.ErrConflict)
+	// Unrestricted uses read back as empty, not as a one-element list.
+	plain, err := a.Templates().GetByKey(ctx, "second")
+	must(t, "GetByKey second", err)
+	eq(t, "unrestricted uses", len(plain.Uses), 0)
+
+	l := &store.Layout{Name: "base", Key: "base", Shared: true, Mode: store.ContentHTML,
+		Body: "<div>{{ content }}</div>"}
+	must(t, "Create keyed layout", a.Layouts().Create(ctx, l))
+	lb, err := a.Layouts().GetByKey(ctx, "base")
+	must(t, "Layout GetByKey", err)
+	eq(t, "layout id", lb.ID, l.ID)
+	eq(t, "layout shared", lb.Shared, true)
+	eq(t, "layout key", lb.Key, "base")
+	mustBe(t, "duplicate layout key", a.Layouts().Create(ctx, &store.Layout{
+		Name: "dup", Key: "base", Mode: store.ContentHTML, Body: "{{ content }}"}), store.ErrConflict)
+	must(t, "same layout key in another tenant", b.Layouts().Create(ctx, &store.Layout{
+		Name: "base", Key: "base", Mode: store.ContentHTML, Body: "{{ content }}"}))
+	_, err = a.Layouts().GetByKey(ctx, "")
+	mustBe(t, "Layout GetByKey empty", err, store.ErrNotFound)
+
+	// Deleting frees the key.
+	must(t, "Delete keyed template", a.Templates().Delete(ctx, tpl.ID))
+	must(t, "reuse a freed key", a.Templates().Create(ctx,
+		&store.Template{Name: "again", Key: "welcome", Subject: "s", Mode: store.ContentHTML}))
 }
 
 func testVersions(t *testing.T, p store.Provider) {

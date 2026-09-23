@@ -16,6 +16,7 @@
 | 8. 프론트엔드 | 🟡 partial | api/ui/console 전부 구현·빌드됨. `examples/host-vue`(호스트 임베딩 예제)는 아직 없음 |
 | 9. 배포와 1M 부하 테스트 | 🟡 partial | Helm 차트·`load-1m.yml` 구현 완료, 로컬 100k 런 PASS(§15.1 실측). **GitHub Actions에서 한 번도 실행된 적 없음**(워크플로 실행 이력 0건), Helm 차트를 실 k8s 클러스터에 배포해 본 적 없음 |
 | 10. 멀티테넌트 SaaS (플랫폼 공유 자원) | ✅ done | ADR-0017. 공유 transport/domain/sender/메일박스를 설정에서 가상 엔티티로 해석(`store.WithPlatform`), 테넌트 속성은 요청 변수(`tenant_vars` + `Hooks.TenantVars`), sender 사용 정책(`Hooks.SenderPolicy`), deliveryID로 바운스 테넌트 조회, 공유 relay의 공정 분배와 공유 suppression, `GET /whoami` + 테넌트 헤더 전환. e2e 시나리오 9 |
+| 11. 공유 템플릿과 테넌트 재정의 | ✅ done | ADR-0018. `_system` 템플릿/레이아웃의 `key` + `shared`(read-through, 복사 없음), `template_key` 로 발송, 전체 사본 재정의(`POST .../override`)와 삭제로 복귀, `uses` + `Hooks.TemplatePolicy`(`403 template_use_denied`), 콘솔 배지·읽기 전용 뷰·재정의 흐름. e2e 시나리오 9 |
 
 ## Phase 0 — 뼈대와 스토어 계약 (기반)
 1. 모듈 레이아웃, `sendplane.New` 시그니처와 `Options/Hooks/Principal/Action` 타입만 정의 (구현 없음, 컴파일만).

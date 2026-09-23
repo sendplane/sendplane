@@ -71,7 +71,7 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 		return nil, err
 	}
 
-	version, err := s.resolveVersion(ctx, t, in.TemplateId, in.VersionId)
+	version, tpl, err := s.resolveVersion(ctx, t, in.TemplateId, in.TemplateKey, in.VersionId)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +92,9 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 		return nil, err
 	}
 	if err := s.checkSenderUse(ctx, t, snd.ID, store.UseTransactional, tenantVars); err != nil {
+		return nil, err
+	}
+	if err := s.checkTemplateUse(ctx, t, tpl, store.UseTransactional, tenantVars); err != nil {
 		return nil, err
 	}
 	if err := s.checkSharedFrom(snd.ID, snd.Shared, tenantVars); err != nil {
@@ -238,33 +241,53 @@ func transactionalID(tenantID, key, emailNorm string, index int) string {
 }
 
 // resolveVersion implements the spec's rule: version_id pins an exact version,
-// template_id uses whatever the template has published right now.
-func (s *server) resolveVersion(ctx context.Context, t *tenant, templateID, versionID *UUID) (*store.MessageVersion, error) {
+// template_id or template_key uses whatever that template has published right
+// now. A key resolves to the tenant's own template first (its override), then
+// to the shared one, at request time (ADR-0018).
+//
+// The template comes back too, for the template-use policy; it is nil for a
+// pinned version whose template no longer exists.
+func (s *server) resolveVersion(ctx context.Context, t *tenant, templateID *UUID, templateKey *ContentKey,
+	versionID *UUID) (*store.MessageVersion, *store.Template, error) {
 	if versionID != nil {
-		v, err := t.st.Versions().Get(ctx, idOf(*versionID))
+		if templateKey != nil {
+			return nil, nil, errInvalid("version_id pins a version; do not also name a template_key")
+		}
+		v, err := s.visibleVersion(ctx, t, idOf(*versionID))
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nil, errInvalid("message version %s does not exist", *versionID)
+			if errors.Is(err, store.ErrNotFound) || isNotFoundAPI(err) {
+				return nil, nil, errInvalid("message version %s does not exist", *versionID)
 			}
-			return nil, err
+			return nil, nil, err
 		}
-		return v, nil
+		tpl, err := s.templateOfVersion(ctx, t, v)
+		if err != nil {
+			return nil, nil, err
+		}
+		return v, tpl, nil
 	}
-	if templateID == nil {
-		return nil, errInvalid("one of template_id or version_id is required")
-	}
-	tpl, err := t.st.Templates().Get(ctx, idOf(*templateID))
+	tpl, err := s.templateByRef(ctx, t, templateID, templateKey)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, errInvalid("template %s does not exist", *templateID)
-		}
-		return nil, err
+		return nil, nil, err
+	}
+	if tpl == nil {
+		return nil, nil, errInvalid("one of template_id, template_key or version_id is required")
 	}
 	if tpl.PublishedVersionID == "" {
-		return nil, newErr(422, ErrorCodeTemplateNotPublished,
+		return nil, nil, newErr(422, ErrorCodeTemplateNotPublished,
 			"template %s has never been published", tpl.ID)
 	}
-	return t.st.Versions().Get(ctx, tpl.PublishedVersionID)
+	v, err := t.st.Versions().Get(ctx, tpl.PublishedVersionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return v, tpl, nil
+}
+
+// isNotFoundAPI reports whether err is an apiError that already says 404.
+func isNotFoundAPI(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && ae.code == ErrorCodeNotFound
 }
 
 // mergeVars layers the recipient's own variables over the request-level ones.

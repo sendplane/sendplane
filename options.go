@@ -89,6 +89,9 @@ type (
 	// SenderUse is one request to send something with a sender, handed to
 	// Hooks.SenderPolicy.
 	SenderUse = host.SenderUse
+	// TemplateUse is one request to send with a template, handed to
+	// Hooks.TemplatePolicy (ADR-0018).
+	TemplateUse = host.TemplateUse
 
 	// Hooks are the optional Go escape hatches.
 	Hooks = host.Hooks
@@ -124,6 +127,9 @@ var (
 	// ErrSenderUseDenied is what a Hooks.SenderPolicy returns to refuse a
 	// send; the API answers 403 sender_use_denied with its message.
 	ErrSenderUseDenied = host.ErrSenderUseDenied
+	// ErrTemplateUseDenied is what a Hooks.TemplatePolicy returns to refuse a
+	// send; the API answers 403 template_use_denied with its message.
+	ErrTemplateUseDenied = host.ErrTemplateUseDenied
 )
 
 // The sender uses a Hooks.SenderPolicy discriminates on.
@@ -137,6 +143,12 @@ const (
 // is nil: a shared sender may only be used for what its configuration's
 // `uses` list names. It is exported so that a host hook can chain it.
 var DefaultSenderPolicy = host.DefaultSenderPolicy
+
+// DefaultTemplatePolicy is the template-use policy applied when
+// Hooks.TemplatePolicy is nil: a shared template may only be used for what
+// its `uses` names; a tenant's own templates are unrestricted. It is exported
+// so that a host hook can chain it.
+var DefaultTemplatePolicy = host.DefaultTemplatePolicy
 
 // The Action constants of architecture 3, one per x-sendplane-action value in
 // api/openapi.yaml.

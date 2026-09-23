@@ -259,6 +259,17 @@ func listIndex(coll string) index {
 	}}
 }
 
+// keyIndex is the partial unique (tenant_id, key) index of the content
+// aggregates. `$gt: ""` is how a partial filter says "non-empty string".
+func keyIndex(coll string) index {
+	return index{coll: coll, name: "tenant_key", keys: bson.D{
+		{Key: "tenant_id", Value: 1}, {Key: "key", Value: 1},
+	}, opt: func(b *options.IndexOptionsBuilder) *options.IndexOptionsBuilder {
+		return b.SetUnique(true).SetPartialFilterExpression(bson.D{
+			{Key: "key", Value: bson.D{{Key: "$gt", Value: ""}}}})
+	}}
+}
+
 func indexes() []index {
 	out := []index{
 		listIndex(collTransport),
@@ -278,6 +289,10 @@ func indexes() []index {
 		listIndex(collOutbox),
 		listIndex(collTracking),
 		listIndex(collDelivery),
+		// A template or layout key is unique per tenant; the empty key means
+		// "no key" and is outside the index (ADR-0018).
+		keyIndex(collTemplate),
+		keyIndex(collLayout),
 		{coll: collVersion, name: "tenant_template", keys: bson.D{
 			{Key: "tenant_id", Value: 1}, {Key: "template_id", Value: 1},
 			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
@@ -450,8 +465,8 @@ type tenantStore struct {
 	probeMailboxes *probeMailboxRepo
 
 	bounceMailboxes *bounceMailboxRepo
-	layouts         *table[store.Layout, layoutDoc, *layoutDoc]
-	templates       *table[store.Template, templateDoc, *templateDoc]
+	layouts         *layoutRepo
+	templates       *templateRepo
 
 	versions  *versionRepo
 	probeRuns *probeRunRepo
@@ -478,8 +493,8 @@ func newTenantStore(p *Provider, tenant string) *tenantStore {
 	s.domains = newTable(s, collDomain, domainMeta())
 	s.probeMailboxes = &probeMailboxRepo{newTable(s, collProbeMailbox, probeMailboxMeta())}
 	s.bounceMailboxes = &bounceMailboxRepo{newTable(s, collBounceMailbox, bounceMailboxMeta())}
-	s.layouts = newTable(s, collLayout, layoutMeta())
-	s.templates = newTable(s, collTemplate, templateMeta())
+	s.layouts = &layoutRepo{newTable(s, collLayout, layoutMeta())}
+	s.templates = &templateRepo{newTable(s, collTemplate, templateMeta())}
 
 	s.versions = &versionRepo{newTable(s, collVersion, versionMeta())}
 	s.probeRuns = &probeRunRepo{newTable(s, collProbeRun, probeRunMeta())}

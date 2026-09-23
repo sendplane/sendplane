@@ -230,8 +230,8 @@ type tenantStore struct {
 	bounceBoxes  *bounceMailboxRepo
 	mailboxes    *probeMailboxRepo
 	probeRuns    *probeRunRepo
-	layouts      *crud[store.Layout]
-	templates    *crud[store.Template]
+	layouts      *layoutRepo
+	templates    *templateRepo
 	versions     *versionRepo
 	campaigns    *campaignRepo
 	chunks       *chunkRepo
@@ -254,8 +254,8 @@ func newTenantStore(p *Provider, tenant string) *tenantStore {
 	s.bounceBoxes = &bounceMailboxRepo{newCrud(p, tenant, bounceMailboxSpec)}
 	s.mailboxes = &probeMailboxRepo{newCrud(p, tenant, mailboxSpec)}
 	s.probeRuns = &probeRunRepo{newCrud(p, tenant, probeRunSpec)}
-	s.layouts = newCrud(p, tenant, layoutSpec)
-	s.templates = newCrud(p, tenant, templateSpec)
+	s.layouts = &layoutRepo{newCrud(p, tenant, layoutSpec)}
+	s.templates = &templateRepo{newCrud(p, tenant, templateSpec)}
 	s.versions = &versionRepo{newCrud(p, tenant, messageVersionSpec)}
 	s.campaigns = &campaignRepo{newCrud(p, tenant, campaignSpec)}
 	s.chunks = &chunkRepo{p: p, tenant: tenant}

@@ -69,6 +69,11 @@ func (r *runner) scenarioPlatform(ctx context.Context) error {
 	if err := r.platformProbeState(ctx); err != nil {
 		return err
 	}
+	// Shared templates with tenant overrides (ADR-0018): the content half of
+	// the same operator-shares-with-tenants model.
+	if err := r.platformSharedTemplates(ctx); err != nil {
+		return err
+	}
 	return r.platformShadowRows(ctx)
 }
 

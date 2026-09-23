@@ -197,6 +197,7 @@ const (
 	ErrorCodeRenderFailed           ErrorCode = "render_failed"
 	ErrorCodeSenderUseDenied        ErrorCode = "sender_use_denied"
 	ErrorCodeTemplateNotPublished   ErrorCode = "template_not_published"
+	ErrorCodeTemplateUseDenied      ErrorCode = "template_use_denied"
 	ErrorCodeTenantVarsMissing      ErrorCode = "tenant_vars_missing"
 	ErrorCodeTransportNotAssignable ErrorCode = "transport_not_assignable"
 	ErrorCodeUnauthenticated        ErrorCode = "unauthenticated"
@@ -240,6 +241,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeSenderUseDenied:
 		return true
 	case ErrorCodeTemplateNotPublished:
+		return true
+	case ErrorCodeTemplateUseDenied:
 		return true
 	case ErrorCodeTenantVarsMissing:
 		return true
@@ -950,6 +953,12 @@ type CampaignInput struct {
 	// and start fails if it still is not.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
 
+	// TemplateKey Names the template by key instead of `template_id` (not both): the
+	// tenant's own template with that key first, then the shared one.
+	// The key is resolved here and the campaign stores the template ID it
+	// resolved to.
+	TemplateKey *ContentKey `json:"template_key,omitempty"`
+
 	// TenantVars The tenant's own attributes for this request: name, slug, plan,
 	// whatever the operator's `TenantVars` hook admits.
 	//
@@ -1050,6 +1059,12 @@ type CampaignUpdate struct {
 	// and start fails if it still is not.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
 
+	// TemplateKey Names the template by key instead of `template_id` (not both): the
+	// tenant's own template with that key first, then the shared one.
+	// The key is resolved here and the campaign stores the template ID it
+	// resolved to.
+	TemplateKey *ContentKey `json:"template_key,omitempty"`
+
 	// TenantVars The tenant's own attributes for this request: name, slug, plan,
 	// whatever the operator's `TenantVars` hook admits.
 	//
@@ -1082,9 +1097,35 @@ type CampaignUpdate struct {
 	VersionId *openapi_types.UUID `json:"version_id,omitempty"`
 }
 
+// ContentKey Optional identifier of a template or layout that is the same in every
+// tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+// of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+// a shared template overrides it, and `template_key` on a send resolves
+// through it. A template without a key cannot be shared and is never
+// found by key. An empty string clears it.
+//
+// Examples: welcome, receipt.v2
+type ContentKey = string
+
 // ContentMode `blocks` keeps the block-editor project alongside the MJML it exported;
 // the server only ever compiles the MJML.
 type ContentMode string
+
+// ContentOverridden True on a tenant's own template or layout whose `key` equals a shared
+// one's: this copy overrides the shared original, which is therefore not
+// listed separately.
+type ContentOverridden = bool
+
+// ContentShared True for a template or layout the system tenant shares with every
+// tenant (ADR-0018). In any other tenant such an object is read through,
+// never copied, and read-only (`403 platform_read_only`); override it to
+// change it. In the system tenant this is the flag its author sets.
+type ContentShared = bool
+
+// ContentSharedInput Share this template or layout with every tenant. Only the system
+// tenant may set it (`422 validation_failed` elsewhere), and it requires
+// a `key`. A shared template's layout must be shared too.
+type ContentSharedInput = bool
 
 // Delivery One recipient of one message version, and at the same time the queue
 // item senders claim (ADR-0002, ADR-0003). It has no `version`: every
@@ -1357,12 +1398,34 @@ type Layout struct {
 	I18n *I18nBundle         `json:"i18n,omitempty"`
 	Id   *openapi_types.UUID `json:"id,omitempty"`
 
+	// Key Optional identifier of a template or layout that is the same in every
+	// tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+	// of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+	// a shared template overrides it, and `template_key` on a send resolves
+	// through it. A template without a key cannot be shared and is never
+	// found by key. An empty string clears it.
+	//
+	//
+	// Examples: welcome, receipt.v2
+	Key *ContentKey `json:"key,omitempty"`
+
 	// Mode `blocks` keeps the block-editor project alongside the MJML it exported;
 	// the server only ever compiles the MJML.
-	Mode      ContentMode `json:"mode"`
-	Name      string      `json:"name"`
-	UpdatedAt *time.Time  `json:"updated_at,omitempty"`
-	Version   *int64      `json:"version,omitempty"`
+	Mode ContentMode `json:"mode"`
+	Name string      `json:"name"`
+
+	// Overridden True on a tenant's own template or layout whose `key` equals a shared
+	// one's: this copy overrides the shared original, which is therefore not
+	// listed separately.
+	Overridden *ContentOverridden `json:"overridden,omitempty"`
+
+	// Shared True for a template or layout the system tenant shares with every
+	// tenant (ADR-0018). In any other tenant such an object is read through,
+	// never copied, and read-only (`403 platform_read_only`); override it to
+	// change it. In the system tenant this is the flag its author sets.
+	Shared    *ContentShared `json:"shared,omitempty"`
+	UpdatedAt *time.Time     `json:"updated_at,omitempty"`
+	Version   *int64         `json:"version,omitempty"`
 }
 
 // LayoutInput defines model for LayoutInput.
@@ -1377,9 +1440,25 @@ type LayoutInput struct {
 	// Examples: {"default_locale":"en","locales":{"en":{"welcome.title":"Welcome, {{ recipient.name }}"},"ko":{"welcome.title":"{{ recipient.name }}님, 환영합니다"},"ko-KR":{}}}
 	I18n *I18nBundle `json:"i18n,omitempty"`
 
+	// Key Optional identifier of a template or layout that is the same in every
+	// tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+	// of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+	// a shared template overrides it, and `template_key` on a send resolves
+	// through it. A template without a key cannot be shared and is never
+	// found by key. An empty string clears it.
+	//
+	//
+	// Examples: welcome, receipt.v2
+	Key *ContentKey `json:"key,omitempty"`
+
 	// Mode A layout is authored as `mjml` or `html`, never as blocks.
 	Mode ContentMode `json:"mode"`
 	Name string      `json:"name"`
+
+	// Shared Share this template or layout with every tenant. Only the system
+	// tenant may set it (`422 validation_failed` elsewhere), and it requires
+	// a `key`. A shared template's layout must be shared too.
+	Shared *ContentSharedInput `json:"shared,omitempty"`
 }
 
 // LayoutList defines model for LayoutList.
@@ -1402,9 +1481,25 @@ type LayoutUpdate struct {
 	// Examples: {"default_locale":"en","locales":{"en":{"welcome.title":"Welcome, {{ recipient.name }}"},"ko":{"welcome.title":"{{ recipient.name }}님, 환영합니다"},"ko-KR":{}}}
 	I18n *I18nBundle `json:"i18n,omitempty"`
 
+	// Key Optional identifier of a template or layout that is the same in every
+	// tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+	// of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+	// a shared template overrides it, and `template_key` on a send resolves
+	// through it. A template without a key cannot be shared and is never
+	// found by key. An empty string clears it.
+	//
+	//
+	// Examples: welcome, receipt.v2
+	Key *ContentKey `json:"key,omitempty"`
+
 	// Mode A layout is authored as `mjml` or `html`, never as blocks.
 	Mode ContentMode `json:"mode"`
 	Name string      `json:"name"`
+
+	// Shared Share this template or layout with every tenant. Only the system
+	// tenant may set it (`422 validation_failed` elsewhere), and it requires
+	// a `key`. A shared template's layout must be shared too.
+	Shared *ContentSharedInput `json:"shared,omitempty"`
 
 	// Version The `version` last read. A mismatch answers 409 `version_conflict`.
 	Version int64 `json:"version"`
@@ -1568,8 +1663,15 @@ type MessageRequest struct {
 	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
 	SenderId ResourceId `json:"sender_id"`
 
-	// TemplateId Uses the template's currently published version. Required unless `version_id` is given.
+	// TemplateId Uses the template's currently published version. One of
+	// `template_id`, `template_key` or `version_id` is required, and
+	// `template_id` and `template_key` exclude each other.
 	TemplateId *openapi_types.UUID `json:"template_id,omitempty"`
+
+	// TemplateKey Names the template by key: the tenant's own template with that key
+	// first (an override), then the one the system tenant shares.
+	// Resolved at request time.
+	TemplateKey *ContentKey `json:"template_key,omitempty"`
 
 	// TenantVars The tenant's own attributes for this request: name, slug, plan,
 	// whatever the operator's `TenantVars` hook admits.
@@ -2573,24 +2675,60 @@ type Template struct {
 	//
 	//
 	// Examples: {"default_locale":"en","locales":{"en":{"welcome.title":"Welcome, {{ recipient.name }}"},"ko":{"welcome.title":"{{ recipient.name }}님, 환영합니다"},"ko-KR":{}}}
-	I18n     *I18nBundle         `json:"i18n,omitempty"`
-	Id       *openapi_types.UUID `json:"id,omitempty"`
+	I18n *I18nBundle         `json:"i18n,omitempty"`
+	Id   *openapi_types.UUID `json:"id,omitempty"`
+
+	// Key Optional identifier of a template or layout that is the same in every
+	// tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+	// of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+	// a shared template overrides it, and `template_key` on a send resolves
+	// through it. A template without a key cannot be shared and is never
+	// found by key. An empty string clears it.
+	//
+	//
+	// Examples: welcome, receipt.v2
+	Key      *ContentKey         `json:"key,omitempty"`
 	LayoutId *openapi_types.UUID `json:"layout_id,omitempty"`
 
 	// Mode `blocks` keeps the block-editor project alongside the MJML it exported;
 	// the server only ever compiles the MJML.
-	Mode      ContentMode `json:"mode"`
-	Name      string      `json:"name"`
-	Preheader *string     `json:"preheader,omitempty"`
+	Mode ContentMode `json:"mode"`
+	Name string      `json:"name"`
+
+	// Overridden True on a tenant's own template or layout whose `key` equals a shared
+	// one's: this copy overrides the shared original, which is therefore not
+	// listed separately.
+	Overridden *ContentOverridden `json:"overridden,omitempty"`
+
+	// OverriddenFromVersionId On a tenant's override of a shared template: the shared template's
+	// published version when the copy was made.
+	OverriddenFromVersionId *openapi_types.UUID `json:"overridden_from_version_id,omitempty"`
+	Preheader               *string             `json:"preheader,omitempty"`
 
 	// PublishedVersionId The version transactional sends use when no version is pinned.
 	PublishedVersionId *openapi_types.UUID `json:"published_version_id,omitempty"`
-	Subject            string              `json:"subject"`
+
+	// Shared True for a template or layout the system tenant shares with every
+	// tenant (ADR-0018). In any other tenant such an object is read through,
+	// never copied, and read-only (`403 platform_read_only`); override it to
+	// change it. In the system tenant this is the flag its author sets.
+	Shared *ContentShared `json:"shared,omitempty"`
+
+	// SharedUpdatedSinceOverride On an override: the shared template has been published again since
+	// the copy was made, so the tenant may want to look at what changed.
+	SharedUpdatedSinceOverride *bool  `json:"shared_updated_since_override,omitempty"`
+	Subject                    string `json:"subject"`
 
 	// Text Optional plain-text part; empty derives it from the HTML.
 	Text      *string    `json:"text,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
-	Version   *int64     `json:"version,omitempty"`
+
+	// Uses What the template may be used for. Empty or absent means anything.
+	// The default template-use policy enforces it for shared templates only
+	// (`403 template_use_denied`); an override carries a copy, which the
+	// host's `TemplatePolicy` hook may enforce as well.
+	Uses    *TemplateUses `json:"uses,omitempty"`
+	Version *int64        `json:"version,omitempty"`
 }
 
 // TemplateInput defines model for TemplateInput.
@@ -2605,7 +2743,18 @@ type TemplateInput struct {
 	//
 	//
 	// Examples: {"default_locale":"en","locales":{"en":{"welcome.title":"Welcome, {{ recipient.name }}"},"ko":{"welcome.title":"{{ recipient.name }}님, 환영합니다"},"ko-KR":{}}}
-	I18n     *I18nBundle         `json:"i18n,omitempty"`
+	I18n *I18nBundle `json:"i18n,omitempty"`
+
+	// Key Optional identifier of a template or layout that is the same in every
+	// tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+	// of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+	// a shared template overrides it, and `template_key` on a send resolves
+	// through it. A template without a key cannot be shared and is never
+	// found by key. An empty string clears it.
+	//
+	//
+	// Examples: welcome, receipt.v2
+	Key      *ContentKey         `json:"key,omitempty"`
 	LayoutId *openapi_types.UUID `json:"layout_id,omitempty"`
 
 	// Mode `blocks` keeps the block-editor project alongside the MJML it exported;
@@ -2614,9 +2763,20 @@ type TemplateInput struct {
 	Name      string      `json:"name"`
 	Preheader *string     `json:"preheader,omitempty"`
 
+	// Shared Share this template or layout with every tenant. Only the system
+	// tenant may set it (`422 validation_failed` elsewhere), and it requires
+	// a `key`. A shared template's layout must be shared too.
+	Shared *ContentSharedInput `json:"shared,omitempty"`
+
 	// Subject Liquid. CR and LF are rejected.
 	Subject string  `json:"subject"`
 	Text    *string `json:"text,omitempty"`
+
+	// Uses What the template may be used for. Empty or absent means anything.
+	// The default template-use policy enforces it for shared templates only
+	// (`403 template_use_denied`); an override carries a copy, which the
+	// host's `TemplatePolicy` hook may enforce as well.
+	Uses *TemplateUses `json:"uses,omitempty"`
 }
 
 // TemplateList defines model for TemplateList.
@@ -2639,7 +2799,18 @@ type TemplateUpdate struct {
 	//
 	//
 	// Examples: {"default_locale":"en","locales":{"en":{"welcome.title":"Welcome, {{ recipient.name }}"},"ko":{"welcome.title":"{{ recipient.name }}님, 환영합니다"},"ko-KR":{}}}
-	I18n     *I18nBundle         `json:"i18n,omitempty"`
+	I18n *I18nBundle `json:"i18n,omitempty"`
+
+	// Key Optional identifier of a template or layout that is the same in every
+	// tenant (ADR-0018): unique within a tenant, lower case, 1-64 characters
+	// of `a-z`, `0-9`, `.`, `_` and `-`. A tenant's template with the key of
+	// a shared template overrides it, and `template_key` on a send resolves
+	// through it. A template without a key cannot be shared and is never
+	// found by key. An empty string clears it.
+	//
+	//
+	// Examples: welcome, receipt.v2
+	Key      *ContentKey         `json:"key,omitempty"`
 	LayoutId *openapi_types.UUID `json:"layout_id,omitempty"`
 
 	// Mode `blocks` keeps the block-editor project alongside the MJML it exported;
@@ -2648,13 +2819,30 @@ type TemplateUpdate struct {
 	Name      string      `json:"name"`
 	Preheader *string     `json:"preheader,omitempty"`
 
+	// Shared Share this template or layout with every tenant. Only the system
+	// tenant may set it (`422 validation_failed` elsewhere), and it requires
+	// a `key`. A shared template's layout must be shared too.
+	Shared *ContentSharedInput `json:"shared,omitempty"`
+
 	// Subject Liquid. CR and LF are rejected.
 	Subject string  `json:"subject"`
 	Text    *string `json:"text,omitempty"`
 
+	// Uses What the template may be used for. Empty or absent means anything.
+	// The default template-use policy enforces it for shared templates only
+	// (`403 template_use_denied`); an override carries a copy, which the
+	// host's `TemplatePolicy` hook may enforce as well.
+	Uses *TemplateUses `json:"uses,omitempty"`
+
 	// Version The `version` last read. A mismatch answers 409 `version_conflict`.
 	Version int64 `json:"version"`
 }
+
+// TemplateUses What the template may be used for. Empty or absent means anything.
+// The default template-use policy enforces it for shared templates only
+// (`403 template_use_denied`); an override carries a copy, which the
+// host's `TemplatePolicy` hook may enforce as well.
+type TemplateUses = []string
 
 // TenantSettings Everything sendplane knows about a tenant. sendplane does not manage
 // tenant lifecycle: the row is created with defaults on first access
@@ -3788,6 +3976,9 @@ type ServerInterface interface {
 	// UpdateLayout Replace a layout
 	// (PUT /api/v1/layouts/{layoutId})
 	UpdateLayout(w http.ResponseWriter, r *http.Request, layoutId LayoutId)
+	// OverrideLayout Override a shared layout for this tenant
+	// (POST /api/v1/layouts/{layoutId}/override)
+	OverrideLayout(w http.ResponseWriter, r *http.Request, layoutId LayoutId)
 	// GetMessageVersion Read a message version
 	// (GET /api/v1/message-versions/{versionId})
 	GetMessageVersion(w http.ResponseWriter, r *http.Request, versionId VersionId)
@@ -3899,6 +4090,9 @@ type ServerInterface interface {
 	// ListTemplateI18nKeys List the i18n keys a template uses
 	// (GET /api/v1/templates/{templateId}/i18n/keys)
 	ListTemplateI18nKeys(w http.ResponseWriter, r *http.Request, templateId TemplateId)
+	// OverrideTemplate Override a shared template for this tenant
+	// (POST /api/v1/templates/{templateId}/override)
+	OverrideTemplate(w http.ResponseWriter, r *http.Request, templateId TemplateId)
 	// PreviewTemplate Render a template preview
 	// (POST /api/v1/templates/{templateId}/preview)
 	PreviewTemplate(w http.ResponseWriter, r *http.Request, templateId TemplateId)
@@ -4178,6 +4372,12 @@ func (_ Unimplemented) UpdateLayout(w http.ResponseWriter, r *http.Request, layo
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// OverrideLayout Override a shared layout for this tenant
+// (POST /api/v1/layouts/{layoutId}/override)
+func (_ Unimplemented) OverrideLayout(w http.ResponseWriter, r *http.Request, layoutId LayoutId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // GetMessageVersion Read a message version
 // (GET /api/v1/message-versions/{versionId})
 func (_ Unimplemented) GetMessageVersion(w http.ResponseWriter, r *http.Request, versionId VersionId) {
@@ -4397,6 +4597,12 @@ func (_ Unimplemented) ReplaceTemplateI18n(w http.ResponseWriter, r *http.Reques
 // ListTemplateI18nKeys List the i18n keys a template uses
 // (GET /api/v1/templates/{templateId}/i18n/keys)
 func (_ Unimplemented) ListTemplateI18nKeys(w http.ResponseWriter, r *http.Request, templateId TemplateId) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// OverrideTemplate Override a shared template for this tenant
+// (POST /api/v1/templates/{templateId}/override)
+func (_ Unimplemented) OverrideTemplate(w http.ResponseWriter, r *http.Request, templateId TemplateId) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -5872,6 +6078,32 @@ func (siw *ServerInterfaceWrapper) UpdateLayout(w http.ResponseWriter, r *http.R
 	handler.ServeHTTP(w, r)
 }
 
+// OverrideLayout operation middleware
+func (siw *ServerInterfaceWrapper) OverrideLayout(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "layoutId" -------------
+	var layoutId LayoutId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "layoutId", chi.URLParam(r, "layoutId"), &layoutId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "layoutId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.OverrideLayout(w, r, layoutId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetMessageVersion operation middleware
 func (siw *ServerInterfaceWrapper) GetMessageVersion(w http.ResponseWriter, r *http.Request) {
 
@@ -6914,6 +7146,32 @@ func (siw *ServerInterfaceWrapper) ListTemplateI18nKeys(w http.ResponseWriter, r
 	handler.ServeHTTP(w, r)
 }
 
+// OverrideTemplate operation middleware
+func (siw *ServerInterfaceWrapper) OverrideTemplate(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "templateId" -------------
+	var templateId TemplateId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "templateId", chi.URLParam(r, "templateId"), &templateId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "templateId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.OverrideTemplate(w, r, templateId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // PreviewTemplate operation middleware
 func (siw *ServerInterfaceWrapper) PreviewTemplate(w http.ResponseWriter, r *http.Request) {
 
@@ -7576,6 +7834,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Put(options.BaseURL+"/api/v1/layouts/{layoutId}", wrapper.UpdateLayout)
 	})
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/layouts/{layoutId}/override", wrapper.OverrideLayout)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/v1/templates", wrapper.ListTemplates)
 	})
 	r.Group(func(r chi.Router) {
@@ -7589,6 +7850,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Put(options.BaseURL+"/api/v1/templates/{templateId}", wrapper.UpdateTemplate)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/v1/templates/{templateId}/override", wrapper.OverrideTemplate)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/v1/templates/{templateId}/preview", wrapper.PreviewTemplate)
@@ -11328,6 +11592,114 @@ func (response UpdateLayout500JSONResponse) VisitUpdateLayoutResponse(w http.Res
 	return err
 }
 
+type OverrideLayoutRequestObject struct {
+	LayoutId LayoutId `json:"layoutId"`
+}
+
+type OverrideLayoutResponseObject interface {
+	VisitOverrideLayoutResponse(w http.ResponseWriter) error
+}
+
+type OverrideLayout201JSONResponse Layout
+
+func (response OverrideLayout201JSONResponse) VisitOverrideLayoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideLayout401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response OverrideLayout401JSONResponse) VisitOverrideLayoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideLayout403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response OverrideLayout403JSONResponse) VisitOverrideLayoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideLayout404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response OverrideLayout404JSONResponse) VisitOverrideLayoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideLayout409JSONResponse struct{ ConflictJSONResponse }
+
+func (response OverrideLayout409JSONResponse) VisitOverrideLayoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideLayout422JSONResponse struct {
+	UnprocessableEntityJSONResponse
+}
+
+func (response OverrideLayout422JSONResponse) VisitOverrideLayoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideLayout500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response OverrideLayout500JSONResponse) VisitOverrideLayoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetMessageVersionRequestObject struct {
 	VersionId VersionId `json:"versionId"`
 }
@@ -14847,6 +15219,114 @@ func (response ListTemplateI18nKeys500JSONResponse) VisitListTemplateI18nKeysRes
 	return err
 }
 
+type OverrideTemplateRequestObject struct {
+	TemplateId TemplateId `json:"templateId"`
+}
+
+type OverrideTemplateResponseObject interface {
+	VisitOverrideTemplateResponse(w http.ResponseWriter) error
+}
+
+type OverrideTemplate201JSONResponse Template
+
+func (response OverrideTemplate201JSONResponse) VisitOverrideTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideTemplate401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response OverrideTemplate401JSONResponse) VisitOverrideTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideTemplate403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response OverrideTemplate403JSONResponse) VisitOverrideTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideTemplate404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response OverrideTemplate404JSONResponse) VisitOverrideTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideTemplate409JSONResponse struct{ ConflictJSONResponse }
+
+func (response OverrideTemplate409JSONResponse) VisitOverrideTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideTemplate422JSONResponse struct {
+	UnprocessableEntityJSONResponse
+}
+
+func (response OverrideTemplate422JSONResponse) VisitOverrideTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(422)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type OverrideTemplate500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response OverrideTemplate500JSONResponse) VisitOverrideTemplateResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type PreviewTemplateRequestObject struct {
 	TemplateId TemplateId `json:"templateId"`
 	Body       *PreviewTemplateJSONRequestBody
@@ -16164,6 +16644,9 @@ type StrictServerInterface interface {
 	// UpdateLayout Replace a layout
 	// (PUT /api/v1/layouts/{layoutId})
 	UpdateLayout(ctx context.Context, request UpdateLayoutRequestObject) (UpdateLayoutResponseObject, error)
+	// OverrideLayout Override a shared layout for this tenant
+	// (POST /api/v1/layouts/{layoutId}/override)
+	OverrideLayout(ctx context.Context, request OverrideLayoutRequestObject) (OverrideLayoutResponseObject, error)
 	// GetMessageVersion Read a message version
 	// (GET /api/v1/message-versions/{versionId})
 	GetMessageVersion(ctx context.Context, request GetMessageVersionRequestObject) (GetMessageVersionResponseObject, error)
@@ -16275,6 +16758,9 @@ type StrictServerInterface interface {
 	// ListTemplateI18nKeys List the i18n keys a template uses
 	// (GET /api/v1/templates/{templateId}/i18n/keys)
 	ListTemplateI18nKeys(ctx context.Context, request ListTemplateI18nKeysRequestObject) (ListTemplateI18nKeysResponseObject, error)
+	// OverrideTemplate Override a shared template for this tenant
+	// (POST /api/v1/templates/{templateId}/override)
+	OverrideTemplate(ctx context.Context, request OverrideTemplateRequestObject) (OverrideTemplateResponseObject, error)
 	// PreviewTemplate Render a template preview
 	// (POST /api/v1/templates/{templateId}/preview)
 	PreviewTemplate(ctx context.Context, request PreviewTemplateRequestObject) (PreviewTemplateResponseObject, error)
@@ -17440,6 +17926,32 @@ func (sh *strictHandler) UpdateLayout(w http.ResponseWriter, r *http.Request, la
 	}
 }
 
+// OverrideLayout operation middleware
+func (sh *strictHandler) OverrideLayout(w http.ResponseWriter, r *http.Request, layoutId LayoutId) {
+	var request OverrideLayoutRequestObject
+
+	request.LayoutId = layoutId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.OverrideLayout(ctx, request.(OverrideLayoutRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "OverrideLayout")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(OverrideLayoutResponseObject); ok {
+		if err := validResponse.VisitOverrideLayoutResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetMessageVersion operation middleware
 func (sh *strictHandler) GetMessageVersion(w http.ResponseWriter, r *http.Request, versionId VersionId) {
 	var request GetMessageVersionRequestObject
@@ -18499,6 +19011,32 @@ func (sh *strictHandler) ListTemplateI18nKeys(w http.ResponseWriter, r *http.Req
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListTemplateI18nKeysResponseObject); ok {
 		if err := validResponse.VisitListTemplateI18nKeysResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// OverrideTemplate operation middleware
+func (sh *strictHandler) OverrideTemplate(w http.ResponseWriter, r *http.Request, templateId TemplateId) {
+	var request OverrideTemplateRequestObject
+
+	request.TemplateId = templateId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.OverrideTemplate(ctx, request.(OverrideTemplateRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "OverrideTemplate")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(OverrideTemplateResponseObject); ok {
+		if err := validResponse.VisitOverrideTemplateResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

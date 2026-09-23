@@ -122,6 +122,9 @@ func errorFor(err error) *apiError {
 	case errors.Is(err, host.ErrSenderUseDenied):
 		return &apiError{status: http.StatusForbidden, code: ErrorCodeSenderUseDenied,
 			message: err.Error(), cause: err}
+	case errors.Is(err, host.ErrTemplateUseDenied):
+		return &apiError{status: http.StatusForbidden, code: ErrorCodeTemplateUseDenied,
+			message: err.Error(), cause: err}
 	case errors.Is(err, platform.ErrMissingVars), errors.Is(err, platform.ErrInvalidFrom):
 		return &apiError{status: http.StatusUnprocessableEntity, code: ErrorCodeTenantVarsMissing,
 			message: err.Error(), cause: err}

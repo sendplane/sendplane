@@ -27,6 +27,41 @@ func (r *versionRepo) ListByTemplate(ctx context.Context, templateID string, p s
 	return r.listWhere(ctx, bson.D{{Key: "template_id", Value: templateID}}, p)
 }
 
+// --- templates and layouts ---------------------------------------------
+
+type templateRepo struct {
+	*table[store.Template, templateDoc, *templateDoc]
+}
+
+func (r *templateRepo) GetByKey(ctx context.Context, key string) (*store.Template, error) {
+	return getByKey(ctx, r.table, key)
+}
+
+type layoutRepo struct {
+	*table[store.Layout, layoutDoc, *layoutDoc]
+}
+
+func (r *layoutRepo) GetByKey(ctx context.Context, key string) (*store.Layout, error) {
+	return getByKey(ctx, r.table, key)
+}
+
+// getByKey reads the document whose key is key. The empty key never matches:
+// it means "no key", and the partial unique index exempts it too.
+func getByKey[T any, D any, PD docPtr[D]](ctx context.Context, t *table[T, D, PD], key string) (*T, error) {
+	if key == "" {
+		return nil, notFound(t.m.kind, "with an empty key")
+	}
+	var d D
+	err := t.coll().FindOne(ctx, t.s.scope(bson.E{Key: "key", Value: key})).Decode(&d)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, notFound(t.m.kind, "with key "+key)
+		}
+		return nil, wrap("get "+t.m.kind+" by key", err)
+	}
+	return t.m.dec(&d), nil
+}
+
 // --- probe runs --------------------------------------------------------
 
 type probeRunRepo struct {

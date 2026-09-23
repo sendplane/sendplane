@@ -104,6 +104,8 @@ var opActions = map[string]host.Action{
 	"ListTransports":               host.ActionSenderRead,
 	"NotifyCampaignUnsubscribe":    host.ActionCampaignWrite,
 	"NotifyDeliveryUnsubscribe":    host.ActionDeliveryWrite,
+	"OverrideLayout":               host.ActionTemplateWrite,
+	"OverrideTemplate":             host.ActionTemplateWrite,
 	"PauseCampaign":                host.ActionCampaignSend,
 	"PreviewTemplate":              host.ActionTemplateRead,
 	"PublishTemplate":              host.ActionTemplateWrite,

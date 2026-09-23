@@ -104,8 +104,9 @@ type SenderConfig struct {
 // It is also where the platform catalog of ADR-0017 is checked and installed:
 // Options.Platform is validated (unique IDs, resolvable references, parseable
 // From templates), Options.Store is wrapped in the overlay that resolves it
-// into every tenant's reads, and Hooks.SenderPolicy is defaulted to the policy
-// that enforces the configured `uses`. A catalog that does not validate is a
+// into every tenant's reads (it also serves the system tenant's shared
+// templates, ADR-0018), and Hooks.SenderPolicy and Hooks.TemplatePolicy are
+// defaulted to the policies that enforce the configured and authored `uses`. A catalog that does not validate is a
 // refusal to start: a shared sender whose From template cannot be parsed would
 // otherwise fail every delivery it is used for, hours later and blamed on the
 // relay.
@@ -144,8 +145,13 @@ func New(o Options) (*Sendplane, error) {
 	if o.Hooks.SenderPolicy == nil {
 		o.Hooks.SenderPolicy = host.DefaultSenderPolicy(o.Platform)
 	}
-	// The overlay is a no-op for an empty catalog, so an ordinary
-	// single-tenant deployment keeps the Provider it passed in.
+	if o.Hooks.TemplatePolicy == nil {
+		o.Hooks.TemplatePolicy = host.DefaultTemplatePolicy
+	}
+	// The overlay is applied even for an empty catalog: it is also what
+	// serves the system tenant's shared templates and layouts to every other
+	// tenant (ADR-0018). With nothing configured and nothing shared it only
+	// forwards.
 	o.Store = store.WithPlatform(o.Store, o.Platform, o.Secrets, o.Clock)
 
 	return &Sendplane{opts: o, platform: resolver}, nil

@@ -132,6 +132,25 @@ func (c *crud[T]) Get(ctx context.Context, id string) (*T, error) {
 	return v, nil
 }
 
+// getByKey reads the row whose `key` column is key. Only the tables with a
+// key column (template, layout) call it; the empty key never matches, which
+// is also what the partial unique index exempts.
+func (c *crud[T]) getByKey(ctx context.Context, key string) (*T, error) {
+	if err := c.p.check(); err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return nil, fmt.Errorf("%w: %s with an empty key", store.ErrNotFound, c.s.table)
+	}
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE tenant_id = $1 AND key = $2",
+		c.s.selectList(), c.s.table)
+	v, err := c.s.scan(c.p.pool.QueryRow(ctx, q, c.tenant, key))
+	if err != nil {
+		return nil, fmt.Errorf("%s key %q: %w", c.s.table, key, mapErr(err))
+	}
+	return v, nil
+}
+
 func (c *crud[T]) Update(ctx context.Context, v *T) error {
 	if v == nil {
 		return fmt.Errorf("%w: nil value", store.ErrInvalid)

@@ -19,6 +19,11 @@ export function isSenderUseDenied(error: unknown): boolean {
   return codeOf(error) === 'sender_use_denied'
 }
 
+/** 403: a shared template's `uses` does not cover the kind of send that was tried. */
+export function isTemplateUseDenied(error: unknown): boolean {
+  return codeOf(error) === 'template_use_denied'
+}
+
 /** 422: a shared sender's From template reads a `tenant_vars` key that was not supplied. */
 export function isTenantVarsMissing(error: unknown): boolean {
   return codeOf(error) === 'tenant_vars_missing'

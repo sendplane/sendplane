@@ -73,6 +73,23 @@ type Hooks struct {
 	// error's message, so the message is part of the API and should say what
 	// would be allowed.
 	SenderPolicy func(ctx context.Context, u SenderUse) error
+
+	// TemplatePolicy decides whether a template may be used for this kind of
+	// send. It is called on POST /messages and on POST /campaigns (create and
+	// start), after the template has been resolved (by ID, by key, or through
+	// a pinned version), before anything is queued.
+	//
+	// Default (nil): DefaultTemplatePolicy, which enforces a *shared*
+	// template's `uses` list and leaves a tenant's own templates alone. A
+	// tenant's override of a shared template is its own template: it carries
+	// a copy of the `uses` it was made from, but the default does not enforce
+	// it — a host that wants overrides held to the original's restrictions
+	// says so here. Like SenderPolicy, a hook replaces the default rather than
+	// adding to it; chain DefaultTemplatePolicy to keep it.
+	//
+	// Any non-nil error is a denial and becomes 403 template_use_denied with
+	// the error's message.
+	TemplatePolicy func(ctx context.Context, u TemplateUse) error
 }
 
 // RecipientContext is the per-recipient data available to hooks.

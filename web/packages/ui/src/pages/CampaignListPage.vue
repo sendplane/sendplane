@@ -10,6 +10,7 @@ import { computed, ref } from 'vue'
 
 import SpButton from '../components/SpButton.vue'
 import SpCard from '../components/SpCard.vue'
+import SpCheckbox from '../components/SpCheckbox.vue'
 import SpErrorNotice from '../components/SpErrorNotice.vue'
 import SpField from '../components/SpField.vue'
 import SpInput from '../components/SpInput.vue'
@@ -25,9 +26,11 @@ import { useApiToast } from '../composables/useApiToast.js'
 import { useAsync } from '../composables/useAsync.js'
 import { useCursorList } from '../composables/useCursorList.js'
 import { useSendplane } from '../context.js'
+import { templateOption, templateReference, templateUseBlocked } from '../lib/content.js'
 import { formatDateTime, formatNumber } from '../lib/format.js'
 import {
   isSenderUseDenied,
+  isTemplateUseDenied,
   isTenantVarsMissing,
   looksTemplated,
   missingTenantVarKeys,
@@ -42,6 +45,9 @@ const draft = ref({ name: '', sender_id: '', template_id: '' })
 const tenantVars = ref<TenantVars>({})
 const missingTenantVars = ref<string[]>([])
 const senderUseError = ref('')
+const templateUseError = ref('')
+// Name the template by key (`template_key`) rather than by ID (ADR-0018).
+const byKey = ref(false)
 const saving = ref(false)
 
 const list = useCursorList<Campaign>(
@@ -105,12 +111,38 @@ const senderTemplates = computed(() => {
   }
 })
 
+/**
+ * Own and shared templates (ADR-0018). Unpublished ones stay: a campaign
+ * resolves its version at start. A shared template restricted to
+ * transactional sends is listed but disabled.
+ */
 const templateOptions = computed(() =>
-  (templates.data.value?.items ?? []).map((template) => ({
-    value: template.id ?? '',
-    label: template.name,
-  })),
+  (templates.data.value?.items ?? []).map((template) =>
+    templateOption(template, { use: 'campaign', byKey: byKey.value, t }),
+  ),
 )
+
+const selectedTemplate = computed(() =>
+  (templates.data.value?.items ?? []).find((template) => template.id === draft.value.template_id),
+)
+
+const templateBlocked = computed(
+  () => !!selectedTemplate.value && templateUseBlocked(selectedTemplate.value, 'campaign'),
+)
+
+const templateKeyMissing = computed(
+  () => byKey.value && !!selectedTemplate.value && !selectedTemplate.value.key,
+)
+
+const templateError = computed(() => {
+  if (templateBlocked.value) {
+    return t('content.templateUseBlocked', {
+      uses: (selectedTemplate.value?.uses ?? []).join(', '),
+    })
+  }
+  if (templateKeyMissing.value) return t('content.selectedHasNoKey')
+  return templateUseError.value || undefined
+})
 
 const columns = computed<TableColumn[]>(() => [
   { key: 'name', label: t('common.name'), width: 'minmax(180px, 2fr)' },
@@ -132,27 +164,33 @@ async function create() {
   saving.value = true
   missingTenantVars.value = []
   senderUseError.value = ''
+  templateUseError.value = ''
   try {
     const campaign = await client.post('/api/v1/campaigns', {
       body: {
         name: draft.value.name,
         sender_id: draft.value.sender_id,
-        ...(draft.value.template_id ? { template_id: draft.value.template_id } : {}),
+        ...(draft.value.template_id
+          ? templateReference(selectedTemplate.value, draft.value.template_id, byKey.value)
+          : {}),
         ...(Object.keys(tenantVars.value).length ? { tenant_vars: tenantVars.value } : {}),
       },
     })
     creating.value = false
     draft.value = { name: '', sender_id: '', template_id: '' }
+    byKey.value = false
     if (campaign.id) navigate({ name: 'campaign', params: { campaignId: campaign.id } })
     else list.reset()
   } catch (error) {
-    // Both failures name an input on this form, so they render on it.
+    // These failures name an input on this form, so they render on it.
     if (isTenantVarsMissing(error)) {
       const keys = missingTenantVarKeys(error)
       missingTenantVars.value = keys
       if (keys.length === 0) toast.fail(error)
     } else if (isSenderUseDenied(error)) {
       senderUseError.value = error instanceof Error ? error.message : String(error)
+    } else if (isTemplateUseDenied(error)) {
+      templateUseError.value = error instanceof Error ? error.message : String(error)
     } else {
       toast.fail(error)
     }
@@ -205,14 +243,20 @@ const failedOf = (campaign: Campaign) => campaign.stats?.by_status?.failed ?? 0
             :described-by="describedBy"
           />
         </SpField>
-        <SpField v-slot="{ id }" :label="t('template.one')">
+        <SpField v-slot="{ id, describedBy }" :label="t('template.one')" :error="templateError">
           <SpSelect
             :id="id"
             v-model="draft.template_id"
             :options="templateOptions"
             :placeholder="t('common.none')"
+            :described-by="describedBy"
           />
         </SpField>
+        <SpCheckbox
+          v-model="byKey"
+          :label="t('content.selectByKey')"
+          :hint="t('content.selectByKeyHint')"
+        />
         <p v-if="selectedSender?.shared" class="sp-form-grid__note">
           <SpSharedBadge />
           <span class="sp-mono">{{ selectedSender.from_email }}</span>
@@ -223,7 +267,13 @@ const failedOf = (campaign: Campaign) => campaign.stats?.by_status?.failed ?? 0
             type="submit"
             variant="primary"
             :loading="saving"
-            :disabled="!draft.name || !draft.sender_id || !senderAllowsCampaign"
+            :disabled="
+              !draft.name ||
+              !draft.sender_id ||
+              !senderAllowsCampaign ||
+              templateBlocked ||
+              templateKeyMissing
+            "
           >
             {{ t('common.create') }}
           </SpButton>

@@ -379,19 +379,19 @@ func (r *probeRunRepo) ListPending(ctx context.Context, p store.Page) (store.Res
 
 var layoutSpec = spec[store.Layout]{
 	table: "layout",
-	cols:  []string{"name", "mode", "body", "i18n"},
+	cols:  []string{"name", "key", "shared", "mode", "body", "i18n"},
 	args: func(v *store.Layout) ([]any, error) {
 		i18n, err := jsonIn(v.I18n)
 		if err != nil {
 			return nil, err
 		}
-		return []any{v.Name, string(v.Mode), v.Body, i18n}, nil
+		return []any{v.Name, v.Key, v.Shared, string(v.Mode), v.Body, i18n}, nil
 	},
 	scan: func(r rowScanner) (*store.Layout, error) {
 		var v store.Layout
 		var mode string
 		var i18n []byte
-		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &mode, &v.Body, &i18n,
+		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Key, &v.Shared, &mode, &v.Body, &i18n,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
@@ -406,12 +406,27 @@ var layoutSpec = spec[store.Layout]{
 	updated:  func(v *store.Layout) *time.Time { return &v.UpdatedAt },
 }
 
+// layoutRepo and templateRepo add the lookup by key. The key is unique per
+// tenant through a partial index that exempts the empty key (0007).
+type layoutRepo struct{ *crud[store.Layout] }
+
+func (r *layoutRepo) GetByKey(ctx context.Context, key string) (*store.Layout, error) {
+	return r.getByKey(ctx, key)
+}
+
+type templateRepo struct{ *crud[store.Template] }
+
+func (r *templateRepo) GetByKey(ctx context.Context, key string) (*store.Template, error) {
+	return r.getByKey(ctx, key)
+}
+
 // --- template ----------------------------------------------------------
 
 var templateSpec = spec[store.Template]{
 	table: "template",
 	cols: []string{
-		"name", "layout_id", "subject", "preheader", "mode", "body", "blocks",
+		"name", "key", "shared", "uses", "overridden_from_version", "layout_id",
+		"subject", "preheader", "mode", "body", "blocks",
 		"text_body", "i18n", "default_locale", "published_version_id",
 	},
 	args: func(v *store.Template) ([]any, error) {
@@ -424,21 +439,25 @@ var templateSpec = spec[store.Template]{
 			return nil, err
 		}
 		return []any{
-			v.Name, v.LayoutID, v.Subject, v.Preheader, string(v.Mode), v.Body,
+			v.Name, v.Key, v.Shared, usesIn(v.Uses), v.OverriddenFromVersion, v.LayoutID,
+			v.Subject, v.Preheader, string(v.Mode), v.Body,
 			blocks, v.Text, i18n, v.DefaultLocale, v.PublishedVersionID,
 		}, nil
 	},
 	scan: func(r rowScanner) (*store.Template, error) {
 		var v store.Template
 		var mode string
+		var uses []string
 		var blocks, i18n []byte
-		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.LayoutID, &v.Subject,
+		if err := r.Scan(&v.ID, &v.TenantID, &v.Name, &v.Key, &v.Shared, &uses,
+			&v.OverriddenFromVersion, &v.LayoutID, &v.Subject,
 			&v.Preheader, &mode, &v.Body, &blocks, &v.Text, &i18n,
 			&v.DefaultLocale, &v.PublishedVersionID,
 			&v.CreatedAt, &v.UpdatedAt, &v.Version); err != nil {
 			return nil, err
 		}
 		v.Mode = store.ContentMode(mode)
+		v.Uses = usesOut(uses)
 		v.Blocks = rawOut(blocks)
 		v.CreatedAt, v.UpdatedAt = v.CreatedAt.UTC(), v.UpdatedAt.UTC()
 		return &v, jsonOut(i18n, &v.I18n)
@@ -448,6 +467,30 @@ var templateSpec = spec[store.Template]{
 	version:  func(v *store.Template) *int64 { return &v.Version },
 	created:  func(v *store.Template) *time.Time { return &v.CreatedAt },
 	updated:  func(v *store.Template) *time.Time { return &v.UpdatedAt },
+}
+
+// usesIn and usesOut map a use list onto a text[] column. Nil stays NULL, so
+// "no restriction" is not stored as an empty array that reads back the same.
+func usesIn(uses []store.UseKind) []string {
+	if len(uses) == 0 {
+		return nil
+	}
+	out := make([]string, len(uses))
+	for i, u := range uses {
+		out[i] = string(u)
+	}
+	return out
+}
+
+func usesOut(uses []string) []store.UseKind {
+	if len(uses) == 0 {
+		return nil
+	}
+	out := make([]store.UseKind, len(uses))
+	for i, u := range uses {
+		out[i] = store.UseKind(u)
+	}
+	return out
 }
 
 // --- message version (immutable) ---------------------------------------

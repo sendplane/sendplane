@@ -71,6 +71,20 @@ func (r *settingsRepo) Update(_ context.Context, v *store.TenantSettings) error 
 	return nil
 }
 
+// --- templates and layouts ---------------------------------------------
+
+type templateRepo struct{ table[store.Template] }
+
+func (r *templateRepo) GetByKey(_ context.Context, key string) (*store.Template, error) {
+	return r.getByKey(key)
+}
+
+type layoutRepo struct{ table[store.Layout] }
+
+func (r *layoutRepo) GetByKey(_ context.Context, key string) (*store.Layout, error) {
+	return r.getByKey(key)
+}
+
 // --- message versions --------------------------------------------------
 
 type versionRepo struct{ table[store.MessageVersion] }

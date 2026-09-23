@@ -227,8 +227,7 @@ type PlatformCatalog struct {
 	UnsubscribeURLTemplate string
 }
 
-// Empty reports whether the catalog defines nothing at all, in which case
-// WithPlatform is not worth wrapping a Provider in.
+// Empty reports whether the catalog defines nothing at all.
 func (c PlatformCatalog) Empty() bool {
 	return len(c.Transports) == 0 && len(c.Domains) == 0 && len(c.Senders) == 0 &&
 		len(c.ProbeMailboxes) == 0 && len(c.BounceMailboxes) == 0 &&
