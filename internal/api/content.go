@@ -428,12 +428,21 @@ func (s *server) ListTemplateI18nKeys(ctx context.Context, req ListTemplateI18nK
 	if err != nil {
 		return nil, err
 	}
-
-	locales := make([]string, 0, len(merged.Locales))
-	for loc := range merged.Locales {
-		locales = append(locales, loc)
+	defaultLocale, err := s.effectiveDefaultLocale(ctx, t, merged.DefaultLocale)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(locales)
+
+	// The locale set is the merged bundle's locales plus the effective
+	// default: a brand-new template has an empty bundle and would otherwise
+	// list zero locales, which made every key look "fully translated"
+	// (nothing to be missing from) instead of missing from the one locale a
+	// send would actually use.
+	localeSet := map[string]struct{}{defaultLocale: {}}
+	for loc := range merged.Locales {
+		localeSet[loc] = struct{}{}
+	}
+	locales := sortedMapKeys(localeSet)
 
 	items := make([]I18nKeyUsage, 0, len(usage))
 	for _, key := range sortedKeys(usage) {
@@ -444,7 +453,11 @@ func (s *server) ListTemplateI18nKeys(ctx context.Context, req ListTemplateI18nK
 		}
 		var missing []string
 		for _, loc := range locales {
-			if _, ok := merged.Locales[loc][key]; !ok {
+			// A locale only counts as covered when the fallback chain a real
+			// render would use (render.LocaleChain) resolves the key, so a
+			// value inherited from the default locale is not reported as
+			// missing here either.
+			if !resolvesKey(merged, render.LocaleChain([]string{loc}, "", defaultLocale), key) {
 				missing = append(missing, loc)
 			}
 		}
@@ -454,10 +467,39 @@ func (s *server) ListTemplateI18nKeys(ctx context.Context, req ListTemplateI18nK
 		items = append(items, u)
 	}
 	return ListTemplateI18nKeys200JSONResponse(I18nKeyList{
-		DefaultLocale: strPtr(merged.DefaultLocale),
+		DefaultLocale: strPtr(defaultLocale),
 		Locales:       &locales,
 		Items:         items,
 	}), nil
+}
+
+// effectiveDefaultLocale is the locale a send actually falls back to when
+// nothing more specific is set: the merged bundle's own default, then the
+// template's (mergedBundle already tries both), then the tenant's configured
+// default, then "en".
+func (s *server) effectiveDefaultLocale(ctx context.Context, t *tenant, mergedDefault string) (string, error) {
+	if mergedDefault != "" {
+		return mergedDefault, nil
+	}
+	settings, err := store.LoadTenantSettings(ctx, t.st, t.id, s.now())
+	if err != nil {
+		return "", err
+	}
+	if settings.DefaultLocale != "" {
+		return settings.DefaultLocale, nil
+	}
+	return "en", nil
+}
+
+// resolvesKey reports whether key has a value in bundle under any locale in
+// chain, most specific first.
+func resolvesKey(bundle store.I18nBundle, chain []string, key string) bool {
+	for _, loc := range chain {
+		if _, ok := bundle.Locales[loc][key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // keyUsage extracts the i18n keys per template part, which is what the editor

@@ -293,15 +293,17 @@ func (s *i18nState) requested() string {
 	return s.chain[0]
 }
 
-// localeChain builds the fallback chain of architecture 6.2. Each requested
+// LocaleChain builds the fallback chain of architecture 6.2. Each requested
 // locale contributes itself and its language subtag, in order, and the
 // version's and bundle's default locales close the chain:
 //
 //	ko-KR -> ko -> (campaign default) -> ... -> version default -> its language
 //
 // What is left when nothing matches is the key itself, which translate
-// handles.
-func localeChain(requested []string, versionDefault, bundleDefault string) []string {
+// handles. Exported so callers outside this package (the API's i18n key
+// listing, in particular) can decide "does this locale resolve this key"
+// with the exact chain a real render would use, instead of re-deriving it.
+func LocaleChain(requested []string, versionDefault, bundleDefault string) []string {
 	var chain []string
 	seen := map[string]struct{}{}
 	add := func(loc string) {

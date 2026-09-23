@@ -185,7 +185,7 @@ func (r *Renderer) PrepareChain(v *store.MessageVersion, locales ...string) (*Pr
 	p := &Prepared{
 		versionID: v.ID,
 		locale:    locale,
-		chain:     localeChain(locales, v.DefaultLocale, v.I18n.DefaultLocale),
+		chain:     LocaleChain(locales, v.DefaultLocale, v.I18n.DefaultLocale),
 		bundle:    v.I18n,
 		bundleSum: bundleChecksum(v.I18n),
 		eng:       r.eng,

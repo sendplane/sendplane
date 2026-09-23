@@ -67,13 +67,21 @@ function matrixRows(wrapper: ReturnType<typeof mount>) {
   return wrapper.findAll('.sp-i18n__table tbody tr')
 }
 
+function cellInput(cell: ReturnType<typeof matrixRows>[number]): string {
+  return (cell.find('textarea').element as HTMLTextAreaElement).value
+}
+
 describe('TemplateEditorPage i18n table', () => {
   it('renders one row per key used by the template, with its locale columns', async () => {
     const { wrapper } = build()
     await flush()
 
     const headers = wrapper.findAll('.sp-i18n__table thead th').map((th) => th.text())
-    expect(headers).toEqual(['Key', 'en', 'ko'])
+    expect(headers[0]).toBe('Key')
+    expect(headers[1]).toBe('en')
+    // `ko` is not the default locale, so its header also carries a remove
+    // control; the exact markup is not the point, just that the tag is there.
+    expect(headers[2]).toContain('ko')
 
     const rows = matrixRows(wrapper)
     expect(rows).toHaveLength(2)
@@ -81,25 +89,28 @@ describe('TemplateEditorPage i18n table', () => {
     expect(rows[0]!.find('th').text()).toContain('subject')
   })
 
-  it('shows a translated value in its own locale without highlighting', async () => {
+  it('shows a translated value in its own locale, editable, without highlighting', async () => {
     const { wrapper } = build()
     await flush()
 
     const ko = matrixRows(wrapper)[0]!.findAll('td')[1]!
-    expect(ko.text()).toBe('환영합니다')
+    expect(cellInput(ko)).toBe('환영합니다')
     expect(ko.classes()).not.toContain('is-missing')
     expect(ko.classes()).not.toContain('is-inherited')
   })
 
-  it('marks a value that only arrives through the fallback chain as inherited', async () => {
+  it('marks a value that only arrives through the fallback chain as inherited, with a placeholder', async () => {
     const { wrapper } = build()
     await flush()
 
     // `cta.label` has no `ko` entry, but the bundle default `en` does, so it
-    // renders greyed rather than as a publish-blocking hole.
+    // renders greyed (as a placeholder an operator can type over) rather than
+    // as a publish-blocking hole.
     const ko = matrixRows(wrapper)[1]!.findAll('td')[1]!
     expect(ko.classes()).toContain('is-inherited')
     expect(ko.attributes('title')).toBe('← en')
+    expect(cellInput(ko)).toBe('')
+    expect(ko.find('textarea').attributes('placeholder')).toBe('Open dashboard')
     expect(wrapper.text()).toContain('Every key is translated.')
   })
 
@@ -117,11 +128,80 @@ describe('TemplateEditorPage i18n table', () => {
     const { wrapper } = build({ get })
     await flush()
 
-    const cells = matrixRows(wrapper)[0]!.findAll('td')
+    // The server only reported `cta.label`, but the fixture's subject still
+    // references `welcome.title`; the client-side scan picks that up too and
+    // adds it as a pending row, so both keys — and all four cells — count.
+    const rows = matrixRows(wrapper)
+    expect(rows).toHaveLength(2)
+
+    const cells = rows[0]!.findAll('td')
     expect(cells[0]!.classes()).toContain('is-missing')
     expect(cells[1]!.classes()).toContain('is-missing')
-    expect(cells[0]!.text()).toBe('missing')
-    expect(wrapper.text()).toContain('2 untranslated')
+    expect(cells[0]!.text()).toContain('missing')
+    expect(wrapper.text()).toContain('4 untranslated')
+
+    const pendingRow = rows[1]!
+    expect(pendingRow.find('th').text()).toContain('welcome.title')
+    expect(pendingRow.find('th').text()).toContain('not saved yet')
+  })
+
+  it('adding a locale adds a column', async () => {
+    const { wrapper } = build()
+    await flush()
+
+    await wrapper.find('input[placeholder="e.g. ko-KR"]').setValue('ja')
+    await wrapper
+      .findAll('button')
+      .find((b) => b.text() === 'Add locale')!
+      .trigger('click')
+    await flush()
+
+    const headers = wrapper.findAll('.sp-i18n__table thead th').map((th) => th.text())
+    expect(headers.some((h) => h.includes('ja'))).toBe(true)
+  })
+
+  it('a key typed into the subject before save appears as a row flagged pending', async () => {
+    const { wrapper } = build()
+    await flush()
+
+    const subjectInput = wrapper
+      .findAll('input')
+      .find((input) => (input.element as HTMLInputElement).value === template.subject)!
+    await subjectInput.setValue(`${template.subject} {% t "brand.new" %}`)
+    await flush()
+
+    const rows = matrixRows(wrapper)
+    const pendingRow = rows.find((row) => row.text().includes('brand.new'))!
+    expect(pendingRow).toBeTruthy()
+    expect(pendingRow.text()).toContain('not saved yet')
+  })
+
+  it('typing into a cell and saving sends the expected PUT body', async () => {
+    const put = vi.fn(async (path: string) => {
+      if (path === '/api/v1/templates/{templateId}/i18n') return { locales: 2, keys: 2 }
+      throw new Error(`unexpected PUT ${path}`)
+    })
+    const { wrapper } = build({ put })
+    await flush()
+
+    const ko = matrixRows(wrapper)[0]!.findAll('td')[1]!
+    await ko.find('textarea').setValue('환영')
+    await flush()
+
+    const saveButton = wrapper.findAll('button').find((b) => b.text() === 'Save translations')!
+    expect(saveButton.attributes('disabled')).toBeUndefined()
+    await saveButton.trigger('click')
+    await flush()
+
+    expect(put).toHaveBeenCalledWith('/api/v1/templates/{templateId}/i18n', {
+      params: { path: { templateId: 't1' } },
+      body: {
+        locales: {
+          en: { 'welcome.title': 'Welcome', 'cta.label': 'Open dashboard' },
+          ko: { 'welcome.title': '환영' },
+        },
+      },
+    })
   })
 })
 
@@ -208,7 +288,11 @@ describe('TemplateEditorPage preview', () => {
     const { wrapper } = build()
     await flush()
 
-    const varsField = wrapper.findAll('textarea')[1]!
+    // The i18n table now contributes its own textareas ahead of the preview
+    // panel, so "sample variables" is no longer a fixed low index; it is
+    // always the second-to-last textarea on the page (recipient JSON is last).
+    const textareas = wrapper.findAll('textarea')
+    const varsField = textareas[textareas.length - 2]!
     await varsField.setValue('{ nope')
     await flush()
 

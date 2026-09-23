@@ -258,8 +258,11 @@ func TestI18nYAMLRoundTripOverHTTP(t *testing.T) {
 func TestI18nKeysReportCoverage(t *testing.T) {
 	e := newEnv(t)
 	tpl := e.seedTemplate()
-	// Drop the Korean translation so the report has something to say.
-	locales := map[string]map[string]string{"en": {"greeting": "Hello"}, "ko": {}}
+	// Both locales explicitly present but neither defines the key: a genuine
+	// gap. (An empty map for a locale on its own means "fall back to the
+	// language", architecture 6.2 — that is not a gap once something else in
+	// the chain resolves it, which is exercised below.)
+	locales := map[string]map[string]string{"en": {}, "ko": {}}
 	e.do(http.MethodPut, "/api/v1/templates/"+tpl.Id.String()+"/i18n",
 		I18nBundle{DefaultLocale: ptr("en"), Locales: &locales})
 
@@ -271,7 +274,65 @@ func TestI18nKeysReportCoverage(t *testing.T) {
 	if got.Items[0].UsedIn == nil || len(*got.Items[0].UsedIn) != 2 {
 		t.Fatalf("used_in = %v, want subject and html", got.Items[0].UsedIn)
 	}
-	if got.Items[0].MissingLocales == nil || (*got.Items[0].MissingLocales)[0] != "ko" {
-		t.Fatalf("missing_locales = %v, want [ko]", got.Items[0].MissingLocales)
+	if got.Items[0].MissingLocales == nil || len(*got.Items[0].MissingLocales) != 2 {
+		t.Fatalf("missing_locales = %v, want [en ko]", got.Items[0].MissingLocales)
+	}
+}
+
+// An untranslated locale that falls back to a locale which *does* define the
+// key is not reported as missing: rendering it would show the inherited
+// value, not a blank. This is what an "empty map means fall back" bundle
+// looks like once it is genuinely covered.
+func TestI18nKeysFallbackIsNotMissing(t *testing.T) {
+	e := newEnv(t)
+	tpl := e.seedTemplate()
+	locales := map[string]map[string]string{"en": {"greeting": "Hello"}, "ko": {}}
+	e.do(http.MethodPut, "/api/v1/templates/"+tpl.Id.String()+"/i18n",
+		I18nBundle{DefaultLocale: ptr("en"), Locales: &locales})
+
+	got := decodeInto[I18nKeyList](t, e.do(http.MethodGet,
+		"/api/v1/templates/"+tpl.Id.String()+"/i18n/keys", nil), http.StatusOK)
+	if len(got.Items) != 1 || got.Items[0].Key != "greeting" {
+		t.Fatalf("keys = %+v", got.Items)
+	}
+	if got.Items[0].MissingLocales != nil {
+		t.Fatalf("missing_locales = %v, want none: ko inherits en's value", *got.Items[0].MissingLocales)
+	}
+}
+
+// A brand-new template's bundle is empty, so the old locale set (derived
+// only from the bundle's own locales) had nothing in it and every key looked
+// "fully translated" for lack of any locale to be missing from. The locale
+// set must include the effective default locale even when the bundle is
+// empty, and a key that is defined nowhere must show up as missing from it.
+func TestI18nKeysMissingLocalesForNewTemplateWithEmptyBundle(t *testing.T) {
+	e := newEnv(t)
+	tpl := decodeInto[Template](t, e.do(http.MethodPost, "/api/v1/templates", TemplateInput{
+		Name: "new", Mode: ContentModeHtml, Subject: `{% t "hello" %}`,
+		Body: `<html><body>{% t "hello" %}</body></html>`,
+	}), http.StatusCreated)
+
+	got := decodeInto[I18nKeyList](t, e.do(http.MethodGet,
+		"/api/v1/templates/"+tpl.Id.String()+"/i18n/keys", nil), http.StatusOK)
+	if len(got.Items) != 1 || got.Items[0].Key != "hello" {
+		t.Fatalf("keys = %+v", got.Items)
+	}
+	if got.DefaultLocale == nil || *got.DefaultLocale == "" {
+		t.Fatalf("default_locale = %v, want a non-empty fallback (tenant default, then \"en\")", got.DefaultLocale)
+	}
+	if got.Locales == nil || len(*got.Locales) == 0 {
+		t.Fatalf("locales = %v, want at least the default locale as a column", got.Locales)
+	}
+	if got.Items[0].MissingLocales == nil {
+		t.Fatalf("missing_locales = nil, want it to list the default locale")
+	}
+	found := false
+	for _, loc := range *got.Items[0].MissingLocales {
+		if loc == *got.DefaultLocale {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing_locales = %v, want it to include default_locale %q", *got.Items[0].MissingLocales, *got.DefaultLocale)
 	}
 }

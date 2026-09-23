@@ -197,9 +197,9 @@ func TestLocaleChain(t *testing.T) {
 		{[]string{"en", "en"}, "en", "en", "en"},
 	}
 	for _, tc := range cases {
-		got := strings.Join(localeChain(tc.requested, tc.version, tc.bundle), ",")
+		got := strings.Join(LocaleChain(tc.requested, tc.version, tc.bundle), ",")
 		if got != tc.want {
-			t.Errorf("localeChain(%v, %q, %q) = %q, want %q", tc.requested, tc.version, tc.bundle, got, tc.want)
+			t.Errorf("LocaleChain(%v, %q, %q) = %q, want %q", tc.requested, tc.version, tc.bundle, got, tc.want)
 		}
 	}
 }

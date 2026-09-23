@@ -32,6 +32,21 @@ export interface I18nMatrix {
 }
 
 /**
+ * What the summary line above the table should say.
+ *
+ * `'empty'` is its own state, distinct from `'complete'`: a template with no
+ * i18n keys at all is not "fully translated", it simply has nothing to
+ * translate, and conflating the two is what made a brand-new template (zero
+ * keys extracted yet, zero locale columns) claim to be complete.
+ */
+export type I18nSummaryKind = 'empty' | 'complete' | 'incomplete'
+
+export function i18nSummaryKind(matrix: I18nMatrix): I18nSummaryKind {
+  if (matrix.rows.length === 0) return 'empty'
+  return matrix.missingTotal === 0 ? 'complete' : 'incomplete'
+}
+
+/**
  * Builds the key x locale table the template editor renders.
  *
  * The fallback chain is the one sending uses (architecture 6.2): the exact
