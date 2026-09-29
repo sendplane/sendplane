@@ -180,6 +180,10 @@ type transportInput struct {
 	RatePerSecond float64 `json:"rate_per_second,omitempty"`
 }
 
+type sendingDomainInput struct {
+	Domain string `json:"domain"`
+}
+
 type senderInput struct {
 	Name        string `json:"name"`
 	FromName    string `json:"from_name,omitempty"`

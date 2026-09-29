@@ -349,6 +349,14 @@ func (r *runner) setup(ctx context.Context) error {
 		return fmt.Errorf("create transport: %w", err)
 	}
 
+	// A sender's from_email has to be on a sending domain the tenant owns, or
+	// the create is 422 from_domain_not_owned (ADR-0017).
+	if err := r.api.postJSON(ctx, "/api/v1/sending-domains", sendingDomainInput{
+		Domain: r.opt.domain,
+	}, &idOnly{}); err != nil {
+		return fmt.Errorf("create sending domain: %w", err)
+	}
+
 	var snd idOnly
 	if err := r.api.postJSON(ctx, "/api/v1/senders", senderInput{
 		Name:        "load",
