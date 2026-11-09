@@ -206,6 +206,13 @@ type Sender struct {
 
 	workers atomic.Int64
 	wg      sync.WaitGroup
+
+	// freed is signalled whenever a worker finishes a job, so a loop that
+	// found every pool full waits for capacity instead of a full
+	// PollInterval while its workers sit idle.
+	freed chan struct{}
+	// full is set by a pass in which some lane/tenant had no capacity.
+	full atomic.Bool
 }
 
 // lane is one lane's worker pool.
@@ -238,6 +245,7 @@ func New(p store.Provider, cfg Config) (*Sender, error) {
 		cfg:      cfg,
 		provider: p,
 		tenants:  map[string]*tenantState{},
+		freed:    make(chan struct{}, 1),
 		health:   newHealthTracker(cfg.TransportFailThreshold, cfg.TransportProbeInterval),
 	}
 	s.pool = NewPool(PoolConfig{
@@ -322,11 +330,17 @@ func (s *Sender) loop(ctx context.Context) error {
 		default:
 		}
 
+		s.full.Store(false)
 		claimed := s.pass(ctx)
 		if claimed == 0 {
+			var freed <-chan struct{}
+			if s.full.Load() {
+				freed = s.freed
+			}
 			select {
 			case <-ctx.Done():
 				return nil
+			case <-freed:
 			case <-time.After(s.cfg.PollInterval):
 			}
 		}
@@ -365,6 +379,7 @@ func (s *Sender) claimInto(ctx context.Context, t *tenantState, l *lane) int {
 	tenantFree := s.cfg.TenantConcurrency - int(t.inflight.Load())
 	limit := min(min(laneFree, tenantFree), s.cfg.ClaimBatch)
 	if limit <= 0 {
+		s.full.Store(true)
 		return 0
 	}
 
@@ -425,6 +440,10 @@ func (s *Sender) worker(ctx context.Context, l *lane) {
 		s.handle(ctx, j)
 		l.inflight.Add(-1)
 		j.t.inflight.Add(-1)
+		select {
+		case s.freed <- struct{}{}:
+		default:
+		}
 	}
 }
 
