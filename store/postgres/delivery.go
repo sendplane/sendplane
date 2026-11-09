@@ -358,7 +358,11 @@ func (r *deliveryRepo) Claim(ctx context.Context, req store.ClaimRequest) ([]sto
 		where += " AND status IN (1, 3) AND campaign_id IS NULL"
 	default:
 		ids := a.add(req.CampaignIDs)
-		where += " AND (campaign_id IS NULL OR campaign_id = ANY(" + ids + "::text[]))" +
+		// The redundant status IN (0, 1, 3) is what lets the planner prove
+		// the delivery_claim partial-index predicate: it cannot derive it
+		// from the OR below, and falls back to a seq scan plus a full sort.
+		where += " AND status IN (0, 1, 3)" +
+			" AND (campaign_id IS NULL OR campaign_id = ANY(" + ids + "::text[]))" +
 			" AND (status IN (1, 3)" +
 			" OR (status = 0 AND campaign_id = ANY(" + ids + "::text[])))"
 	}
