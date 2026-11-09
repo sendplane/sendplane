@@ -194,6 +194,15 @@ type runner struct {
 	versionID  string
 	links      []string
 	exp        expectation
+
+	// lastPolled is the newest campaign the poll loop read successfully. It is
+	// the fallback when the final GET fails, so a failed run still reports the
+	// last counts it saw rather than zeros.
+	lastPolled *campaign
+	// final is what collect read after the run; assert judges this snapshot.
+	final    *campaign
+	chaosErr error
+	linksErr error
 }
 
 func (r *runner) elapsed() time.Duration { return time.Since(r.started).Round(time.Millisecond) }
@@ -228,7 +237,30 @@ func (r *runner) email(i int) string {
 	return fmt.Sprintf("u%08d@%s", i, r.opt.domain)
 }
 
+// execute runs the phases, then measures, then (only for a completed
+// campaign) asserts. Measuring is separate from asserting so that a run that
+// hits its budget still reports what it got done.
 func (r *runner) execute(ctx context.Context) error {
+	runErr := r.runPhases(ctx)
+	if r.campaignID == "" {
+		return runErr
+	}
+	// ctx is the run budget and is already dead when the budget is what ended
+	// the run, so the post-run phase gets its own: a campaign that completes
+	// at 39m59s must still be measured and asserted on. The CI job timeout
+	// leaves room for the two short windows.
+	mctx, cancel := context.WithTimeout(context.Background(), postRunTimeout)
+	defer cancel()
+	r.collect(mctx)
+	if runErr != nil {
+		return runErr
+	}
+	actx, acancel := context.WithTimeout(context.Background(), postRunTimeout)
+	defer acancel()
+	return r.step("assert", func() error { return r.assert(actx) })
+}
+
+func (r *runner) runPhases(ctx context.Context) error {
 	r.logf("loadgen: %d recipients, chunk %d, budget %s, kill-sender=%v",
 		r.opt.recipients, r.opt.chunk, r.opt.budget, r.opt.killSender)
 
@@ -258,10 +290,7 @@ func (r *runner) execute(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	if err := r.step("run campaign", func() error { return r.pollUntilDone(ctx) }); err != nil {
-		return err
-	}
-	return r.step("assert", func() error { return r.assert(ctx) })
+	return r.step("run campaign", func() error { return r.pollUntilDone(ctx) })
 }
 
 func (r *runner) rates() chaossmtp.Rates {
@@ -513,18 +542,27 @@ func (r *runner) replayChunk(ctx context.Context, path string, chunks int) error
 // moves) is a long way from the cause.
 const stallWarnAfter = 60 * time.Second
 
+// postRunTimeout bounds each post-run phase (collect, assert) on its own
+// context. The CI job timeout (45m) leaves about 5m over the 40m run budget.
+const postRunTimeout = 2 * time.Minute
+
 // pollUntilDone polls the campaign until the control finalizer marks it
 // completed, printing the cached counts as they move (architecture 7.3: the
 // aggregate is recomputed by the leader, so it lags by a few seconds and, past
-// 100k rows, by up to a minute).
+// 100k rows, by up to a minute). Because of that lag a per-poll rate reads 0
+// for many polls and then spikes, so the log prints the average since the
+// campaign started and an ETA from it.
 func (r *runner) pollUntilDone(ctx context.Context) error {
 	start := time.Now()
+	// Set on every exit path so an aborted run still has a run duration.
+	defer func() { r.rep.RunSeconds = time.Since(start).Seconds() }()
 	killed := false
 	warnedStall := false
 	movedAt := start
 	var last campaign
 	var prevDone int64
-	prevAt := start
+	changedAt := start
+	sampledAt := time.Time{}
 
 	for {
 		var c campaign
@@ -532,13 +570,28 @@ func (r *runner) pollUntilDone(ctx context.Context) error {
 			r.logf("poll failed (retrying): %v", err)
 		} else {
 			last = c
+			r.lastPolled = &last
 			done := c.count("sent") + c.count("failed") + c.count("suppressed")
 			now := time.Now()
-			rate := float64(done-prevDone) / now.Sub(prevAt).Seconds()
-			prevDone, prevAt = done, now
-			r.logf("status=%s sent=%d failed=%d suppressed=%d in-flight=%d (%.0f msg/s, %.1f%%)",
+			avg := float64(done) / max(now.Sub(start).Seconds(), 1)
+			eta := "n/a"
+			if avg > 0 {
+				eta = (time.Duration(float64(int64(r.opt.recipients)-done)/avg) * time.Second).Round(time.Second).String()
+			}
+			recent := ""
+			if done != prevDone {
+				recent = fmt.Sprintf(", +%d in %s", done-prevDone, now.Sub(changedAt).Round(time.Second))
+				prevDone, changedAt = done, now
+				// One sample a minute, and only when the counts moved, which
+				// is as often as the leader refreshes them anyway.
+				if sampledAt.IsZero() || now.Sub(sampledAt) >= time.Minute {
+					r.addSample(now.Sub(start), done)
+					sampledAt = now
+				}
+			}
+			r.logf("status=%s sent=%d failed=%d suppressed=%d in-flight=%d (%.1f%%, avg %.0f msg/s, eta %s%s)",
 				c.Status, c.count("sent"), c.count("failed"), c.count("suppressed"),
-				c.inFlight(), rate, 100*float64(done)/float64(r.opt.recipients))
+				c.inFlight(), 100*float64(done)/float64(r.opt.recipients), avg, eta, recent)
 
 			if !killed && r.opt.killSender && float64(done) >= r.opt.killAt*float64(r.opt.recipients) {
 				killed = true
@@ -558,10 +611,9 @@ func (r *runner) pollUntilDone(ctx context.Context) error {
 					c.count("pending"), stallWarnAfter)
 			}
 			if c.Status == "completed" && c.inFlight() == 0 {
-				r.rep.RunSeconds = time.Since(start).Seconds()
-				r.rep.ThroughputPerSecond = float64(r.opt.recipients) / r.rep.RunSeconds
+				r.rep.Completed = true
 				r.logf("campaign completed in %s (%.0f msg/s end to end)",
-					time.Since(start).Round(time.Millisecond), r.rep.ThroughputPerSecond)
+					time.Since(start).Round(time.Millisecond), float64(r.opt.recipients)/time.Since(start).Seconds())
 				return nil
 			}
 			if c.Status == "cancelled" || c.Status == "paused" {
@@ -571,12 +623,74 @@ func (r *runner) pollUntilDone(ctx context.Context) error {
 
 		select {
 		case <-ctx.Done():
-			r.rep.RunSeconds = time.Since(start).Seconds()
 			return fmt.Errorf("budget %s exhausted with the campaign still %s (sent=%d failed=%d in-flight=%d)",
 				r.opt.budget, last.Status, last.count("sent"), last.count("failed"), last.inFlight())
 		case <-time.After(r.opt.poll):
 		}
 	}
+}
+
+// maxSamples bounds report.json's progress trend; at one sample a minute it
+// covers the longest budget used, and the final sample is always kept.
+const maxSamples = 60
+
+func (r *runner) addSample(elapsed time.Duration, done int64) {
+	if len(r.rep.Progress) >= maxSamples-1 {
+		return
+	}
+	r.rep.Progress = append(r.rep.Progress, progressSample{ElapsedSeconds: elapsed.Seconds(), Done: done})
+}
+
+// collect gathers every measurement that is meaningful whether or not the run
+// finished. Nothing here fails the run: each source that cannot be read is
+// logged and left at its zero value, and the assertions that depend on it
+// report the gap only for a completed campaign.
+func (r *runner) collect(ctx context.Context) {
+	r.logf("=> collect measurements")
+	var c campaign
+	if err := r.api.getJSON(ctx, "/api/v1/campaigns/"+r.campaignID, &c); err != nil {
+		if r.lastPolled == nil {
+			r.logf("WARNING: final campaign read failed and nothing was polled: %v", err)
+		} else {
+			r.logf("WARNING: final campaign read failed, using the last polled counts: %v", err)
+			c = *r.lastPolled
+			r.final = &c
+		}
+	} else {
+		r.final = &c
+	}
+	if r.final != nil {
+		c := r.final
+		r.rep.Status = c.Status
+		r.rep.ByStatus = map[string]int64{}
+		if c.Stats != nil {
+			r.rep.ByStatus = c.Stats.ByStatus
+		}
+		r.rep.Sent, r.rep.Failed, r.rep.Suppressed = c.count("sent"), c.count("failed"), c.count("suppressed")
+		r.rep.Done = r.rep.Sent + r.rep.Failed + r.rep.Suppressed
+		r.rep.InFlight = c.inFlight()
+		if r.rep.RunSeconds > 0 {
+			// done, not recipients: on an aborted run only this much was sent.
+			r.rep.ThroughputPerSecond = float64(r.rep.Done) / r.rep.RunSeconds
+		}
+		if n := len(r.rep.Progress); n == 0 || r.rep.Progress[n-1].Done != r.rep.Done {
+			r.rep.Progress = append(r.rep.Progress, progressSample{ElapsedSeconds: r.rep.RunSeconds, Done: r.rep.Done})
+		}
+	}
+
+	r.rep.Chaos, r.chaosErr = fetchChaosStats(ctx, r.hc, r.opt.chaosStats)
+	if r.chaosErr != nil {
+		r.logf("WARNING: reading chaos-smtp /stats failed: %v", r.chaosErr)
+	}
+	var links linkClickList
+	if r.linksErr = r.api.getJSON(ctx, "/api/v1/campaigns/"+r.campaignID+"/links", &links); r.linksErr != nil {
+		r.logf("WARNING: reading campaign links failed: %v", r.linksErr)
+	}
+	r.rep.TrackedLinks = len(links.Items)
+	// The two cheap queries first: the latency sample is 200 sequential GETs
+	// against a possibly still busy stack and must not eat their window.
+	r.measureDB(ctx)
+	r.sampleLatency(ctx)
 }
 
 // killAndRestartSender SIGKILLs one sender replica and brings it back, so the
@@ -638,17 +752,15 @@ func (r *runner) composeOutput(ctx context.Context, args ...string) (string, err
 	return string(out), nil
 }
 
+// assert judges the snapshot collect took. It only runs for a completed
+// campaign: on an aborted run the exact-count checks would all fail as a
+// consequence of the one failure already recorded ("run aborted").
 func (r *runner) assert(ctx context.Context) error {
-	var c campaign
-	if err := r.api.getJSON(ctx, "/api/v1/campaigns/"+r.campaignID, &c); err != nil {
-		return fmt.Errorf("read the final campaign: %w", err)
+	c := r.final
+	if c == nil {
+		return errors.New("no final campaign snapshot to assert on")
 	}
-	sent, failed, suppressed := c.count("sent"), c.count("failed"), c.count("suppressed")
-	r.rep.ByStatus = map[string]int64{}
-	if c.Stats != nil {
-		r.rep.ByStatus = c.Stats.ByStatus
-	}
-	r.rep.Sent, r.rep.Failed, r.rep.Suppressed = sent, failed, suppressed
+	sent, failed, suppressed := r.rep.Sent, r.rep.Failed, r.rep.Suppressed
 
 	if c.Status != "completed" {
 		r.fail("campaign is %s, want completed", c.Status)
@@ -671,11 +783,13 @@ func (r *runner) assert(ctx context.Context) error {
 		r.fail("failed = %d, want %d (derived from chaossmtp.Decide)", failed, r.exp.Failed)
 	}
 
-	r.assertChaos(ctx, sent)
+	r.assertChaos(sent)
 	r.assertFailedSample(ctx)
-	r.assertLinks(ctx)
-	r.sampleLatency(ctx)
-	r.measureDB(ctx)
+	if r.linksErr != nil {
+		r.fail("reading campaign links: %v", r.linksErr)
+	} else if r.rep.TrackedLinks == 0 {
+		r.fail("the campaign reports no trackable link, so no delivery went through the click rewrite")
+	}
 	return nil
 }
 
@@ -683,16 +797,17 @@ func (r *runner) assert(ctx context.Context) error {
 // accepted message the campaign does not count as sent is a real double send:
 // chaossmtp decides before it records, so a dropped connection is never
 // recorded and cannot inflate Accepted (internal/chaossmtp/README.md).
-func (r *runner) assertChaos(ctx context.Context, sent int64) {
-	st, err := fetchChaosStats(ctx, r.hc, r.opt.chaosStats)
-	if err != nil {
-		r.fail("reading chaos-smtp /stats failed: %v", err)
+func (r *runner) assertChaos(sent int64) {
+	if r.chaosErr != nil {
+		r.fail("reading chaos-smtp /stats failed: %v", r.chaosErr)
 		return
 	}
-	r.rep.Chaos = st
+	st := r.rep.Chaos
 
+	// Only meaningful at completion: while the run is going the cached
+	// campaign counts lag chaos-smtp by up to a minute.
 	dup := st.Accepted - sent
-	r.rep.DuplicatesFromRecovery = dup
+	r.rep.DuplicatesFromRecovery = &dup
 	switch {
 	case dup < 0:
 		r.fail("chaos-smtp accepted %d messages but the campaign counts %d sent; the relay saw fewer sends than were recorded",
@@ -771,20 +886,6 @@ func (r *runner) assertFailedSample(ctx context.Context) {
 		r.fail("...and %d more failed deliveries that are neither exhausted nor permanent", bad-5)
 	}
 	r.logf("failed-delivery sample: %d rows, %d inconsistent", len(list.Items), bad)
-}
-
-// assertLinks confirms the campaign really published a trackable link, which
-// is what makes the run exercise per-recipient link rewriting.
-func (r *runner) assertLinks(ctx context.Context) {
-	var links linkClickList
-	if err := r.api.getJSON(ctx, "/api/v1/campaigns/"+r.campaignID+"/links", &links); err != nil {
-		r.fail("reading campaign links: %v", err)
-		return
-	}
-	r.rep.TrackedLinks = len(links.Items)
-	if len(links.Items) == 0 {
-		r.fail("the campaign reports no trackable link, so no delivery went through the click rewrite")
-	}
 }
 
 // sampleLatency measures created_at -> sent_at on randomly chosen recipients.

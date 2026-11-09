@@ -68,7 +68,13 @@ Compose 플러그인(`docker compose`) 대신 단독 바이너리만 있는 머�
      `accepted=0, duplicates=청크 크기`.
 4. `start` → 5초마다 폴링하며 상태별 카운트 출력. `--kill-sender` 면 10% 지점에서 sender 컨테이너 하나를
    `docker kill --signal=KILL` 하고 `--kill-downtime` 뒤에 다시 올립니다(lease 회수 경로).
-5. 완료 후 단언 → `report.json` + Markdown 요약.
+   캠페인 집계는 leader 가 약 1분에 한 번 다시 계산하므로 5초 단위 순간 처리량은 0 과 급등을 오갑니다.
+   그래서 로그에는 시작 이후 평균 처리량과 ETA(남은 수 / 평균), 카운트가 마지막으로 움직인 뒤의 증분을 찍습니다.
+5. 실행이 끝나면(성공이든 실패든) **측정**을 먼저 합니다: 최종 캠페인 카운트, chaos-smtp `/stats`, DB 크기,
+   `delivery_attempt` 행 수, 지연 표본, 추적 링크. 예산 ctx 는 이미 취소됐을 수 있으므로 측정과 단언은
+   각각 새 ctx(2분)로 돌립니다. **단언은 캠페인이 완료됐을 때만** 합니다. 예산 초과로 중단되면
+   `run aborted: ...` 한 줄만 실패로 남고, 정확 카운트 단언이 연쇄로 실패하지 않습니다.
+   → `report.json` + Markdown 요약.
 
 ## 단언 목록
 
@@ -116,6 +122,13 @@ sender 는 `X-Sendplane-Attempt` 헤더로 시도 번호를 실어 보냅니다.
 `$GITHUB_STEP_SUMMARY` 에 append). 처리량(msg/s), 인제스트 시간과 행/초, 실행 시간, 상태별 카운트,
 기대값, chaos-smtp 카운터, `duplicates_from_recovery`, `created_at → sent_at` 표본의 p50/p95,
 `delivery_attempt` 행 수, DB 크기, 단계별 소요 시간, 실패한 단언 목록이 들어갑니다.
+
+중단된 실행도 중간 결과를 남깁니다. `report.json` 의 `completed` 가 `false` 면 모든 카운트는 마지막으로
+관측한 상태이고, 요약 제목은 `FAIL (aborted at 38.5% - partial results)` 로 나오며 `done / recipients`
+행에 남은 in-flight 수가 붙습니다. 이때 처리량은 `done / 실행 시간` 입니다(recipients 가 아님).
+`duplicates_from_recovery` 는 완료 시에만 의미가 있어(캐시된 캠페인 카운트가 chaos-smtp 보다 최대 1분
+늦음) 중단된 실행에서는 `null`(요약에는 `n/a`)입니다. `progress` 는 약 1분마다, 카운트가 움직였을 때
+`(elapsed_seconds, done)` 를 최대 60개까지 기록한 추세입니다.
 
 `delivery_attempt` 행 수는 **리포트만 하고 단언하지 않습니다**. `MarkSent` 가 SMTP 250 직후에 먼저
 기록되고 `DeliveryAttempt` 행은 그 뒤 배치 `Complete` 에서 쓰이기 때문에(§8.1), 그 사이에 sender 가

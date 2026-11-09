@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// progressSample is one point of the done-over-time trend; the leader refreshes
+// the counts about once a minute at this size, so finer sampling adds nothing.
+type progressSample struct {
+	ElapsedSeconds float64 `json:"elapsed_seconds"`
+	Done           int64   `json:"done"`
+}
+
 type stepTiming struct {
 	Name    string  `json:"name"`
 	Seconds float64 `json:"seconds"`
@@ -36,16 +43,24 @@ type report struct {
 	ThroughputPerSecond float64 `json:"throughput_msgs_per_second"`
 	TotalSeconds        float64 `json:"total_seconds"`
 
+	// Completed is false when the run aborted; every count below is then the
+	// last observed state, not a final result.
+	Completed  bool             `json:"completed"`
+	Status     string           `json:"campaign_status"`
+	Done       int64            `json:"done"`
+	InFlight   int64            `json:"in_flight"`
+	Progress   []progressSample `json:"progress"`
 	Sent       int64            `json:"sent"`
 	Failed     int64            `json:"failed"`
 	Suppressed int64            `json:"suppressed"`
 	ByStatus   map[string]int64 `json:"by_status"`
 	Expected   expectation      `json:"expected"`
 
-	Chaos                  chaosStats `json:"chaos_smtp"`
-	DuplicatesFromRecovery int64      `json:"duplicates_from_recovery"`
-	SenderKilled           bool       `json:"sender_killed"`
-	SenderRestarted        bool       `json:"sender_restarted"`
+	Chaos chaosStats `json:"chaos_smtp"`
+	// DuplicatesFromRecovery is nil (null) unless the campaign completed.
+	DuplicatesFromRecovery *int64 `json:"duplicates_from_recovery"`
+	SenderKilled           bool   `json:"sender_killed"`
+	SenderRestarted        bool   `json:"sender_restarted"`
 
 	FailedSampleSize   int     `json:"failed_sample_size"`
 	LatencySampleSize  int     `json:"latency_sample_size"`
@@ -73,6 +88,7 @@ func newReport(o options) *report {
 		BudgetSeconds:       o.budget.Seconds(),
 		Failures:            []string{},
 		Steps:               []stepTiming{},
+		Progress:            []progressSample{},
 	}
 }
 
@@ -104,7 +120,9 @@ func (r *report) write(jsonPath, summaryPath string) error {
 func (r *report) markdown() string {
 	var b strings.Builder
 	verdict := "PASS"
-	if len(r.Failures) > 0 {
+	if !r.Completed {
+		verdict = fmt.Sprintf("FAIL (aborted at %.1f%% - partial results)", r.progressPct())
+	} else if len(r.Failures) > 0 {
 		verdict = "FAIL"
 	}
 	fmt.Fprintf(&b, "\n## sendplane load test - %s (%s recipients)\n\n", verdict, humanInt(int64(r.Recipients)))
@@ -114,6 +132,11 @@ func (r *report) markdown() string {
 	fmt.Fprintf(&b, "| ingest | %.1fs (%s rows/s, budget %.0fs) |\n",
 		r.IngestSeconds, humanInt(int64(r.IngestRowsPerSecond)), r.IngestBudgetSeconds)
 	fmt.Fprintf(&b, "| send run | %.1fs (budget %.0fs) |\n", r.RunSeconds, r.BudgetSeconds)
+	progress := fmt.Sprintf("%s / %s (%.1f%%)", humanInt(r.Done), humanInt(int64(r.Recipients)), r.progressPct())
+	if !r.Completed {
+		progress += fmt.Sprintf(", %s in flight", humanInt(r.InFlight))
+	}
+	fmt.Fprintf(&b, "| done / recipients | %s |\n", progress)
 	fmt.Fprintf(&b, "| throughput | %s msg/s |\n", humanInt(int64(r.ThroughputPerSecond)))
 	fmt.Fprintf(&b, "| sent / failed / suppressed | %s / %s / %s |\n",
 		humanInt(r.Sent), humanInt(r.Failed), humanInt(r.Suppressed))
@@ -122,8 +145,12 @@ func (r *report) markdown() string {
 	fmt.Fprintf(&b, "| chaos-smtp accepted / tempfail / permfail / dropped | %s / %s / %s / %s |\n",
 		humanInt(r.Chaos.Accepted), humanInt(r.Chaos.TempFailed),
 		humanInt(r.Chaos.PermFailed), humanInt(r.Chaos.Dropped))
-	fmt.Fprintf(&b, "| duplicates from recovery | %d (sender killed: %v) |\n",
-		r.DuplicatesFromRecovery, r.SenderKilled)
+	if r.DuplicatesFromRecovery != nil {
+		fmt.Fprintf(&b, "| duplicates from recovery | %d (sender killed: %v) |\n",
+			*r.DuplicatesFromRecovery, r.SenderKilled)
+	} else {
+		fmt.Fprintf(&b, "| duplicates from recovery | n/a (sender killed: %v) |\n", r.SenderKilled)
+	}
 	fmt.Fprintf(&b, "| delivery attempts (rows / derived) | %s / %s |\n",
 		humanInt(r.AttemptRows), humanInt(r.Expected.Attempts))
 	fmt.Fprintf(&b, "| created->sent p50 / p95 (n=%d) | %.0f ms / %.0f ms |\n",
@@ -132,7 +159,7 @@ func (r *report) markdown() string {
 	fmt.Fprintf(&b, "| total wall clock | %.1fs |\n", r.TotalSeconds)
 
 	if len(r.ByStatus) > 0 {
-		fmt.Fprintf(&b, "\nFinal delivery statuses: ")
+		fmt.Fprintf(&b, "\n%s delivery statuses: ", map[bool]string{true: "Final", false: "Last observed"}[r.Completed])
 		first := true
 		for _, s := range []string{
 			"pending", "queued", "leased", "deferred", "sent", "failed",
@@ -167,6 +194,13 @@ func (r *report) markdown() string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+func (r *report) progressPct() float64 {
+	if r.Recipients == 0 {
+		return 0
+	}
+	return 100 * float64(r.Done) / float64(r.Recipients)
 }
 
 // humanInt groups digits so a seven-digit count is readable at a glance.
