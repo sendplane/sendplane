@@ -3,7 +3,7 @@
 # full config.yaml schema that .Values.config mirrors.
 
 image:
-  repository: sendplane
+  repository: ghcr.io/sendplane
   # Defaults to .Chart.appVersion when unset.
   tag: ""
   pullPolicy: IfNotPresent
