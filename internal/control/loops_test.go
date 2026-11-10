@@ -521,3 +521,89 @@ func TestFinalizerRefreshWalkIsBoundedAndResumes(t *testing.T) {
 		t.Fatalf("%d of %d campaigns refreshed after four ticks, want all of them", got, n)
 	}
 }
+
+// The secret-expiry loop (ADR-0019) fails every pending secret that is past
+// its expiry, chunk by chunk, and leaves alone a secret still in time, a
+// leased row (its sender checks the expiry itself) and ordinary deliveries.
+func TestSecretExpiryFailsExpiredSecrets(t *testing.T) {
+	_, st, _, c := newFixture(t, host.Hooks{},
+		WithIntervals(Intervals{SecretExpiry: 7 * time.Second}),
+		WithBatches(Batches{SecretExpiryChunk: 2, SecretExpiryMaxChunks: 10}))
+	ctx := context.Background()
+
+	var interval time.Duration
+	for _, s := range c.loopSpecs() {
+		if s.name == "secret-expiry" {
+			interval = s.interval
+		}
+	}
+	if interval != 7*time.Second {
+		t.Fatalf("secret-expiry interval = %v, want the configured 7s (registered: %v)", interval, interval != 0)
+	}
+
+	sensitive := func(expires time.Time) func(*store.Delivery) {
+		return func(d *store.Delivery) {
+			d.Lane = store.LaneTransactional
+			d.SecretState = store.SecretPending
+			d.SecretCiphertext = []byte("ciphertext")
+			d.SecretExpiresAt = expires
+		}
+	}
+	rename := func(prefix string) func(*store.Delivery) {
+		return func(d *store.Delivery) { d.Email = prefix + d.Email; d.EmailNorm = d.Email }
+	}
+	expired := seedDeliveries(t, st, "", store.DeliveryDeferred, 5, sensitive(baseTime.Add(-time.Second)))
+	fresh := seedDeliveries(t, st, "", store.DeliveryQueued, 1, rename("fresh-"), sensitive(baseTime.Add(time.Minute)))
+	leased := seedDeliveries(t, st, "", store.DeliveryLeased, 1, rename("leased-"), sensitive(baseTime.Add(-time.Second)),
+		func(d *store.Delivery) { d.LeaseOwner, d.LeaseUntil = "w", baseTime.Add(time.Minute) })
+	plain := seedDeliveries(t, st, "", store.DeliveryQueued, 1, rename("plain-"))
+
+	loop := &secretExpiry{st: st, log: discardLogger(), cfg: &c.cfg}
+	if err := loop.Tick(ctx, baseTime); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	for _, id := range expired {
+		d, err := st.Deliveries().Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Status != store.DeliveryFailed || d.SecretState != store.SecretExpired ||
+			d.SecretCiphertext != nil || d.LastError != store.SecretExpiredError {
+			t.Errorf("expired %s: status %s secret %s ciphertext %v error %q",
+				id, d.Status, d.SecretState, d.SecretCiphertext != nil, d.LastError)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		id     string
+		status store.DeliveryStatus
+		secret store.SecretState
+	}{
+		{"fresh", fresh[0], store.DeliveryQueued, store.SecretPending},
+		{"leased", leased[0], store.DeliveryLeased, store.SecretPending},
+		{"plain", plain[0], store.DeliveryQueued, store.SecretNone},
+	} {
+		d, err := st.Deliveries().Get(ctx, tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Status != tc.status || d.SecretState != tc.secret {
+			t.Errorf("%s: status %s secret %s, want %s %s", tc.name, d.Status, d.SecretState, tc.status, tc.secret)
+		}
+	}
+
+	// The per-tick budget: one chunk of 2 per tick leaves the rest for later.
+	_, st2, _, c2 := newFixture(t, host.Hooks{},
+		WithBatches(Batches{SecretExpiryChunk: 2, SecretExpiryMaxChunks: 1}))
+	seedDeliveries(t, st2, "", store.DeliveryQueued, 5, sensitive(baseTime.Add(-time.Second)))
+	loop2 := &secretExpiry{st: st2, log: discardLogger(), cfg: &c2.cfg}
+	for tick, want := range []int64{2, 4, 5, 5} {
+		if err := loop2.Tick(ctx, baseTime); err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+		counts, _ := st2.Deliveries().CountByStatus(ctx, "")
+		if counts[store.DeliveryFailed] != want {
+			t.Fatalf("after tick %d: %d failed, want %d", tick+1, counts[store.DeliveryFailed], want)
+		}
+	}
+}

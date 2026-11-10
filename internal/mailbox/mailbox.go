@@ -132,6 +132,11 @@ type Config struct {
 	// the store holds it. Dial decrypts it; nothing else in this package ever
 	// sees the plaintext.
 	Password []byte
+	// PasswordContext is the SecretContext Password was encrypted under: the
+	// row it belongs to (store.BounceMailboxPasswordContext,
+	// store.ProbeMailboxPasswordContext). Decryption fails without the right
+	// one, which is the point; it is unused when there is no cipher.
+	PasswordContext store.SecretContext
 
 	// Folder is the IMAP mailbox to read. Empty means INBOX. POP3 ignores it.
 	Folder string
@@ -257,9 +262,10 @@ func (c Config) dialConn(ctx context.Context) (net.Conn, error) {
 	return tc, nil
 }
 
-// Dial opens the mailbox and authenticates. cipher decrypts cfg.Password; a
-// nil cipher means the password is already plaintext, which is what tests and
-// a host that stores secrets outside sendplane use.
+// Dial opens the mailbox and authenticates. cipher decrypts cfg.Password
+// under cfg.PasswordContext; a nil cipher means the password is already
+// plaintext, which is what tests and a host that stores secrets outside
+// sendplane use.
 func Dial(ctx context.Context, cfg Config, cipher host.SecretCipher) (Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, stageErr(StageConfig, err)
@@ -268,7 +274,7 @@ func Dial(ctx context.Context, cfg Config, cipher host.SecretCipher) (Client, er
 
 	password := cfg.Password
 	if cipher != nil && len(password) > 0 {
-		plain, err := cipher.Decrypt(ctx, password)
+		plain, err := cipher.Decrypt(ctx, password, cfg.PasswordContext)
 		if err != nil {
 			return nil, stageErr(StageConfig, fmt.Errorf("mailbox: decrypt password for %s: %w", cfg.Username, err))
 		}

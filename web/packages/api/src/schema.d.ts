@@ -536,7 +536,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Requeue one delivery */
+        /**
+         * Requeue one delivery
+         * @description Only a finished delivery can be retried (`409 invalid_state`). A
+         *     sensitive delivery (one sent with `secret_vars`) is never retried,
+         *     whatever its state: its secret was consumed or discarded with the
+         *     first attempt, by design (`409 not_retryable`, ADR-0019).
+         */
         post: operations["retryDelivery"];
         delete?: never;
         options?: never;
@@ -778,6 +784,18 @@ export interface paths {
          *     `Idempotency-Key` makes a replay return the original result instead of
          *     sending again. Suppressed recipients come back with status `suppressed`
          *     rather than failing the whole call.
+         *
+         *     A recipient's `secret_vars` carry a value that must not outlive the
+         *     send, such as a one-time code or a password reset link (ADR-0019).
+         *     The template reads them as `{{ secret.* }}`. They are encrypted before
+         *     they are stored, never returned by any endpoint, dropped as soon as the
+         *     delivery is sent or finishes, and expire after `secret_ttl_seconds`.
+         *     A delivery created with them is *sensitive*: it is sent without an
+         *     open pixel or click tracking, it cannot be retried
+         *     (`409 not_retryable`), and a bounce for it keeps no raw message. They
+         *     need a secret cipher on the server (`422 secret_cipher_required`).
+         *     The template has to read `secret.*` and every recipient has to supply
+         *     each key it reads, otherwise `422 validation_failed`.
          */
         post: operations["sendMessage"];
         delete?: never;
@@ -1945,7 +1963,19 @@ export interface components {
              * @description Bumped by a manual retry so the attempt history stays intact.
              */
             retry_gen?: number;
+            /**
+             * Format: date-time
+             * @description When the secret stops being sendable. Absent on a delivery that is not sensitive.
+             */
+            readonly secret_expires_at?: string;
+            secret_state?: components["schemas"]["SecretState"];
             sender_id: components["schemas"]["ResourceId"];
+            /**
+             * @description Whether the delivery was created with `secret_vars` (ADR-0019). A
+             *     sensitive delivery is sent without open or click tracking and is
+             *     never retried. The secret itself is never part of this object.
+             */
+            readonly sensitive?: boolean;
             /** Format: date-time */
             sent_at?: string;
             status: components["schemas"]["DeliveryStatus"];
@@ -2036,7 +2066,7 @@ export interface components {
              *     message.
              * @enum {string}
              */
-            code: "invalid_request" | "invalid_cursor" | "unauthenticated" | "forbidden" | "not_found" | "duplicate" | "version_conflict" | "invalid_state" | "payload_too_large" | "validation_failed" | "limit_exceeded" | "missing_i18n_keys" | "template_not_published" | "render_failed" | "precondition_failed" | "rate_limited" | "platform_read_only" | "sender_use_denied" | "template_use_denied" | "tenant_vars_missing" | "from_domain_not_owned" | "transport_not_assignable" | "internal";
+            code: "invalid_request" | "invalid_cursor" | "unauthenticated" | "forbidden" | "not_found" | "duplicate" | "version_conflict" | "invalid_state" | "payload_too_large" | "validation_failed" | "limit_exceeded" | "missing_i18n_keys" | "template_not_published" | "render_failed" | "precondition_failed" | "rate_limited" | "platform_read_only" | "sender_use_denied" | "template_use_denied" | "tenant_vars_missing" | "from_domain_not_owned" | "transport_not_assignable" | "not_retryable" | "secret_cipher_required" | "internal";
             /** @description Per-field or per-item detail, when the failure has any. */
             details?: components["schemas"]["ErrorDetail"][];
             /** @description Human-readable English explanation; not for display to end users. */
@@ -2293,6 +2323,17 @@ export interface components {
             email: string;
             locale?: string;
             name?: string;
+            /**
+             * @description Values only this recipient may see, read by the template as
+             *     `{{ secret.* }}` and never merged into `vars` (ADR-0019). Stored
+             *     encrypted, never returned, deleted once the delivery is sent or
+             *     finishes. The template must read `secret.*`, and every key it reads
+             *     must be present, otherwise `422 validation_failed`. Capped at 8 KiB
+             *     of JSON per recipient (`422 limit_exceeded`).
+             */
+            secret_vars?: {
+                [key: string]: unknown;
+            };
             /** @description Merged over the request-level `vars`. */
             vars?: components["schemas"]["Vars"];
         };
@@ -2331,6 +2372,16 @@ export interface components {
              * @description Higher is claimed first within the transactional lane; `0` when omitted.
              */
             priority?: number;
+            /**
+             * Format: int32
+             * @description How long the recipients' `secret_vars` stay sendable; `600` (ten
+             *     minutes) when omitted. A delivery
+             *     that has not been sent by then fails with `secret expired`, and a
+             *     retry that would be scheduled after it is not scheduled. Only
+             *     allowed when at least one recipient has `secret_vars`
+             *     (`422 validation_failed` otherwise).
+             */
+            secret_ttl_seconds?: number;
             sender_id: components["schemas"]["ResourceId"];
             /**
              * Format: uuid
@@ -2779,6 +2830,17 @@ export interface components {
             /** Format: int64 */
             requeued: number;
         };
+        /**
+         * @description Lifecycle of a sensitive delivery's `secret_vars` (ADR-0019). `none`
+         *     is every delivery sent without them. The encrypted secret exists only
+         *     while the state is `pending`; it is deleted in the same write that
+         *     moves the delivery to `consumed` (the server accepted the message),
+         *     `discarded` (finished without being sent: a permanent failure, a
+         *     suppression, a cancel) or `expired` (`secret_expires_at` passed first).
+         *     No transition leads back to `pending`.
+         * @enum {string}
+         */
+        SecretState: "none" | "pending" | "consumed" | "discarded" | "expired";
         /**
          * @description A From identity bound to a transport and a sending domain.
          *
@@ -3432,7 +3494,8 @@ export interface components {
         };
         /**
          * @description `version_conflict` (stale `version`), `duplicate` (unique key) or
-         *     `invalid_state` (the object's state does not allow the transition).
+         *     `invalid_state` (the object's state does not allow the transition) or
+         *     `not_retryable` (a sensitive delivery, which is never retried).
          */
         Conflict: {
             headers: {
@@ -3517,7 +3580,7 @@ export interface components {
         /**
          * @description Well-formed but rejected: `validation_failed`, `limit_exceeded`,
          *     `missing_i18n_keys`, `template_not_published`, `render_failed`,
-         *     `precondition_failed`.
+         *     `precondition_failed`, `secret_cipher_required`.
          */
         UnprocessableEntity: {
             headers: {
@@ -3663,6 +3726,7 @@ export type SchemaResourceId = components['schemas']['ResourceId'];
 export type SchemaRetryPolicy = components['schemas']['RetryPolicy'];
 export type SchemaRetryRequest = components['schemas']['RetryRequest'];
 export type SchemaRetryResult = components['schemas']['RetryResult'];
+export type SchemaSecretState = components['schemas']['SecretState'];
 export type SchemaSender = components['schemas']['Sender'];
 export type SchemaSenderHealth = components['schemas']['SenderHealth'];
 export type SchemaSenderInput = components['schemas']['SenderInput'];

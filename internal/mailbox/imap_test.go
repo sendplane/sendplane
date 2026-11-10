@@ -208,8 +208,13 @@ func TestIMAPBadLogin(t *testing.T) {
 // prove Dial decrypts the stored password.
 type staticCipher struct{}
 
-func (staticCipher) Encrypt(_ context.Context, b []byte) ([]byte, error) { return reverse(b), nil }
-func (staticCipher) Decrypt(_ context.Context, b []byte) ([]byte, error) { return reverse(b), nil }
+func (staticCipher) Encrypt(_ context.Context, b []byte, _ store.SecretContext) ([]byte, error) {
+	return reverse(b), nil
+}
+
+func (staticCipher) Decrypt(_ context.Context, b []byte, _ store.SecretContext) ([]byte, error) {
+	return reverse(b), nil
+}
 
 func reverse(b []byte) []byte {
 	out := make([]byte, len(b))

@@ -201,6 +201,13 @@ func (s *server) applyCampaign(ctx context.Context, t *tenant, c *store.Campaign
 	if err := s.checkTemplateUse(ctx, t, tpl, store.UseCampaign, tenantVars); err != nil {
 		return err
 	}
+	pinned := versionID
+	if pinned == "" && tpl != nil {
+		pinned = tpl.PublishedVersionID
+	}
+	if err := s.refuseSecretVersion(ctx, t, pinned); err != nil {
+		return err
+	}
 
 	c.Name = in.Name
 	c.TemplateID = templateID
@@ -329,6 +336,9 @@ func (s *server) StartCampaign(ctx context.Context, req StartCampaignRequestObje
 	// have restricted a shared template to transactional mail since.
 	if c, err := t.st.Campaigns().Get(ctx, req.CampaignId.String()); err == nil {
 		if err := s.checkCampaignTemplateUse(ctx, t, c); err != nil {
+			return nil, err
+		}
+		if err := s.checkCampaignSecretVars(ctx, t, c); err != nil {
 			return nil, err
 		}
 	}

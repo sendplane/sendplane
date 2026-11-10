@@ -911,6 +911,10 @@ type deliveryDoc struct {
 	FirstOpenedAt  *time.Time        `bson:"first_opened_at"`
 	FirstClickedAt *time.Time        `bson:"first_clicked_at"`
 	UnsubscribedAt *time.Time        `bson:"unsubscribed_at"`
+	// SecretCT is null whenever SecretState is not pending (store.Delivery).
+	SecretCT        []byte     `bson:"secret_ct"`
+	SecretExpiresAt *time.Time `bson:"secret_expires_at"`
+	SecretState     int32      `bson:"secret_state"`
 }
 
 func encDelivery(v *store.Delivery) *deliveryDoc {
@@ -930,6 +934,8 @@ func encDelivery(v *store.Delivery) *deliveryDoc {
 		SentAt: encTime(v.SentAt), FinishedAt: encTime(v.FinishedAt),
 		FirstOpenedAt: encTime(v.FirstOpenedAt), FirstClickedAt: encTime(v.FirstClickedAt),
 		UnsubscribedAt: encTime(v.UnsubscribedAt),
+		SecretCT:       v.SecretCiphertext, SecretExpiresAt: encTime(v.SecretExpiresAt),
+		SecretState: int32(v.SecretState),
 	}
 }
 
@@ -949,8 +955,10 @@ func decDelivery(d *deliveryDoc) *store.Delivery {
 		LastError: d.LastError, MessageID: d.MessageID,
 		SentAt: decTime(d.SentAt), FinishedAt: decTime(d.FinishedAt),
 		FirstOpenedAt: decTime(d.FirstOpenedAt), FirstClickedAt: decTime(d.FirstClickedAt),
-		UnsubscribedAt: decTime(d.UnsubscribedAt),
-		CreatedAt:      decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
+		UnsubscribedAt:   decTime(d.UnsubscribedAt),
+		SecretCiphertext: d.SecretCT, SecretExpiresAt: decTime(d.SecretExpiresAt),
+		SecretState: store.SecretState(enum8(d.SecretState)),
+		CreatedAt:   decTime(&d.CreatedAt), UpdatedAt: decTime(d.UpdatedAt),
 	}
 }
 

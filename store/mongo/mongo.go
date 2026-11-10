@@ -533,6 +533,18 @@ func indexes() []index {
 			{Key: "tenant_id", Value: 1}, {Key: "campaign_id", Value: 1},
 			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
 		}},
+		// ExpireSecrets: a tenant's pending secrets in expiry order. Only
+		// pending rows are in it, and those are few and short-lived.
+		{
+			coll: collDelivery, name: "tenant_secret_expiry",
+			keys: bson.D{
+				{Key: "tenant_id", Value: 1}, {Key: "secret_expires_at", Value: 1},
+			},
+			opt: func(b *options.IndexOptionsBuilder) *options.IndexOptionsBuilder {
+				return b.SetPartialFilterExpression(bson.D{
+					{Key: "secret_state", Value: int32(store.SecretPending)}})
+			},
+		},
 		// "Find this address across campaigns" (GET /api/v1/deliveries?email=).
 		// The tenant-wide listing without an address walks listIndex(collDelivery),
 		// which is already (tenant_id, created_at, _id).

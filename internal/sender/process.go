@@ -24,7 +24,26 @@ const internalRetryAfter = 30 * time.Second
 // process runs one delivery end to end and returns the result to commit. A
 // zero DeliveryResult means "commit nothing": the lease was lost, so another
 // replica owns the delivery now.
+//
+// A sensitive delivery (ADR-0019) has its secret opened first, before any
+// configuration is read, and its result settled last (secret.go).
 func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) store.DeliveryResult {
+	if !d.Sensitive() {
+		return s.send(ctx, t, d, nil)
+	}
+	sec, res, ok := s.openSecret(ctx, &d, s.cfg.Clock())
+	if !ok {
+		return res
+	}
+	// The ciphertext has served its purpose; the batch keeps this copy of the
+	// row until the next flush and has no use for it.
+	d.SecretCiphertext = nil
+	return s.settleSensitive(&d, sec, s.send(ctx, t, d, sec))
+}
+
+// send is process after the secret, if any, has been opened. sec is nil for
+// an ordinary delivery.
+func (s *Sender) send(ctx context.Context, t *tenantState, d store.Delivery, sec *secretVars) store.DeliveryResult {
 	started := s.cfg.Clock()
 
 	settings, err := t.tenantSettings(ctx, started)
@@ -51,6 +70,13 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 	version, err := t.version(ctx, versionID, started)
 	if err != nil {
 		return s.configResult(d, "message version", err)
+	}
+	// A delivery without a secret must not render a version that reads
+	// secret.*: those variables would be empty strings, an OTP mail with no
+	// code (ADR-0019). The API and campaign start refuse this earlier; this
+	// is the check that cannot be bypassed.
+	if sec == nil && t.versionReadsSecret(version, started) {
+		return s.failResult(d, store.ErrorClassPermanent, 0, templateRequiresSecretError, started)
 	}
 	snd, err := t.sender(ctx, d.SenderID, started)
 	if err != nil {
@@ -102,8 +128,11 @@ func (s *Sender) process(ctx context.Context, t *tenantState, d store.Delivery) 
 		}
 	}
 
-	msg, unsub, err := s.renderMessage(ctx, t, settings, campaign, version, snd, &d)
+	msg, unsub, err := s.renderMessage(ctx, t, settings, campaign, version, snd, &d, sec)
 	if err != nil {
+		// A template error can quote the value it choked on, and the error
+		// is logged below as well as stored.
+		err = sec.redactErr(err)
 		if ctx.Err() != nil {
 			return s.internalDefer(d, "render", err)
 		}
@@ -266,6 +295,7 @@ func (s *Sender) renderMessage(
 	version *store.MessageVersion,
 	snd *store.Sender,
 	d *store.Delivery,
+	sec *secretVars,
 ) (*host.OutboundMessage, unsubscribeLinks, error) {
 	rc := host.RecipientContext{
 		TenantID: t.id, CampaignID: d.CampaignID, DeliveryID: d.ID,
@@ -292,6 +322,11 @@ func (s *Sender) renderMessage(
 	// events against a mailbox sendplane owns, and an unsubscribe header on it
 	// is meaningless.
 	tracked := d.Lane != store.LaneProbe
+	// A sensitive delivery keeps its unsubscribe link and header, which have
+	// nothing to do with the secret, but gets no open pixel and no rewritten
+	// links: a reset link or a code in a link would otherwise travel through
+	// the click redirect and be stored as a tracking event's URL (ADR-0019).
+	trackEngagement := tracked && !d.Sensitive()
 
 	var unsub unsubscribeLinks
 	var key store.SigningKey
@@ -322,6 +357,9 @@ func (s *Sender) renderMessage(
 		TenantVars:     tenantVars,
 		UnsubscribeURL: unsub.body,
 	}
+	if sec != nil {
+		b.Secret = sec.vars
+	}
 	if campaign != nil {
 		b.Vars = campaign.Vars
 		b.Campaign = render.Campaign{ID: campaign.ID, Name: campaign.Name}
@@ -337,11 +375,11 @@ func (s *Sender) renderMessage(
 	}
 	for _, w := range warnings {
 		s.cfg.Logger.Debug("sendplane: render warning",
-			"delivery", d.ID, "warning", fmt.Sprint(w))
+			"delivery", d.ID, "warning", sec.redact(fmt.Sprint(w)))
 	}
 
 	html := out.HTML
-	if tracked && hasKey && domain != "" {
+	if trackEngagement && hasKey && domain != "" {
 		if settings.Tracking.Clicks {
 			html, err = render.RewriteLinks(html, func(linkNo int, href string) string {
 				token := s.signer.Sign(key.KID, key.Secret, tracking.TokenPayload{
@@ -603,7 +641,7 @@ func (s *Sender) password(ctx context.Context, t *tenantState, tr *store.Transpo
 		if s.cfg.Secrets == nil {
 			return string(tr.Password), nil
 		}
-		plain, err := s.cfg.Secrets.Decrypt(ctx, tr.Password)
+		plain, err := s.cfg.Secrets.Decrypt(ctx, tr.Password, store.TransportPasswordContext(tr))
 		if err != nil {
 			return "", err
 		}
@@ -621,7 +659,7 @@ func (s *Sender) dkimFor(ctx context.Context, t *tenantState, dom *store.Sending
 	k, err := t.dkimKeys.get(key, s.cfg.Clock(), func() (*dkimKey, error) {
 		raw := dom.DKIMPrivateKey
 		if s.cfg.Secrets != nil {
-			plain, err := s.cfg.Secrets.Decrypt(ctx, raw)
+			plain, err := s.cfg.Secrets.Decrypt(ctx, raw, store.DomainDKIMKeyContext(dom))
 			if err != nil {
 				return nil, err
 			}

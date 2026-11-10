@@ -11,8 +11,9 @@ import (
 )
 
 // aesGCMCipher implements host.SecretCipher with AES-256-GCM. The nonce is
-// generated per call and stored as a prefix of the ciphertext, so Decrypt
-// needs nothing but the key.
+// generated per call and stored as a prefix of the ciphertext, and the
+// SecretContext's AAD is the GCM associated data, so a ciphertext only opens
+// for the row it was sealed for.
 type aesGCMCipher struct {
 	gcm cipher.AEAD
 }
@@ -38,21 +39,33 @@ func newAESGCMCipher(key []byte) (*aesGCMCipher, error) {
 	return &aesGCMCipher{gcm: gcm}, nil
 }
 
-func (c *aesGCMCipher) Encrypt(_ context.Context, plaintext []byte) ([]byte, error) {
+func (c *aesGCMCipher) Encrypt(_ context.Context, plaintext []byte, sc host.SecretContext) ([]byte, error) {
 	nonce := make([]byte, c.gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("secrets: encrypt: %w", err)
 	}
-	return c.gcm.Seal(nonce, nonce, plaintext, nil), nil
+	return c.gcm.Seal(nonce, nonce, plaintext, sc.AAD()), nil
 }
 
-func (c *aesGCMCipher) Decrypt(_ context.Context, ciphertext []byte) ([]byte, error) {
+func (c *aesGCMCipher) Decrypt(_ context.Context, ciphertext []byte, sc host.SecretContext) ([]byte, error) {
+	return c.open(ciphertext, sc.AAD())
+}
+
+// decryptLegacy opens a ciphertext sealed before secrets were bound to their
+// row (no associated data). It exists only for `sendplane secrets rewrap`;
+// nothing on the serving path may call it, because accepting an unbound
+// ciphertext there is the very thing the binding is meant to stop.
+func (c *aesGCMCipher) decryptLegacy(_ context.Context, ciphertext []byte) ([]byte, error) {
+	return c.open(ciphertext, nil)
+}
+
+func (c *aesGCMCipher) open(ciphertext, aad []byte) ([]byte, error) {
 	n := c.gcm.NonceSize()
 	if len(ciphertext) < n {
 		return nil, fmt.Errorf("secrets: decrypt: ciphertext shorter than nonce")
 	}
 	nonce, sealed := ciphertext[:n], ciphertext[n:]
-	plaintext, err := c.gcm.Open(nil, nonce, sealed, nil)
+	plaintext, err := c.gcm.Open(nil, nonce, sealed, aad)
 	if err != nil {
 		return nil, fmt.Errorf("secrets: decrypt: %w", err)
 	}

@@ -102,14 +102,17 @@ func PlatformCatalogOf(p Provider) PlatformCatalog {
 func (o *platformProvider) build(cipher SecretCipher) {
 	ctx := context.Background()
 	at := TruncateTime(o.clock())
-	enc := func(what, s string) []byte {
+	// Each secret is encrypted under the context of the virtual entity it is
+	// served on (its "sys:<id>" and SystemTenantID), which is exactly what the
+	// decrypting side reads off the entity it is handed.
+	enc := func(what, s string, sc SecretContext) []byte {
 		if s == "" {
 			return nil
 		}
 		if cipher == nil {
 			return []byte(s)
 		}
-		b, err := cipher.Encrypt(ctx, []byte(s))
+		b, err := cipher.Encrypt(ctx, []byte(s), sc)
 		if err != nil && o.err == nil {
 			o.err = fmt.Errorf("store: encrypting the platform %s secret failed: %w", what, err)
 		}
@@ -117,27 +120,30 @@ func (o *platformProvider) build(cipher SecretCipher) {
 	}
 
 	for _, t := range o.cat.Transports {
-		o.transports = append(o.transports, Transport{
+		v := Transport{
 			ID: t.ID, TenantID: SystemTenantID, Name: t.Name,
 			Host: t.Host, Port: t.Port, TLS: defaultTLS(t.TLS),
-			Username: t.Username, Password: enc("transport "+t.ID, t.Password),
+			Username: t.Username,
 			MaxConns: t.MaxConns, RatePerSecond: t.RatePerSecond,
 			DomainRatePerSecond: maps.Clone(t.DomainRatePerSecond),
 			Shared:              true,
 			Status:              TransportHealthy,
 			CreatedAt:           at, UpdatedAt: at,
-		})
+		}
+		v.Password = enc("transport "+t.ID, t.Password, TransportPasswordContext(&v))
+		o.transports = append(o.transports, v)
 	}
 	for _, d := range o.cat.Domains {
-		o.domains = append(o.domains, SendingDomain{
+		v := SendingDomain{
 			ID: d.ID, TenantID: SystemTenantID, Domain: d.Domain,
 			DKIMSelector:     d.DKIMSelector,
-			DKIMPrivateKey:   enc("domain "+d.ID, d.DKIMPrivateKey),
 			ReturnPathDomain: d.ReturnPathDomain, ExpectedSPF: d.ExpectedSPF,
 			OutboundIPs: append([]string(nil), d.OutboundIPs...),
 			Shared:      true,
 			CreatedAt:   at, UpdatedAt: at,
-		})
+		}
+		v.DKIMPrivateKey = enc("domain "+d.ID, d.DKIMPrivateKey, DomainDKIMKeyContext(&v))
+		o.domains = append(o.domains, v)
 	}
 	for _, s := range o.cat.Senders {
 		o.senders = append(o.senders, Sender{
@@ -154,28 +160,32 @@ func (o *platformProvider) build(cipher SecretCipher) {
 		})
 	}
 	for _, m := range o.cat.ProbeMailboxes {
-		o.probeBoxes = append(o.probeBoxes, ProbeMailbox{
+		v := ProbeMailbox{
 			ID: m.ID, TenantID: SystemTenantID, Name: m.Name,
 			Kind: m.Kind.Normalized(), Address: m.Address,
 			Host: m.Host, Port: m.Port, TLS: defaultTLS(m.TLS),
-			Username: m.Username, Password: enc("probe mailbox "+m.ID, m.Password),
+			Username:    m.Username,
 			InboxFolder: m.InboxFolder, SpamFolder: m.SpamFolder,
 			AuthServID: m.AuthServID, Enabled: enabledOr(m.Enabled, true),
 			Shared:    true,
 			CreatedAt: at, UpdatedAt: at,
-		})
+		}
+		v.Password = enc("probe mailbox "+m.ID, m.Password, ProbeMailboxPasswordContext(&v))
+		o.probeBoxes = append(o.probeBoxes, v)
 	}
 	for _, m := range o.cat.BounceMailboxes {
-		o.bounceBoxes = append(o.bounceBoxes, BounceMailbox{
+		v := BounceMailbox{
 			ID: m.ID, TenantID: SystemTenantID, Name: m.Name,
 			Address: m.Address, Protocol: m.Protocol,
 			Host: m.Host, Port: m.Port, TLS: defaultTLS(m.TLS),
-			Username: m.Username, Password: enc("bounce mailbox "+m.ID, m.Password),
-			Folder: m.Folder, AfterProcess: m.AfterProcess,
+			Username: m.Username,
+			Folder:   m.Folder, AfterProcess: m.AfterProcess,
 			Enabled:   enabledOr(m.Enabled, true),
 			Shared:    true,
 			CreatedAt: at, UpdatedAt: at,
-		})
+		}
+		v.Password = enc("bounce mailbox "+m.ID, m.Password, BounceMailboxPasswordContext(&v))
+		o.bounceBoxes = append(o.bounceBoxes, v)
 	}
 }
 

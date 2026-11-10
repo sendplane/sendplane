@@ -100,7 +100,13 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 	if err := s.checkSharedFrom(snd.ID, snd.Shared, tenantVars); err != nil {
 		return nil, err
 	}
+	secrets, err := s.checkSecretVars(&in, version)
+	if err != nil {
+		return nil, err
+	}
 
+	// A replay returns the stored result and nothing else: it neither
+	// re-encrypts secret_vars nor writes a row (ADR-0019).
 	key := strings.TrimSpace(deref(req.Params.IdempotencyKey))
 	chunkKey := ""
 	if key != "" {
@@ -172,6 +178,11 @@ func (s *server) SendMessage(ctx context.Context, req SendMessageRequestObject) 
 		}
 		if status == store.DeliverySuppressed {
 			d.FinishedAt = now
+		}
+		if r.SecretVars != nil {
+			if err := s.sealSecret(ctx, &d, i, *r.SecretVars, secrets, now); err != nil {
+				return nil, err
+			}
 		}
 		deliveries = append(deliveries, d)
 		items = append(items, MessageResultItem{

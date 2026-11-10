@@ -318,7 +318,12 @@ func (p *Processor) record(ctx context.Context, st store.Store, settings *store.
 			ev.EmailNorm = norm
 		}
 	}
-	if settings.BounceRetainRaw {
+	// A DSN usually carries the original message, or its first part, and the
+	// original of a sensitive delivery is its one-time secret in clear. Such a
+	// bounce is never retained raw, whatever the tenant configured (ADR-0019).
+	// A DSN that correlated to nothing cannot be recognised as one and follows
+	// the setting.
+	if settings.BounceRetainRaw && (d == nil || !d.Sensitive()) {
 		ev.Raw = rawJSON(msg.Raw, p.opts.MaxRawBytes)
 	}
 	if err := st.Bounces().Create(ctx, ev); err != nil {

@@ -73,6 +73,35 @@ func (v DeliveryStatus) Terminal() bool {
 	return false
 }
 
+// SecretState is the lifecycle of a sensitive delivery's secret_vars
+// (ADR-0019). SecretNone is every ordinary delivery; any other value makes the
+// delivery sensitive (Delivery.Sensitive). The ciphertext exists only while
+// the state is SecretPending: every other state is reached in the same write
+// that drops it, and nothing ever moves a delivery back to SecretPending.
+type SecretState int8
+
+const (
+	// SecretNone is a delivery without secret_vars.
+	SecretNone SecretState = iota
+	// SecretPending holds the ciphertext; the message has not gone out yet.
+	SecretPending
+	// SecretConsumed means the secret went to SMTP (the server answered 250).
+	SecretConsumed
+	// SecretDiscarded means the delivery became terminal without being sent:
+	// a permanent failure, a suppression, a cancel.
+	SecretDiscarded
+	// SecretExpired means SecretExpiresAt passed before the message went out.
+	SecretExpired
+)
+
+var secretStateNames = []string{"none", "pending", "consumed", "discarded", "expired"}
+
+func (v SecretState) String() string               { return enumString(v, secretStateNames) }
+func (v SecretState) MarshalText() ([]byte, error) { return enumText(v, secretStateNames) }
+func (v *SecretState) UnmarshalText(b []byte) error {
+	return enumParse(b, secretStateNames, v)
+}
+
 // Lane separates scheduling classes. Transactional is always filled first and
 // probe traffic is excluded from campaign statistics, tracking and
 // suppression (ADR-0012).

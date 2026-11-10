@@ -23,17 +23,26 @@ Run
 
 ## process(d)
 
+0. **sensitive delivery**(`secret_vars`, ADR-0019)면 먼저 비밀을 엽니다: `secret_state != pending` 이거나 암호문이 없으면
+   `secret unavailable`, `secret_expires_at <= now` 면 `secret expired`, cipher가 없거나 `DeliverySecretContext` 로
+   복호화되지 않으면 `secret decrypt failed` — 셋 다 permanent `failed` 이고 렌더도 SMTP도 하지 않습니다(폴백 없음).
+   연 값은 `render.Bindings.Secret`(`{{ secret.* }}`)에만 들어가고 `RecipientContext.Vars`·수신거부 URL 템플릿에는 없습니다.
+   반대로 sensitive가 아닌 delivery의 버전이 `secret.*`를 읽으면(버전별로 한 번만 검사해 캐시) 렌더 전에 `template requires secret_vars`, permanent `failed`로 끝나고 SMTP는 없습니다 — 빈 코드 메일 방지.
 1. 테넌트 설정(짧은 TTL 캐시, `store.LoadTenantSettings` — 행이 없으면 기본값으로 **만들고** 읽습니다) → 캠페인 / MessageVersion(불변, 영구 캐시) / Sender / Transport / SendingDomain
 2. suppression (`SuppressionEnabled` && lane ≠ probe) → `suppressed`. `lane=probe`는 수신거부·클릭 재작성·오픈 픽셀에서도 전부 빠집니다(§11.2, ADR-0012)
 3. transport를 쓸 수 있는지 판정(아래 "transport 상태") — 못 쓰면 delivery는 **queued 유지**(시도 미소모)
 4. 수신거부 목적지: **수신자 변수(`Delivery.UnsubscribeURL` → `Vars["unsubscribe_url"]`) > 테넌트 Liquid 템플릿 > `Hooks.UnsubscribeURL`**
 5. 모드별 링크 결정(아래 표) → `{{ unsubscribe_url }}` 바인딩에 **렌더 전에** 주입
 6. `PrepareChain(version, recipient.locale, campaign.default_locale)` → `Render`
-7. 클릭 재작성(링크마다 토큰) → 오픈 픽셀 삽입 (§9.2)
+7. 클릭 재작성(링크마다 토큰) → 오픈 픽셀 삽입 (§9.2). sensitive delivery는 둘 다 하지 않습니다(수신거부 링크·헤더는 유지)
 8. `Hooks.BeforeSend` — `ErrSkip` → `suppressed`, 그 밖의 에러 → transient(재시도 소모)
 9. MIME 조립 + 헤더 인젝션 검사 + 선택적 DKIM 서명. 커스텀 헤더는 `Delivery.Headers`(POST /messages) + `Vars["probe_token"]`(→ `X-Sendplane-Probe`) + `BeforeSend`가 더한 것이고, 셋 다 같은 화이트리스트(`ValidateCustomHeader`)를 통과해야 합니다
 10. 레이트리밋 대기(transport 버킷, (transport, 수신 도메인) 버킷)
 11. 풀 커넥션으로 전송 → `Classify` → 250이면 **즉시 `MarkSent`**, 결과는 배치 `Complete`
+12. sensitive delivery의 결과는 마지막에 한 번 더 손봅니다(`settleSensitive`): delivery·attempt의 에러 문자열에서
+    비밀 값(그대로·HTML 이스케이프·쿼리 이스케이프, 3바이트 이상)을 `[secret]` 으로 지우고 — Liquid 에러, SMTP 응답,
+    `BeforeSend` 에러는 본문이나 값을 인용할 수 있습니다 — 다음 재시도 시각이 `secret_expires_at` 이후인 deferred는
+    그 자리에서 `failed`(`secret expired`)로 바꿉니다. 렌더 경고 로그도 같은 방식으로 지웁니다.
 
 ### 수신거부 모드 (§9.2)
 
@@ -51,6 +60,7 @@ Run
 |---|---|
 | `sender.go` | `Config`(+기본값), 레인 풀, 라운드로빈 pass, 하트비트, 프로브 |
 | `process.go` | 수신자 1명 파이프라인, 수신거부 해석, 결과 조립 |
+| `secret.go` | sensitive delivery(ADR-0019): 비밀 열기, 결과 정리(에러 문자열 비밀 제거, 만료 후 재시도 차단) |
 | `message.go` | MIME(go-mail), 헤더 화이트리스트/인젝션 검사, DKIM(go-msgauth) |
 | `classify.go` | SMTP 코드·enhanced·본문 → `store.ErrorClass` 규칙 테이블 |
 | `policy.go` | 재시도/백오프/지터, `IncrementAttempt`, auth → queued |

@@ -8,6 +8,8 @@ import (
 
 	"github.com/osteele/liquid"
 
+	"github.com/sendplane/sendplane/internal/render"
+
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -71,6 +73,9 @@ type tenantState struct {
 	transports *cache[*store.Transport]
 	domains    *cache[*store.SendingDomain]
 	versions   *cache[*store.MessageVersion]
+	// readsSecret caches whether a version reads secret.*, by version ID
+	// (immutable, like the version itself).
+	readsSecret *cache[bool]
 	// secrets caches decrypted transport passwords and parsed DKIM keys,
 	// keyed by row ID and Version so a rotation invalidates them.
 	passwords *cache[string]
@@ -94,17 +99,18 @@ type tenantState struct {
 
 func newTenantState(id string, st store.Store, ttl time.Duration) *tenantState {
 	return &tenantState{
-		id:         id,
-		st:         st,
-		settings:   newCache[*store.TenantSettings](ttl),
-		campaigns:  newCache[*store.Campaign](ttl),
-		senders:    newCache[*store.Sender](ttl),
-		transports: newCache[*store.Transport](ttl),
-		domains:    newCache[*store.SendingDomain](ttl),
-		versions:   newCache[*store.MessageVersion](0), // immutable
-		passwords:  newCache[string](0),                // keyed by row version
-		dkimKeys:   newCache[*dkimKey](0),
-		unsubTpl:   newCache[*liquid.Template](0),
+		id:          id,
+		st:          st,
+		settings:    newCache[*store.TenantSettings](ttl),
+		campaigns:   newCache[*store.Campaign](ttl),
+		senders:     newCache[*store.Sender](ttl),
+		transports:  newCache[*store.Transport](ttl),
+		domains:     newCache[*store.SendingDomain](ttl),
+		versions:    newCache[*store.MessageVersion](0), // immutable
+		readsSecret: newCache[bool](0),
+		passwords:   newCache[string](0), // keyed by row version
+		dkimKeys:    newCache[*dkimKey](0),
+		unsubTpl:    newCache[*liquid.Template](0),
 	}
 }
 
@@ -150,4 +156,13 @@ func (t *tenantState) domain(ctx context.Context, id string, now time.Time) (*st
 	return t.domains.get(id, now, func() (*store.SendingDomain, error) {
 		return t.st.Domains().Get(ctx, id)
 	})
+}
+
+// versionReadsSecret reports whether v reads any `secret.*` variable. The
+// answer depends only on the immutable version, so it is scanned once.
+func (t *tenantState) versionReadsSecret(v *store.MessageVersion, now time.Time) bool {
+	reads, _ := t.readsSecret.get(v.ID, now, func() (bool, error) {
+		return len(render.SecretKeys(v)) > 0, nil
+	})
+	return reads
 }

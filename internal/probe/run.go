@@ -912,7 +912,7 @@ func (r *Runner) runDNS(ctx context.Context, st store.Store, senderID string, ob
 			in.DKIMSelector = dom.DKIMSelector
 			in.ReturnPathDomain = dom.ReturnPathDomain
 			if len(dom.DKIMPrivateKey) > 0 && r.opts.Secrets != nil {
-				key, err := r.opts.Secrets.Decrypt(ctx, dom.DKIMPrivateKey)
+				key, err := r.opts.Secrets.Decrypt(ctx, dom.DKIMPrivateKey, store.DomainDKIMKeyContext(dom))
 				if err != nil {
 					r.opts.Logger.Warn("sendplane: cannot decrypt DKIM key",
 						"domain", dom.ID, "err", err)

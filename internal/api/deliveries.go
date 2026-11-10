@@ -183,6 +183,13 @@ func (s *server) RetryDelivery(ctx context.Context, req RetryDeliveryRequestObje
 	if err != nil {
 		return nil, err
 	}
+	// Before the state check, and before Requeue (which skips these rows
+	// anyway): a sensitive delivery's secret is gone after its first attempt,
+	// by design, so no state of it is retryable (ADR-0019).
+	if d.Sensitive() {
+		return nil, errConflict(ErrorCodeNotRetryable,
+			"delivery %s carried secret_vars and is never retried; send a new message instead", d.ID)
+	}
 	if !d.Status.Terminal() {
 		return nil, errConflict(ErrorCodeInvalidState,
 			"delivery %s is %s: only a finished delivery can be retried", d.ID, d.Status)
@@ -238,8 +245,13 @@ func deliveryOut(v *store.Delivery) Delivery {
 		Email:     openapiEmail(v.Email),
 		EmailNorm: strPtr(v.EmailNorm), Name: strPtr(v.Name), Locale: strPtr(v.Locale),
 		Vars: varsOut(v.Vars), TenantVars: varsOut(v.TenantVars),
-		UnsubscribeUrl: strPtr(v.UnsubscribeURL),
-		AttemptCount:   i32(v.AttemptCount), RetryGen: i32(v.RetryGen),
+		// The secret itself (ciphertext or plaintext) is never part of the
+		// representation; these three say only that there is one (ADR-0019).
+		Sensitive:       ptr(v.Sensitive()),
+		SecretState:     ptr(secretStateOut(v.SecretState)),
+		SecretExpiresAt: timePtr(v.SecretExpiresAt),
+		UnsubscribeUrl:  strPtr(v.UnsubscribeURL),
+		AttemptCount:    i32(v.AttemptCount), RetryGen: i32(v.RetryGen),
 		NextAttemptAt: timePtr(v.NextAttemptAt),
 		LeaseOwner:    strPtr(v.LeaseOwner), LeaseUntil: timePtr(v.LeaseUntil),
 		LastError: strPtr(v.LastError),

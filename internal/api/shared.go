@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/sendplane/sendplane/host"
+	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -207,6 +208,39 @@ func (s *server) checkCampaignTemplateUse(ctx context.Context, t *tenant, c *sto
 		tpl = got
 	}
 	return s.checkTemplateUse(ctx, t, tpl, store.UseCampaign, campaignTenantVars(c))
+}
+
+// refuseSecretVersion is the early, friendly half of the rule that a campaign
+// never sends a version reading `secret.*` (ADR-0019): campaign deliveries
+// carry no secret_vars, so those variables would render empty. The sender and
+// control.StartCampaign enforce it too. An empty or missing version is not
+// reported here; the callers and the sender report those.
+func (s *server) refuseSecretVersion(ctx context.Context, t *tenant, versionID string) error {
+	if versionID == "" {
+		return nil
+	}
+	v, err := t.st.Versions().Get(ctx, versionID)
+	if err != nil {
+		return nil //nolint:nilerr // a missing version is reported by the caller or by start
+	}
+	if len(render.SecretKeys(v)) > 0 {
+		return errInvalid("message version %s reads secret.*, which is only available to transactional sends with secret_vars", versionID)
+	}
+	return nil
+}
+
+// checkCampaignSecretVars applies refuseSecretVersion to a campaign about to
+// start: its pinned version, or the one its template has published right now.
+func (s *server) checkCampaignSecretVars(ctx context.Context, t *tenant, c *store.Campaign) error {
+	versionID := c.VersionID
+	if versionID == "" && c.TemplateID != "" {
+		tpl, err := t.st.Templates().Get(ctx, c.TemplateID)
+		if err != nil {
+			return nil //nolint:nilerr // StartCampaign turns a missing template into ErrNoVersion
+		}
+		versionID = tpl.PublishedVersionID
+	}
+	return s.refuseSecretVersion(ctx, t, versionID)
 }
 
 // --- the override endpoints --------------------------------------------

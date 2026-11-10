@@ -23,6 +23,8 @@ cp config.example.yaml config.yaml   # 필요한 값 채우기
 | `--migrate` | - | `false` | 마이그레이션만 실행하고 종료 |
 | `--migrate-on-start` | - | `false` | 역할을 시작하기 전에 마이그레이션 실행 |
 
+서브커맨드는 `sendplane secrets rewrap [--dry-run] [--config <file>]` 하나입니다(아래 "비밀 재암호화").
+
 HTTP 서버는 어떤 역할 조합이든 항상 기동되고 `/healthz`를 응답합니다(쿠버네티스 프로브용). `control`이
 `--roles`에 있으면 `sp.Handler()`(REST API)가 `/`에 마운트되고 `/healthz`는 **그 핸들러가** 스펙대로 JSON으로
 답합니다. control이 없는 sender/bounce 전용 파드에서만 평문 `/healthz`를 따로 등록합니다 — 둘 다 등록하면
@@ -97,6 +99,39 @@ ID(`sendplane_sender_claimed_total{tenant}`)가 들어 있어 공개되면 안 �
 - `probe`: 루프백 헬스 체크 (§11). `hmac_key`(base64)가 있으면 켜지고 `enabled`로 명시적으로 덮을 수 있습니다.
   `nameservers`는 DNS 진단 계층이 직접 질의할 리졸버입니다
 - `limits`: `host.Limits`에 매핑, 0인 필드는 기본값으로 채워집니다
+
+## 비밀 재암호화 (`sendplane secrets rewrap`)
+
+저장된 비밀(transport 비밀번호, DKIM 개인키, 바운스·프로브 메일박스 비밀번호)의 암호문은 자기 행에
+묶여 있습니다: AES-GCM의 associated data로 `store.SecretContext`(용도·테넌트 ID·행 ID)를 넣으므로, DB에
+쓸 수 있는 공격자가 한 행의 암호문을 다른 행(다른 테넌트의 transport 등)에 복사해도 복호화되지 않습니다.
+이 바인딩 **이전** 버전이 쓴 암호문은 associated data 없이 봉인되어 있어서 새 버전에서는 열리지 않으며,
+**런타임 폴백은 없습니다**. 그래서 업그레이드 때 한 번 아래 명령으로 재암호화합니다.
+
+```sh
+./sendplane secrets rewrap --config=config.yaml --dry-run   # 무엇을 바꿀지 보고만 하고 쓰지 않음
+./sendplane secrets rewrap --config=config.yaml             # 실제 재암호화
+```
+
+- 같은 `secrets.key`로 예전 암호문을 associated data 없이 열고, 행의 컨텍스트를 붙여 다시 봉인한 뒤 각
+  저장소의 일반 `Update`(낙관적 `version` 포함)로 씁니다. 이미 바인딩된 행은 건너뛰므로(`already migrated`)
+  몇 번을 다시 돌려도 안전합니다.
+- 모든 테넌트(`Provider.Tenants`)와 `_system` 을 훑습니다. 플랫폼 자원(config.yaml의 공유 릴레이 등)의 비밀은
+  DB에 없으므로 건드리지 않고, `sys:` shadow 행은 건너뜁니다.
+- 출력은 종류별 `migrated / already migrated / failed` 개수와 실패한 행의 `테넌트/ID`·사유뿐이고, 비밀 값은
+  평문이든 암호문이든 출력하지 않습니다. 실패가 하나라도 있으면 0이 아닌 코드로 끝납니다 — 그 행은 키가
+  다르거나 손상된 것이므로 API로 비밀을 다시 설정해야 합니다. 동시 수정으로 인한 `conflict` 실패는 다시
+  돌리면 해결됩니다.
+- 라이브러리로 임베드한 호스트는 같은 일을 `sendplane.RewrapSecrets`로 직접 할 수 있습니다(호스트의 옛
+  `Decrypt`를 `LegacyDecrypter`로 넘깁니다).
+
+업그레이드 순서:
+
+1. 새 버전을 배포하되 sender·bounce 역할은 멈춰 두거나, 아직 비밀이 필요한 작업이 돌기 전에 진행합니다
+   (폴백이 없으므로 재암호화 전의 sender는 transport 비밀번호를 복호화하지 못하고 배송을 재대기열에 넣습니다).
+2. `--migrate`(또는 `--migrate-on-start`)로 스키마를 올립니다.
+3. `sendplane secrets rewrap --dry-run` 으로 개수와 실패를 확인하고, 이어서 `--dry-run` 없이 실행합니다.
+4. 실패 0을 확인한 뒤 sender·bounce 역할을 시작합니다.
 
 ## 운영 콘솔 (cmd/sendplane/console)
 

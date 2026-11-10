@@ -337,3 +337,70 @@ func TestPauseResumeKeepsDeliveriesUntouched(t *testing.T) {
 		t.Fatalf("events = %v, want [campaign.paused campaign.started]", types)
 	}
 }
+
+// A campaign delivery carries no secret_vars, so a version that reads
+// secret.* must never be pinned to a starting campaign (ADR-0019).
+func TestStartCampaignRefusesSecretVersion(t *testing.T) {
+	ctx := context.Background()
+	secretVersion := func(t *testing.T, st store.Store) *store.MessageVersion {
+		t.Helper()
+		v := &store.MessageVersion{SubjectTpl: "Your code", HTMLTpl: "<p>{{ secret.code }}</p>", DefaultLocale: "en"}
+		if err := st.Versions().Create(ctx, v); err != nil {
+			t.Fatalf("Versions.Create: %v", err)
+		}
+		return v
+	}
+
+	t.Run("pinned version", func(t *testing.T) {
+		_, st, _, c := newFixture(t, host.Hooks{})
+		v := secretVersion(t, st)
+		snd := seedSender(t, st)
+		cam := seedCampaign(t, st, store.CampaignDraft, func(c *store.Campaign) { c.VersionID, c.SenderID = v.ID, snd.ID })
+		seedDeliveries(t, st, cam.ID, store.DeliveryPending, 1)
+		if err := c.StartCampaign(ctx, st, cam.ID, time.Time{}); !errors.Is(err, ErrSecretVars) {
+			t.Fatalf("err = %v, want ErrSecretVars", err)
+		}
+		if got := getCampaign(t, st, cam.ID); got.Status != store.CampaignDraft {
+			t.Fatalf("status = %s, want draft left alone", got.Status)
+		}
+	})
+
+	t.Run("published version of the template", func(t *testing.T) {
+		_, st, _, c := newFixture(t, host.Hooks{})
+		v := secretVersion(t, st)
+		tpl := &store.Template{Name: "otp", PublishedVersionID: v.ID}
+		if err := st.Templates().Create(ctx, tpl); err != nil {
+			t.Fatalf("Templates.Create: %v", err)
+		}
+		snd := seedSender(t, st)
+		cam := seedCampaign(t, st, store.CampaignDraft, func(c *store.Campaign) {
+			c.VersionID, c.TemplateID, c.SenderID = "", tpl.ID, snd.ID
+		})
+		seedDeliveries(t, st, cam.ID, store.DeliveryPending, 1)
+		if err := c.StartCampaign(ctx, st, cam.ID, time.Time{}); !errors.Is(err, ErrSecretVars) {
+			t.Fatalf("err = %v, want ErrSecretVars", err)
+		}
+		if got := getCampaign(t, st, cam.ID); got.Status != store.CampaignDraft || got.VersionID != "" {
+			t.Fatalf("campaign = %s / %q, want an unstarted draft with no pinned version", got.Status, got.VersionID)
+		}
+	})
+
+	t.Run("scheduled campaign stays scheduled", func(t *testing.T) {
+		_, st, clk, c := newFixture(t, host.Hooks{})
+		v := secretVersion(t, st)
+		tpl := &store.Template{Name: "otp", PublishedVersionID: v.ID}
+		if err := st.Templates().Create(ctx, tpl); err != nil {
+			t.Fatalf("Templates.Create: %v", err)
+		}
+		cam := seedCampaign(t, st, store.CampaignScheduled, func(c *store.Campaign) {
+			c.VersionID, c.TemplateID = "", tpl.ID
+		})
+		loop := &scheduler{st: st, log: discardLogger(), page: c.cfg.batches.CampaignPage}
+		if err := loop.Tick(ctx, clk.Now()); err != nil {
+			t.Fatalf("Tick: %v", err)
+		}
+		if got := getCampaign(t, st, cam.ID); got.Status != store.CampaignScheduled {
+			t.Fatalf("status = %s, want scheduled (not started)", got.Status)
+		}
+	})
+}

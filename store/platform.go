@@ -76,18 +76,6 @@ func (k UseKind) String() string { return string(k) }
 // the system tenant runs on its own behalf regardless.
 func DefaultSenderUses() []UseKind { return []UseKind{UseCampaign, UseTransactional} }
 
-// SecretCipher encrypts secrets at rest. It is declared here, rather than only
-// in package host, because the platform overlay has to encrypt the passwords
-// it builds virtual entities from so that the existing decrypt paths in
-// internal/sender and internal/bounce work unchanged.
-//
-// host.SecretCipher is an alias of this type, so a host keeps implementing one
-// interface.
-type SecretCipher interface {
-	Encrypt(ctx context.Context, plaintext []byte) ([]byte, error)
-	Decrypt(ctx context.Context, ciphertext []byte) ([]byte, error)
-}
-
 // PlatformTransport is a shared SMTP account. The fields mirror Transport
 // minus the tenant and the runtime state: state is never configured, and
 // configuration is never stored.

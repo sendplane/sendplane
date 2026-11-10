@@ -23,6 +23,11 @@ func TestEnumStrings(t *testing.T) {
 		{store.BounceComplaint, "complaint"},
 		{store.TrackingUnsubscribeClicked, "unsubscribe_clicked"},
 		{store.HealthYellow, "yellow"},
+		{store.SecretNone, "none"},
+		{store.SecretPending, "pending"},
+		{store.SecretConsumed, "consumed"},
+		{store.SecretDiscarded, "discarded"},
+		{store.SecretExpired, "expired"},
 	}
 	for _, tc := range cases {
 		if got := tc.v.String(); got != tc.want {
@@ -86,6 +91,37 @@ func TestDeliveryStatusTerminal(t *testing.T) {
 	} {
 		if !s.Terminal() {
 			t.Errorf("%s must be terminal", s)
+		}
+	}
+}
+
+// The numeric values are the on-disk format (delivery.secret_state), so they
+// are pinned here alongside the wire names.
+func TestSecretStateValues(t *testing.T) {
+	for v, name := range map[store.SecretState]string{
+		0: "none", 1: "pending", 2: "consumed", 3: "discarded", 4: "expired",
+	} {
+		b, err := v.MarshalText()
+		if err != nil || string(b) != name {
+			t.Errorf("MarshalText(%d) = %q, %v; want %q", v, b, err, name)
+		}
+		var back store.SecretState
+		if err := back.UnmarshalText([]byte(name)); err != nil || back != v {
+			t.Errorf("UnmarshalText(%q) = %d, %v; want %d", name, back, err, v)
+		}
+	}
+	var bad store.SecretState
+	if err := bad.UnmarshalText([]byte("used")); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("UnmarshalText unknown = %v, want ErrInvalid", err)
+	}
+	if (&store.Delivery{}).Sensitive() {
+		t.Error("a delivery without a secret state is sensitive")
+	}
+	for _, s := range []store.SecretState{
+		store.SecretPending, store.SecretConsumed, store.SecretDiscarded, store.SecretExpired,
+	} {
+		if !(&store.Delivery{SecretState: s}).Sensitive() {
+			t.Errorf("a delivery in secret state %s is not sensitive", s)
 		}
 	}
 }

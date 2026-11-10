@@ -36,7 +36,9 @@ func (s *server) CreateTransport(ctx context.Context, req CreateTransportRequest
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	tr := &store.Transport{}
+	// The ID is assigned here, not by the store, because the password is
+	// encrypted bound to it (store.TransportPasswordContext).
+	tr := &store.Transport{ID: store.NewID(), TenantID: t.id}
 	if err := s.applyTransport(ctx, tr, TransportUpdate{
 		Name: req.Body.Name, Host: req.Body.Host, Port: req.Body.Port, Tls: req.Body.Tls,
 		Username: req.Body.Username, Password: req.Body.Password, MaxConns: req.Body.MaxConns,
@@ -133,7 +135,7 @@ func (s *server) applyTransport(ctx context.Context, tr *store.Transport, in Tra
 	if err != nil {
 		return err
 	}
-	pw, err := s.secret(ctx, in.Password, tr.Password)
+	pw, err := s.secret(ctx, in.Password, tr.Password, store.TransportPasswordContext(tr))
 	if err != nil {
 		return err
 	}
@@ -500,7 +502,9 @@ func (s *server) CreateSendingDomain(ctx context.Context, req CreateSendingDomai
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	d := &store.SendingDomain{}
+	// Assigned here for the same reason as a transport's: the DKIM key is
+	// encrypted bound to the row ID.
+	d := &store.SendingDomain{ID: store.NewID(), TenantID: t.id}
 	if err := s.applyDomain(ctx, d, SendingDomainUpdate{
 		Domain: req.Body.Domain, DkimSelector: req.Body.DkimSelector,
 		DkimPrivateKey: req.Body.DkimPrivateKey, ReturnPathDomain: req.Body.ReturnPathDomain,
@@ -572,7 +576,7 @@ func (s *server) applyDomain(ctx context.Context, d *store.SendingDomain, in Sen
 	if err := noCRLF("domain", in.Domain); err != nil {
 		return err
 	}
-	key, err := s.secret(ctx, in.DkimPrivateKey, d.DKIMPrivateKey)
+	key, err := s.secret(ctx, in.DkimPrivateKey, d.DKIMPrivateKey, store.DomainDKIMKeyContext(d))
 	if err != nil {
 		return err
 	}
@@ -634,7 +638,9 @@ func (s *server) CreateProbeMailbox(ctx context.Context, req CreateProbeMailboxR
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	m := &store.ProbeMailbox{}
+	// The ID is assigned here because the password is encrypted bound to it
+	// (store.ProbeMailboxPasswordContext).
+	m := &store.ProbeMailbox{ID: store.NewID(), TenantID: t.id}
 	if err := s.applyMailbox(ctx, m, ProbeMailboxUpdate{
 		Name: req.Body.Name, Kind: req.Body.Kind,
 		Address: req.Body.Address, Host: req.Body.Host, Port: req.Body.Port,
@@ -746,7 +752,7 @@ func (s *server) applyMailbox(ctx context.Context, m *store.ProbeMailbox, in Pro
 	if in.Port == nil || *in.Port <= 0 || *in.Port > 65535 {
 		return errInvalid("port must be between 1 and 65535")
 	}
-	pw, err := s.secret(ctx, in.Password, m.Password)
+	pw, err := s.secret(ctx, in.Password, m.Password, store.ProbeMailboxPasswordContext(m))
 	if err != nil {
 		return err
 	}

@@ -436,3 +436,53 @@ func TestStandardFilters(t *testing.T) {
 		}
 	}
 }
+
+// Secret is reachable as `secret.*` and nowhere else: not through `vars`, not
+// through `recipient.vars`, and a variable of the same name does not shadow
+// it or get shadowed by it (ADR-0019). The HTML part escapes it like any
+// other value.
+func TestSecretBindingIsIsolated(t *testing.T) {
+	v := &store.MessageVersion{
+		ID:         "v-secret",
+		SubjectTpl: `code {{ secret.code }}`,
+		HTMLTpl: `<p>{{ secret.code }}</p><i>{{ vars.code }}|{{ recipient.vars.code }}|{{ vars }}|{{ recipient.vars }}</i>` +
+			`<b>{{ secret.html }}</b>`,
+		TextTpl:       `{{ secret.code }} {{ vars.code }}`,
+		DefaultLocale: "en",
+		I18n:          store.I18nBundle{DefaultLocale: "en"},
+	}
+	p, err := NewRenderer().Prepare(v, "en")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	out, _, err := p.Render(context.Background(), Bindings{
+		Recipient: Recipient{Vars: map[string]any{"code": "recipient-var"}},
+		Vars:      map[string]any{"other": "x"},
+		Secret:    map[string]any{"code": "482913", "html": "<x>"},
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if out.Subject != "code 482913" {
+		t.Errorf("subject = %q", out.Subject)
+	}
+	if !strings.Contains(out.HTML, "<p>482913</p>") || !strings.Contains(out.Text, "482913 recipient-var") {
+		t.Errorf("secret not rendered: html %q text %q", out.HTML, out.Text)
+	}
+	if n := strings.Count(out.HTML, "482913"); n != 1 {
+		t.Errorf("the secret appears %d times in the HTML, want only its own reference: %q", n, out.HTML)
+	}
+	if !strings.Contains(out.HTML, "<b>&lt;x&gt;</b>") {
+		t.Errorf("secret value not HTML-escaped: %q", out.HTML)
+	}
+
+	// Without a Secret (every ordinary delivery, every preview) the binding
+	// renders empty rather than failing.
+	out, _, err = p.Render(context.Background(), Bindings{})
+	if err != nil {
+		t.Fatalf("render without secret: %v", err)
+	}
+	if out.Subject != "code " {
+		t.Errorf("subject without secret = %q", out.Subject)
+	}
+}

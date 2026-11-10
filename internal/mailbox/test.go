@@ -51,7 +51,7 @@ func Test(ctx context.Context, cfg Config, cipher host.SecretCipher) TestResult 
 
 	password := cfg.Password
 	if cipher != nil && len(password) > 0 {
-		plain, err := cipher.Decrypt(ctx, password)
+		plain, err := cipher.Decrypt(ctx, password, cfg.PasswordContext)
 		if err != nil {
 			return res.fail(StageConfig, fmt.Errorf("cannot decrypt the stored password: %w", err), start)
 		}

@@ -20,6 +20,9 @@ type Intervals struct {
 	// OutboxSweep is the slower pass that dispatches the events of tenants
 	// that are not active (see loopSpecs).
 	OutboxSweep time.Duration // default 10s
+	// SecretExpiry is how often sensitive deliveries whose secret ran out
+	// unsent are failed (ADR-0019).
+	SecretExpiry time.Duration // default 1m
 }
 
 // Batches bounds how much work one tick of a loop does, so that a leader stays
@@ -44,6 +47,10 @@ type Batches struct {
 	StatsRefreshScan int // default 2_000
 	// OutboxClaim is the ClaimPending limit per tick.
 	OutboxClaim int // default 100
+	// SecretExpiryChunk is the ExpireSecrets limit per call,
+	// SecretExpiryMaxChunks the number of those calls one tick makes.
+	SecretExpiryChunk     int // default 1_000
+	SecretExpiryMaxChunks int // default 50
 }
 
 // Option configures New. Options are shared by the Leader, the loops and the
@@ -96,6 +103,9 @@ func defaultConfig() config {
 			Retention:   time.Hour,
 			Outbox:      time.Second,
 			OutboxSweep: 10 * time.Second,
+			// Short against the secret TTL (30s to 24h, 10m by default), so
+			// an expired secret is gone within a minute of expiring.
+			SecretExpiry: time.Minute,
 		},
 		batches: Batches{
 			CampaignPage:       200,
@@ -106,6 +116,10 @@ func defaultConfig() config {
 			RetentionMaxChunks: 200,
 			StatsRefreshScan:   2_000,
 			OutboxClaim:        100,
+			// ExpireSecrets writes one row at a time to null the ciphertext,
+			// so a chunk is smaller than a delete chunk.
+			SecretExpiryChunk:     1_000,
+			SecretExpiryMaxChunks: 50,
 		},
 		outboxWorkers:         8,
 		outboxLease:           time.Minute,
@@ -170,6 +184,7 @@ func WithIntervals(iv Intervals) Option {
 		setDur(&c.intervals.Retention, iv.Retention)
 		setDur(&c.intervals.Outbox, iv.Outbox)
 		setDur(&c.intervals.OutboxSweep, iv.OutboxSweep)
+		setDur(&c.intervals.SecretExpiry, iv.SecretExpiry)
 	}
 }
 
@@ -184,6 +199,8 @@ func WithBatches(b Batches) Option {
 		setInt(&c.batches.RetentionMaxChunks, b.RetentionMaxChunks)
 		setInt(&c.batches.StatsRefreshScan, b.StatsRefreshScan)
 		setInt(&c.batches.OutboxClaim, b.OutboxClaim)
+		setInt(&c.batches.SecretExpiryChunk, b.SecretExpiryChunk)
+		setInt(&c.batches.SecretExpiryMaxChunks, b.SecretExpiryMaxChunks)
 	}
 }
 

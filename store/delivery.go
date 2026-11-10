@@ -8,6 +8,22 @@ import (
 // Delivery is one recipient of one MessageVersion, and at the same time the
 // queue item senders claim (ADR-0002, ADR-0003). It has no Version field: all
 // of its transitions are CAS on status/lease, not optimistic concurrency.
+//
+// A delivery created with secret_vars is sensitive (ADR-0019): SecretState is
+// not SecretNone, and while it is SecretPending SecretCiphertext holds the
+// encrypted secret. Every backend keeps one invariant for it:
+//
+//	Whenever a delivery leaves SecretPending, SecretCiphertext becomes nil in
+//	the same write. No write sets another state and keeps the ciphertext, and
+//	no write moves a delivery back to SecretPending.
+//
+// Which state it leaves to follows the status the same write sets: consumed
+// when the delivery was sent (MarkSent, or a Complete for a sent row),
+// expired when SecretExpiresAt has passed (ExpireSecrets, or a terminal
+// Complete after it), discarded for any other terminal status (a permanent
+// failure, a cancel, a row inserted already suppressed). A non-terminal
+// transition (deferred, a released lease) keeps the secret for the next
+// attempt.
 type Delivery struct {
 	ID       string
 	TenantID string
@@ -43,6 +59,16 @@ type Delivery struct {
 	// rather than storing something that would fail at send time.
 	Headers map[string]string
 
+	// SecretCiphertext is the delivery's secret_vars, sealed by the API with
+	// DeliverySecretContext. The store keeps it opaque and only ever drops it
+	// (see the invariant above); nothing outside the sender's render path
+	// reads it, and the API never returns it.
+	SecretCiphertext []byte
+	// SecretExpiresAt is when a pending secret stops being sendable. Zero
+	// means no expiry; the API always sets one for a sensitive delivery.
+	SecretExpiresAt time.Time
+	SecretState     SecretState
+
 	// AttemptCount is consumed by transient/rate_limited attempts only.
 	AttemptCount int
 	// RetryGen is bumped by a manual retry so that history stays intact.
@@ -69,6 +95,16 @@ type Delivery struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// Sensitive reports whether the delivery was created with secret_vars
+// (ADR-0019), in any secret state. A sensitive delivery is never retried
+// manually and is not rendered with open or click tracking.
+func (d *Delivery) Sensitive() bool { return d.SecretState != SecretNone }
+
+// SecretExpiredError is the LastError of a delivery ExpireSecrets failed
+// because its secret ran out before it could be sent. The sender records the
+// same text when it finds an expired secret after a claim.
+const SecretExpiredError = "secret expired"
 
 // DeliveryAttempt is one SMTP attempt. Response codes, errors, the transport
 // used and the duration live here, never on the Delivery.
@@ -194,6 +230,10 @@ type DeliveryRepo interface {
 	// EmailNorm must already be normalized (see NormalizeEmail); an empty one
 	// is ErrInvalid.
 	//
+	// A row inserted in a terminal status (suppressed at ingest) with
+	// SecretState pending is stored as SecretDiscarded without its
+	// ciphertext: a message that will never be sent has no secret to keep.
+	//
 	// The whole batch is validated before anything is written: one bad row
 	// makes the call return (0, ErrInvalid) with no row inserted, so a
 	// rejected chunk can be fixed and re-sent as a whole.
@@ -232,6 +272,13 @@ type DeliveryRepo interface {
 	// Complete applies finished attempts and clears the lease. A result whose
 	// delivery is no longer held by LeaseOwner is ignored, including its
 	// attempt row, which also makes a repeated Complete a no-op.
+	//
+	// A terminal result settles a pending secret in the same write, against
+	// the store's own clock: consumed when the delivery was sent, expired when
+	// SecretExpiresAt is at or before that clock, discarded otherwise. A
+	// non-terminal (deferred) result keeps the secret for the retry; the store
+	// does not turn a deferral past the expiry into a failure, the sender
+	// sends a terminal result for that.
 	Complete(ctx context.Context, results []DeliveryResult) error
 
 	// MarkSent is the fast path recorded right after SMTP 250, before the
@@ -261,7 +308,23 @@ type DeliveryRepo interface {
 
 	// ReleaseExpiredLeases returns leased deliveries whose lease has expired to
 	// deferred (or queued, when nothing was attempted), keeping AttemptCount.
+	//
+	// A pending secret survives it: the sender may have died before SMTP, and
+	// if it died after the 250 but before MarkSent the recipient gets the
+	// message twice. That at-least-once window is the standard one and is
+	// accepted for sensitive deliveries too (ADR-0019).
 	ReleaseExpiredLeases(ctx context.Context, now time.Time, limit int) (int, error)
+
+	// ExpireSecrets fails up to limit deliveries whose secret is still pending
+	// and whose SecretExpiresAt is at or before now: status failed,
+	// FinishedAt and UpdatedAt now, LastErrorClass permanent, LastError
+	// SecretExpiredError, SecretState expired, ciphertext dropped, all in one
+	// write per row. It returns how many it changed, so a caller loops until 0.
+	//
+	// Leased rows are skipped: the sender that holds one checks the expiry
+	// itself after the claim and completes it, and failing it underneath would
+	// race that sender's MarkSent.
+	ExpireSecrets(ctx context.Context, now time.Time, limit int) (int, error)
 
 	// CountByStatus counts one campaign's deliveries, or, for an empty
 	// campaignID, the deliveries without a campaign.
@@ -271,10 +334,18 @@ type DeliveryRepo interface {
 	// can walk a million rows in chunks. An empty from matches any status;
 	// rows already in the target status are never counted, which is what lets
 	// a caller loop until it returns 0.
+	//
+	// Moving a delivery into a terminal status settles a pending secret in the
+	// same write: consumed if the delivery was sent, discarded otherwise.
 	BulkTransition(ctx context.Context, campaignID string, from []DeliveryStatus, to DeliveryStatus, limit int) (int, error)
 
 	// Requeue is the manual retry: matching deliveries go back to queued with
 	// RetryGen bumped and AttemptCount kept.
+	//
+	// It never matches a sensitive delivery (SecretState other than
+	// SecretNone, in any state), whatever the filter says: a message carrying
+	// a one-time secret is not retryable by design (ADR-0019). Non-sensitive
+	// rows the same filter matches are requeued as usual.
 	Requeue(ctx context.Context, f RetryFilter, limit int) (int, error)
 
 	// SetFirstOpened records the first open. It reports changed=false when the
