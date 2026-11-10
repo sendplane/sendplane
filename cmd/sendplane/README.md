@@ -56,6 +56,8 @@ ID(`sendplane_sender_claimed_total{tenant}`)가 들어 있어 공개되면 안 �
 | `sendplane_bounce_platform_suppressed_total` | counter | `reason` |
 | `sendplane_delivery_queue_depth` | gauge | `lane`, `status` |
 | `sendplane_delivery_queue_depth_errors_total` | counter | - |
+| `sendplane_delivery_claimable` | gauge | `lane` |
+| `sendplane_delivery_claimable_errors_total` | counter | - |
 | `sendplane_metrics_dropped_total` | counter | `metric` |
 
 여기에 Go 런타임(`go_*`)과 프로세스(`process_*`) 메트릭이 더해집니다. 히스토그램은 모두 초 단위입니다.
@@ -65,6 +67,12 @@ ID(`sendplane_sender_claimed_total{tenant}`)가 들어 있어 공개되면 안 �
   노출됩니다. control 레플리카마다 **같은 클러스터 전체 값**을 내보내므로 대시보드·알림·KEDA에서는 레플리카
   간에 `sum`이 아니라 `max`로 집계해야 합니다. store가 지원하지 않으면(`errors.ErrUnsupported`) 이 게이지는
   나오지 않고, 읽기 실패 시에는 마지막 정상값을 최대 75초(5 × 15초)까지 유지하며 `_errors_total`이 증가합니다.
+  `pending`에는 예약/일시중지된 캠페인의 행도 들어 있으므로 상태별 대시보드용이며 오토스케일 신호로는 쓰지 않습니다.
+- `sendplane_delivery_claimable{lane}`가 **오토스케일 신호**입니다. sender가 지금 claim할 수 있는 건수로, `DeliveryRepo.Claim`과
+  같은 자격 규칙(기한이 된 `queued`/`deferred` + *running* 캠페인의 기한이 된 `pending`)으로 센 값이며 예약/일시중지된
+  캠페인의 `pending`은 제외됩니다. 등록 위치·15초 캐시·`max` 집계·unsupported/실패 처리는 queue_depth와 같고 읽기는
+  서로 독립입니다(한쪽이 실패해도 다른 쪽은 계속 노출). 3개 레인이 0이라도 항상 노출되며, 읽기 실패는
+  `sendplane_delivery_claimable_errors_total`로 셉니다.
 - `sendplane_metrics_dropped_total`은 익스포터가 거부한 샘플 수입니다(잘못된 이름·레이블, 첫 호출과 다른
   레이블 키 집합, 음수 증가분, counter/histogram 혼용 등). 0이 아니면 코드 버그이며, 이름별로 한 번 경고 로그가
   남습니다.

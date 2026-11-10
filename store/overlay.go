@@ -220,6 +220,11 @@ func (o *platformProvider) QueueDepth(ctx context.Context) ([]QueueDepth, error)
 	return ReadQueueDepth(ctx, o.inner)
 }
 
+// Claimable forwards like QueueDepth does.
+func (o *platformProvider) Claimable(ctx context.Context, now time.Time) ([]LaneCount, error) {
+	return ReadClaimable(ctx, o.inner, now)
+}
+
 func (o *platformProvider) LookupDeliveryTenant(ctx context.Context, deliveryID string) (string, error) {
 	return o.inner.LookupDeliveryTenant(ctx, deliveryID)
 }

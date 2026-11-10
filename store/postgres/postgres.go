@@ -187,6 +187,45 @@ func (p *Provider) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) {
 	return out, mapErr(rows.Err())
 }
 
+// claimableSQL is QueueDepthReader.Claimable as one statement, with
+// deliveryRepo.Claim's predicate for the running set the sender passes it
+// (queued/deferred without a campaign, or any open row of a campaign running
+// in the same tenant). The leading status IN (0, 1, 3) is there for the same
+// reason as in Claim: it lets the planner prove delivery_claim_v2's partial
+// predicate, so the terminal rows are never read. The running campaigns are
+// few, so the IN becomes a hashed subplan over them rather than a join.
+// Measured on PostgreSQL 16 (200k terminal rows, 10k pending of running and
+// 10k of paused campaigns, 3.5k other open rows): bitmap scan of
+// delivery_claim_v2, 9 ms, about 930 buffers.
+const claimableSQL = `SELECT lane, count(*) FROM delivery
+	WHERE status IN (0, 1, 3) AND next_attempt_at <= $1
+	  AND ((status IN (1, 3) AND campaign_id IS NULL)
+	    OR (tenant_id, campaign_id) IN (SELECT tenant_id, id FROM campaign WHERE status = 2))
+	GROUP BY lane ORDER BY lane`
+
+// Claimable counts, per lane, the deliveries a sender could claim at now
+// (store.QueueDepthReader).
+func (p *Provider) Claimable(ctx context.Context, now time.Time) ([]store.LaneCount, error) {
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	rows, err := p.pool.Query(ctx, claimableSQL, tsInNN(now))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []store.LaneCount
+	for rows.Next() {
+		var lane int16
+		var n int64
+		if err := rows.Scan(&lane, &n); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, store.LaneCount{Lane: enumOut[store.Lane](lane), Count: n})
+	}
+	return out, mapErr(rows.Err())
+}
+
 // knownTenantTables are the configuration tables Tenants unions over. They are
 // the small, tenant-keyed ones, each with a (tenant_id, ...) index leading
 // with the column being distinct-ed, so the scan stays cheap; the

@@ -188,6 +188,39 @@ func (p *Provider) QueueDepth(_ context.Context) ([]store.QueueDepth, error) {
 	return out, nil
 }
 
+// Claimable counts, per lane, the deliveries a sender could claim at now
+// (store.QueueDepthReader): each tenant's rows go through claimEligible with
+// that tenant's running campaigns as the set, which is what the sender passes
+// to Claim.
+func (p *Provider) Claimable(_ context.Context, now time.Time) ([]store.LaneCount, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	now = store.TruncateTime(now)
+	counts := map[store.Lane]int64{}
+	for _, d := range p.tenants {
+		running := map[string]bool{}
+		for id, c := range d.campaigns {
+			if c.Status == store.CampaignRunning {
+				running[id] = true
+			}
+		}
+		for _, dl := range d.deliveries {
+			if claimEligible(dl, running, now) {
+				counts[dl.Lane]++
+			}
+		}
+	}
+	out := make([]store.LaneCount, 0, len(counts))
+	for lane, n := range counts {
+		out = append(out, store.LaneCount{Lane: lane, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Lane < out[j].Lane })
+	return out, nil
+}
+
 // Tenants lists every tenant with a settings row or a configuration row
 // (store.Provider).
 func (p *Provider) Tenants(_ context.Context) ([]string, error) {

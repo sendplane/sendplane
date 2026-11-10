@@ -212,6 +212,12 @@ func run(args []string, stdout io.Writer) error {
 			prommetrics.QueueDepthOptions{Logger: logger.With("component", "metrics")})); err != nil {
 			return fmt.Errorf("metrics: %w", err)
 		}
+		// Same rules as queue depth (control only, aggregate with max); this
+		// is the one to autoscale on.
+		if err := exporter.Registry().Register(prommetrics.NewClaimableCollector(sp.Claimable,
+			prommetrics.ClaimableOptions{Logger: logger.With("component", "metrics")})); err != nil {
+			return fmt.Errorf("metrics: %w", err)
+		}
 	}
 
 	return serve(ctx, cfg, flags, roles, sp, exporter, logger)

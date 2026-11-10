@@ -169,6 +169,16 @@ func (s *Sendplane) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) 
 	return store.ReadQueueDepth(ctx, s.opts.Store)
 }
 
+// Claimable returns, per lane, how many deliveries a sender could claim right
+// now (store.QueueDepthReader.Claimable at Options.Clock()). It is the
+// autoscaling signal: unlike QueueDepth it excludes the pending rows of
+// scheduled and paused campaigns and the deferred rows not yet due. Like
+// QueueDepth it returns errors.ErrUnsupported for a store without the
+// capability and queries the store on every call.
+func (s *Sendplane) Claimable(ctx context.Context) ([]store.LaneCount, error) {
+	return store.ReadClaimable(ctx, s.opts.Store, s.opts.Clock())
+}
+
 // Handler returns the router to mount on the host's mux: /api/v1, the public
 // tracking routes under /t and /healthz.
 //

@@ -12,7 +12,8 @@
 // family. Every dropped sample increments sendplane_metrics_dropped_total
 // {metric="<name>"} and the first drop of a name is logged once.
 //
-// NewQueueDepthCollector adds the delivery backlog gauge read from the store.
+// NewQueueDepthCollector and NewClaimableCollector add the delivery backlog
+// gauges read from the store.
 package prommetrics
 
 import (
@@ -140,7 +141,7 @@ func New(o Options) *Exporter {
 }
 
 // Registry returns the registry the Exporter writes to, for registering
-// additional collectors such as NewQueueDepthCollector.
+// additional collectors such as NewQueueDepthCollector and NewClaimableCollector.
 func (e *Exporter) Registry() *prometheus.Registry { return e.reg }
 
 // Handler serves the registry in the Prometheus exposition format. A failing

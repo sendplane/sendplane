@@ -67,6 +67,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Provider) {
 		t.Run("List", func(t *testing.T) { testList(t, p) })
 		t.Run("DeleteBefore", func(t *testing.T) { testDeleteBefore(t, p) })
 		t.Run("QueueDepth", func(t *testing.T) { testQueueDepth(t, p) })
+		t.Run("Claimable", func(t *testing.T) { testClaimable(t, p) })
 	})
 	t.Run("Attempts", func(t *testing.T) { testAttempts(t, p) })
 	t.Run("Suppressions", func(t *testing.T) { testSuppressions(t, p) })

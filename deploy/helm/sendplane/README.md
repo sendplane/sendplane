@@ -43,7 +43,9 @@ helm install my-sendplane deploy/helm/sendplane \
 - `serviceMonitor.enabled=true`는 `metrics.enabled=true`를 요구하며, 아니면 렌더링이 실패합니다. `serviceMonitor.path`는 없습니다
   (바이너리는 `/metrics`만 서빙). `interval`/`scrapeTimeout`/`labels`로 조정합니다.
 - `sendplane_delivery_queue_depth`는 control 파드만 내보내며 모든 replica가 같은 전역 값을 보고하므로 `sum`이 아니라 `max`로
-  집계하세요. `pending`에는 예약/일시중지된 캠페인의 행이 포함됩니다.
+  집계하세요(`sendplane_delivery_claimable`도 마찬가지). 오토스케일(KEDA)에는 sender가 지금 claim할 수 있는 건수인
+  `max by (lane) (sendplane_delivery_claimable{lane="bulk"})`를 쓰세요. `queue_depth`의 `pending`에는 예약/일시중지된
+  캠페인의 행이 포함되므로 상태별 대시보드용입니다.
 
 ## 값 검증
 

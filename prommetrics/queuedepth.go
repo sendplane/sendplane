@@ -2,9 +2,7 @@ package prommetrics
 
 import (
 	"context"
-	"errors"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -12,13 +10,16 @@ import (
 	"github.com/sendplane/sendplane/store"
 )
 
-// Queue depth metric names.
+// Queue depth and claimable metric names.
 const (
 	MetricQueueDepth       = "sendplane_delivery_queue_depth"
 	MetricQueueDepthErrors = "sendplane_delivery_queue_depth_errors_total"
+	MetricClaimable        = "sendplane_delivery_claimable"
+	MetricClaimableErrors  = "sendplane_delivery_claimable_errors_total"
 )
 
-// QueueDepthOptions configures NewQueueDepthCollector. The zero value is
+// QueueDepthOptions configures NewQueueDepthCollector (and, as
+// ClaimableOptions, NewClaimableCollector). The zero value is
 // usable.
 type QueueDepthOptions struct {
 	// MinInterval is how long one store read is reused. Scrapes inside it —
@@ -54,27 +55,8 @@ var (
 )
 
 type queueDepthCollector struct {
-	read     func(context.Context) ([]store.QueueDepth, error)
-	interval time.Duration
-	timeout  time.Duration
-	maxStale time.Duration
-	logger   *slog.Logger
-	now      func() time.Time
-
-	desc   *prometheus.Desc
-	errors prometheus.Counter
-
-	// mu is held across the store read, which is what makes concurrent
-	// scrapes share one query: the second Collect waits, then finds the
-	// result the first one just cached.
-	mu          sync.Mutex
-	attempted   time.Time // last read, successful or not
-	good        []store.QueueDepth
-	goodAt      time.Time
-	lastErr     error
-	unsupported bool
-	warnedAt    time.Time
-	infoOnce    sync.Once
+	*cachedRead[store.QueueDepth]
+	desc *prometheus.Desc
 }
 
 // NewQueueDepthCollector returns a collector exposing
@@ -89,39 +71,18 @@ type queueDepthCollector struct {
 // store.QueueDepthReader) makes the gauge absent; any other error keeps the
 // last good values for up to MaxStale, after which the gauge is absent too,
 // and increments sendplane_delivery_queue_depth_errors_total.
+//
+// Pending includes the rows of scheduled and paused campaigns, so this is a
+// status breakdown for dashboards; use NewClaimableCollector to autoscale.
 func NewQueueDepthCollector(read func(context.Context) ([]store.QueueDepth, error), o QueueDepthOptions) prometheus.Collector {
-	c := &queueDepthCollector{
-		read:     read,
-		interval: o.MinInterval,
-		timeout:  o.Timeout,
-		maxStale: o.MaxStale,
-		logger:   o.Logger,
-		now:      o.now,
+	return &queueDepthCollector{
+		cachedRead: newCachedRead("queue depth", MetricQueueDepth, MetricQueueDepthErrors,
+			"Failed store reads of the delivery queue depth (excluding stores that do not support it).", read, o),
 		desc: prometheus.NewDesc(MetricQueueDepth,
 			"Non-terminal deliveries across all tenants by lane and status, read from the store and cached. "+
 				"Every replica reporting it sees the same value: aggregate with max, not sum.",
 			[]string{"lane", "status"}, nil),
-		errors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: MetricQueueDepthErrors,
-			Help: "Failed store reads of the delivery queue depth (excluding stores that do not support it).",
-		}),
 	}
-	if c.interval <= 0 {
-		c.interval = 15 * time.Second
-	}
-	if c.timeout <= 0 {
-		c.timeout = 5 * time.Second
-	}
-	if c.maxStale <= 0 {
-		c.maxStale = 5 * c.interval
-	}
-	if c.logger == nil {
-		c.logger = slog.Default()
-	}
-	if c.now == nil {
-		c.now = time.Now
-	}
-	return c
 }
 
 func (c *queueDepthCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -136,58 +97,6 @@ func (c *queueDepthCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 	c.errors.Collect(ch)
-}
-
-// snapshot returns the cells to publish, reading the store when the cached
-// attempt is older than MinInterval. ok is false when nothing should be
-// published.
-func (c *queueDepthCollector) snapshot() ([]store.QueueDepth, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	now := c.now()
-	if c.attempted.IsZero() || now.Sub(c.attempted) >= c.interval {
-		c.refresh(now)
-	}
-	if c.unsupported {
-		return nil, false
-	}
-	if c.goodAt.IsZero() || (c.lastErr != nil && now.Sub(c.goodAt) > c.maxStale) {
-		return nil, false
-	}
-	return c.good, true
-}
-
-// refresh reads the store once. c.mu is held.
-func (c *queueDepthCollector) refresh(now time.Time) {
-	c.attempted = now
-	// Collect has no context of its own; the timeout is what keeps a stuck
-	// database from holding the scrape (and every scrape queued behind it).
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-	defer cancel()
-	cells, err := c.read(ctx)
-
-	switch {
-	case err == nil:
-		if c.lastErr != nil && !c.unsupported {
-			c.logger.Info("prommetrics: queue depth read recovered")
-		}
-		c.good, c.goodAt, c.lastErr, c.unsupported = cells, now, nil, false
-	case errors.Is(err, errors.ErrUnsupported):
-		c.lastErr, c.unsupported = err, true
-		c.infoOnce.Do(func() {
-			c.logger.Info("prommetrics: the store does not report queue depth; " +
-				MetricQueueDepth + " is not exported")
-		})
-	default:
-		c.lastErr, c.unsupported = err, false
-		c.errors.Inc()
-		if c.warnedAt.IsZero() || now.Sub(c.warnedAt) >= errorLogEvery {
-			c.warnedAt = now
-			c.logger.Warn("prommetrics: queue depth read failed (logged at most every "+errorLogEvery.String()+")",
-				"error", err, "serving_stale", !c.goodAt.IsZero() && now.Sub(c.goodAt) <= c.maxStale)
-		}
-	}
 }
 
 // metrics builds the gauge samples: the zero-filled grid plus anything else

@@ -27,11 +27,13 @@ spec:
 # CPU is a poor proxy for send backlog: a sender can be CPU-idle while a
 # campaign queues thousands of deliveries (MX slow to accept, rate-limited
 # transport, ...). With metrics.enabled and a Prometheus scraping the
-# ServiceMonitor, a KEDA ScaledObject on sendplane_delivery_queue_depth (a
+# ServiceMonitor, a KEDA ScaledObject on sendplane_delivery_claimable (a
 # gauge exported by the control pods, see docs/architecture.md 12) tracks that
-# directly. Every control replica reports the same cluster-wide value, hence
-# max (not sum) across replicas. `pending` includes rows of scheduled/paused
-# campaigns, so drop it from the regex if those should not trigger scale-out.
+# directly: it counts what a sender could claim right now, including a running
+# campaign's pending backlog and excluding scheduled/paused campaigns. Every
+# control replica reports the same cluster-wide value, hence max (not sum)
+# across replicas. sendplane_delivery_queue_depth{lane,status} stays for
+# dashboards (status breakdown); do not scale on it.
 #
 # apiVersion: keda.sh/v1alpha1
 # kind: ScaledObject
@@ -46,7 +48,7 @@ spec:
 #     - type: prometheus
 #       metadata:
 #         serverAddress: http://prometheus-operated.monitoring:9090
-#         query: sum(max by (lane, status) (sendplane_delivery_queue_depth{lane="bulk", status=~"queued|deferred|pending"}))
+#         query: max by (lane) (sendplane_delivery_claimable{lane="bulk"})
 #         threshold: "5000"
 #
 # Using it instead of the HorizontalPodAutoscaler above: set
