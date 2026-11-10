@@ -169,6 +169,47 @@ func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+var _ store.QueueDepthReader = (*Provider)(nil)
+
+// QueueDepth counts the non-terminal deliveries of every tenant per (lane,
+// status) in one aggregate (store.QueueDepthReader). Shared mode keeps every
+// tenant in one collection, so there is no tenant predicate; the status match
+// can be served by the lease_expiry index, which leads with status.
+func (p *Provider) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) {
+	cur, err := p.db.Collection(collDelivery).Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(openStatuses)}}},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{{Key: "lane", Value: "$lane"}, {Key: "status", Value: "$status"}}},
+			{Key: "n", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id.lane", Value: 1}, {Key: "_id.status", Value: 1}}}},
+	})
+	if err != nil {
+		return nil, wrap("queue depth", err)
+	}
+	var rows []struct {
+		ID struct {
+			Lane   int32 `bson:"lane"`
+			Status int32 `bson:"status"`
+		} `bson:"_id"`
+		N int64 `bson:"n"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, wrap("queue depth", err)
+	}
+	out := make([]store.QueueDepth, len(rows))
+	for i, row := range rows {
+		out[i] = store.QueueDepth{
+			Lane:   store.Lane(enum8(row.ID.Lane)),
+			Status: store.DeliveryStatus(enum8(row.ID.Status)),
+			Count:  row.N,
+		}
+	}
+	return out, nil
+}
+
 // knownTenantCollections are the configuration collections Tenants unions
 // over: the small, tenant-keyed ones (store.Provider.Tenants).
 var knownTenantCollections = []string{

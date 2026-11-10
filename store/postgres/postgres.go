@@ -144,6 +144,49 @@ func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
 	return out, mapErr(rows.Err())
 }
 
+var _ store.QueueDepthReader = (*Provider)(nil)
+
+// QueueDepth counts the non-terminal deliveries of every tenant per (lane,
+// status) in one statement (store.QueueDepthReader).
+//
+// The predicate is spelled as the two partial-index predicates OR-ed, not as
+// status IN (0, 1, 2, 3): the planner only uses a partial index whose
+// predicate the WHERE clause implies, and an IN list implies neither
+// delivery_claim_v2 (status IN (0, 1, 3)) nor delivery_lease (status = 2), so
+// it falls back to a sequential scan of every terminal row. Split, it
+// BitmapOr-s the two indexes and reads only the heap pages that hold open rows.
+// Measured on PostgreSQL 16 with 3M terminal and 60k open rows: 18 ms and 1.9k
+// buffers against 507 ms and 56k for the IN form when the open rows are
+// clustered (as freshly ingested chunks are); when every open row sits on its
+// own heap page both shapes read the whole heap and cost about the same. It
+// is a scrape-interval query, so that worst case does not justify an extra
+// (lane, status) index on the claim path's write side.
+func (p *Provider) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) {
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	const q = `SELECT lane, status, count(*) FROM delivery
+	           WHERE status IN (0, 1, 3) OR status = 2
+	           GROUP BY lane, status ORDER BY lane, status`
+	rows, err := p.pool.Query(ctx, q)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []store.QueueDepth
+	for rows.Next() {
+		var lane, status int16
+		var n int64
+		if err := rows.Scan(&lane, &status, &n); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, store.QueueDepth{
+			Lane: enumOut[store.Lane](lane), Status: enumOut[store.DeliveryStatus](status), Count: n,
+		})
+	}
+	return out, mapErr(rows.Err())
+}
+
 // knownTenantTables are the configuration tables Tenants unions over. They are
 // the small, tenant-keyed ones, each with a (tenant_id, ...) index leading
 // with the column being distinct-ed, so the scan stays cheap; the

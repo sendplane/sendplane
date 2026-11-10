@@ -19,6 +19,7 @@ cp config.example.yaml config.yaml   # 필요한 값 채우기
 | `--config` | `SENDPLANE_CONFIG` | `config.yaml` | 설정 파일 경로 |
 | `--roles` | `SENDPLANE_ROLES` | `control,sender,bounce` | 실행할 역할(쉼표 구분) |
 | `--listen` | - | `:8080` | HTTP 서버 주소 |
+| `--metrics-listen` | `SENDPLANE_METRICS_LISTEN` | `""`(끔) | Prometheus `GET /metrics`를 서빙할 **별도** HTTP 서버 주소. `--listen`과 같으면 기동 거부 |
 | `--migrate` | - | `false` | 마이그레이션만 실행하고 종료 |
 | `--migrate-on-start` | - | `false` | 역할을 시작하기 전에 마이그레이션 실행 |
 
@@ -26,6 +27,47 @@ HTTP 서버는 어떤 역할 조합이든 항상 기동되고 `/healthz`를 응�
 `--roles`에 있으면 `sp.Handler()`(REST API)가 `/`에 마운트되고 `/healthz`는 **그 핸들러가** 스펙대로 JSON으로
 답합니다. control이 없는 sender/bounce 전용 파드에서만 평문 `/healthz`를 따로 등록합니다 — 둘 다 등록하면
 `net/http` mux가 더 구체적인 `/healthz`를 골라 API 라우트를 가려 버립니다.
+
+## 메트릭
+
+`--metrics-listen`(예: `:9090`)을 주면 [`prommetrics`](../../prommetrics) 익스포터가 `Options.Metrics`로 연결되고,
+**모든 역할**에서 그 주소의 별도 HTTP 서버가 `GET /metrics`만 응답합니다. 기본값이 꺼짐인 이유는 `make dev`가 한
+호스트에서 역할별 프로세스 셋을 띄우기 때문입니다 — 고정 기본 포트는 서로 충돌합니다. Helm 차트는
+`--metrics-listen=:9090`을 넘깁니다.
+
+메인 리스너(`--listen`)와 포트를 나누는 것이 핵심입니다. 메인 리스너는 Ingress로 공개되는데, 메트릭에는 테넌트
+ID(`sendplane_sender_claimed_total{tenant}`)가 들어 있어 공개되면 안 됩니다. 그래서 메인 mux는 `/metrics`를
+등록하지 않고, 두 주소가 같은 소켓을 가리키면(`:9090`과 `0.0.0.0:9090` 포함) 기동 시 에러를 냅니다. 두 서버는
+같은 errgroup에서 같은 `ReadHeaderTimeout`과 30초 드레인으로 함께 기동·종료됩니다.
+
+| 메트릭 | 종류 | 레이블 |
+|---|---|---|
+| `sendplane_sender_claimed_total` | counter | `lane`, `tenant` |
+| `sendplane_sender_processed_total` | counter | `status`, `class` |
+| `sendplane_sender_render_seconds` | histogram | - |
+| `sendplane_sender_smtp_seconds` | histogram | `transport`, `class` |
+| `sendplane_sender_limiter_wait_seconds` | histogram | `transport` |
+| `sendplane_sender_conn_opened_total` | counter | `transport` |
+| `sendplane_sender_conn_closed_total` | counter | - |
+| `sendplane_sender_transport_status_total` | counter | `transport`, `status` |
+| `sendplane_bounce_handled_total` | counter | `type`, `status` |
+| `sendplane_bounce_skipped_total` | counter | `reason` |
+| `sendplane_bounce_poll_errors_total` | counter | `phase` |
+| `sendplane_bounce_platform_suppressed_total` | counter | `reason` |
+| `sendplane_delivery_queue_depth` | gauge | `lane`, `status` |
+| `sendplane_delivery_queue_depth_errors_total` | counter | - |
+| `sendplane_metrics_dropped_total` | counter | `metric` |
+
+여기에 Go 런타임(`go_*`)과 프로세스(`process_*`) 메트릭이 더해집니다. 히스토그램은 모두 초 단위입니다.
+
+- `sendplane_delivery_queue_depth`는 **control 역할에서만** 등록됩니다. 전 테넌트 합계의 비종료 상태
+  (pending/queued/leased/deferred) 건수를 store에서 읽어 15초간 캐시하며, 3개 레인 × 4개 상태가 0이라도 항상
+  노출됩니다. control 레플리카마다 **같은 클러스터 전체 값**을 내보내므로 대시보드·알림·KEDA에서는 레플리카
+  간에 `sum`이 아니라 `max`로 집계해야 합니다. store가 지원하지 않으면(`errors.ErrUnsupported`) 이 게이지는
+  나오지 않고, 읽기 실패 시에는 마지막 정상값을 최대 75초(5 × 15초)까지 유지하며 `_errors_total`이 증가합니다.
+- `sendplane_metrics_dropped_total`은 익스포터가 거부한 샘플 수입니다(잘못된 이름·레이블, 첫 호출과 다른
+  레이블 키 집합, 음수 증가분, counter/histogram 혼용 등). 0이 아니면 코드 버그이며, 이름별로 한 번 경고 로그가
+  남습니다.
 
 ## 설정 파일
 

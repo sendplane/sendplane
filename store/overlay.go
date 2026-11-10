@@ -212,6 +212,14 @@ func (o *platformProvider) Tenants(ctx context.Context) ([]string, error) {
 	return o.inner.Tenants(ctx)
 }
 
+// QueueDepth forwards the optional QueueDepthReader capability: the overlay
+// wraps every Provider sendplane is given, so without this no exporter could
+// ever reach the inner store's implementation. Platform entities are
+// configuration, not deliveries, so there is nothing to add.
+func (o *platformProvider) QueueDepth(ctx context.Context) ([]QueueDepth, error) {
+	return ReadQueueDepth(ctx, o.inner)
+}
+
 func (o *platformProvider) LookupDeliveryTenant(ctx context.Context, deliveryID string) (string, error) {
 	return o.inner.LookupDeliveryTenant(ctx, deliveryID)
 }

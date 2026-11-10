@@ -1201,3 +1201,126 @@ func testLookupDeliveryTenant(t *testing.T, p store.Provider) {
 	must(t, "LookupDeliveryTenant first tenant again", err)
 	eq(t, "first tenant", got, tenantID)
 }
+
+// queueCell is one (lane, status) cell of store.QueueDepthReader's result.
+type queueCell struct {
+	lane   store.Lane
+	status store.DeliveryStatus
+}
+
+// testQueueDepth checks store.QueueDepthReader by delta. The suite shares one
+// provider, and on a real database the rows of every earlier run, so the
+// absolute counts are unknown; what this test adds to each cell is not.
+func testQueueDepth(t *testing.T, p store.Provider) {
+	r, ok := p.(store.QueueDepthReader)
+	if !ok {
+		t.Skip("provider does not implement store.QueueDepthReader")
+	}
+	want := map[queueCell]int64{
+		{store.LaneBulk, store.DeliveryPending}:           1,
+		{store.LaneBulk, store.DeliveryQueued}:            2,
+		{store.LaneTransactional, store.DeliveryQueued}:   1,
+		{store.LaneTransactional, store.DeliveryLeased}:   1,
+		{store.LaneTransactional, store.DeliveryDeferred}: 1,
+		{store.LaneProbe, store.DeliveryPending}:          1,
+	}
+	// Another run writing to the same database can move a cell between the
+	// two reads. A broken implementation is off on every attempt, so a few
+	// attempts tell the two apart without loosening the comparison.
+	var diff []string
+	for attempt := 0; attempt < 3; attempt++ {
+		before := readQueueDepth(t, r)
+		seedQueueDepth(t, p)
+		after := readQueueDepth(t, r)
+		diff = diff[:0]
+		cells := map[queueCell]bool{}
+		for c := range before {
+			cells[c] = true
+		}
+		for c := range after {
+			cells[c] = true
+		}
+		for c := range want {
+			cells[c] = true
+		}
+		for c := range cells {
+			if got := after[c] - before[c]; got != want[c] {
+				diff = append(diff, fmt.Sprintf("%s/%s: +%d, want +%d", c.lane, c.status, got, want[c]))
+			}
+		}
+		if len(diff) == 0 {
+			return
+		}
+	}
+	slices.Sort(diff)
+	t.Fatalf("QueueDepth deltas: %v", diff)
+}
+
+// readQueueDepth reads the depth and checks the shape the contract promises:
+// sorted by lane then status, one entry per cell, no terminal status.
+func readQueueDepth(t *testing.T, r store.QueueDepthReader) map[queueCell]int64 {
+	t.Helper()
+	depth, err := r.QueueDepth(context.Background())
+	must(t, "QueueDepth", err)
+	out := make(map[queueCell]int64, len(depth))
+	for i, d := range depth {
+		if d.Status.Terminal() {
+			t.Fatalf("QueueDepth[%d] = %s/%s: terminal status counted", i, d.Lane, d.Status)
+		}
+		if d.Count < 0 {
+			t.Fatalf("QueueDepth[%d] = %s/%s: negative count %d", i, d.Lane, d.Status, d.Count)
+		}
+		if i > 0 {
+			prev := depth[i-1]
+			if prev.Lane > d.Lane || (prev.Lane == d.Lane && prev.Status >= d.Status) {
+				t.Fatalf("QueueDepth not sorted by (lane, status) or has a duplicate cell: %v", depth)
+			}
+		}
+		out[queueCell{d.Lane, d.Status}] = d.Count
+	}
+	return out
+}
+
+// seedQueueDepth writes testQueueDepth's want set into two fresh tenants, plus
+// terminal rows in both that must not be counted. The leased row comes from a
+// real Claim rather than an insert, so the count sees the state Claim writes.
+func seedQueueDepth(t *testing.T, p store.Provider) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seq := 0
+	mk := func(campaignID string, lane store.Lane, st store.DeliveryStatus, at time.Duration) store.Delivery {
+		seq++
+		email := fmt.Sprintf("q%d@example.com", seq)
+		return store.Delivery{
+			ID: store.NewID(), CampaignID: campaignID, Lane: lane, Status: st,
+			Email: email, EmailNorm: email, NextAttemptAt: now.Add(at),
+		}
+	}
+
+	bulk, _ := fresh(t, p)
+	campaignID := store.NewID()
+	seed(t, bulk, []store.Delivery{
+		mk(campaignID, store.LaneBulk, store.DeliveryPending, 0),
+		mk(campaignID, store.LaneBulk, store.DeliveryQueued, -time.Minute),
+		mk(campaignID, store.LaneBulk, store.DeliveryQueued, -time.Minute),
+		mk(campaignID, store.LaneBulk, store.DeliverySent, -time.Minute),
+	})
+
+	other, _ := fresh(t, p)
+	seed(t, other, []store.Delivery{
+		mk("", store.LaneTransactional, store.DeliveryQueued, -time.Minute),
+		mk("", store.LaneTransactional, store.DeliveryQueued, -time.Minute),
+		// In the future, so the Claim below cannot take it instead.
+		mk("", store.LaneTransactional, store.DeliveryDeferred, time.Hour),
+		mk("", store.LaneTransactional, store.DeliveryFailed, -time.Minute),
+		mk("", store.LaneProbe, store.DeliveryPending, 0),
+		mk("", store.LaneProbe, store.DeliveryCancelled, 0),
+	})
+	batch, err := other.Deliveries().Claim(ctx, store.ClaimRequest{
+		Lane: store.LaneTransactional, Limit: 1, LeaseFor: time.Minute,
+		WorkerID: "queue-depth", Now: now,
+	})
+	must(t, "Claim", err)
+	eq(t, "claimed one", len(batch), 1)
+}

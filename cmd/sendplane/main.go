@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/sendplane/sendplane"
 	"github.com/sendplane/sendplane/cmd/sendplane/console"
+	"github.com/sendplane/sendplane/prommetrics"
 	"github.com/sendplane/sendplane/store"
 	"github.com/sendplane/sendplane/store/mongo"
 	"github.com/sendplane/sendplane/store/postgres"
@@ -54,6 +56,7 @@ type cliFlags struct {
 	configPath     string
 	roles          string
 	listen         string
+	metricsListen  string
 	migrate        bool
 	migrateOnStart bool
 }
@@ -68,13 +71,40 @@ func parseFlags(args []string) (cliFlags, error) {
 	fs.StringVar(&f.configPath, "config", defaultConfig, "path to config.yaml (env SENDPLANE_CONFIG)")
 	fs.StringVar(&f.roles, "roles", defaultRoles, "comma-separated roles to run: control,sender,bounce (env SENDPLANE_ROLES)")
 	fs.StringVar(&f.listen, "listen", ":8080", "address the HTTP server (API + /healthz) listens on")
+	// Off by default: `make dev` runs three role processes on one host, and
+	// any fixed default port would collide. The Helm chart passes :9090.
+	fs.StringVar(&f.metricsListen, "metrics-listen", envOr("SENDPLANE_METRICS_LISTEN", ""),
+		"address of a separate HTTP server serving Prometheus GET /metrics; empty disables it (env SENDPLANE_METRICS_LISTEN)")
 	fs.BoolVar(&f.migrate, "migrate", false, "run store migrations and exit")
 	fs.BoolVar(&f.migrateOnStart, "migrate-on-start", false, "run store migrations before starting the selected roles")
 
 	if err := fs.Parse(args); err != nil {
 		return cliFlags{}, err
 	}
+	if f.metricsListen != "" && sameListenAddr(f.metricsListen, f.listen) {
+		return cliFlags{}, fmt.Errorf("--metrics-listen %q must differ from --listen %q: "+
+			"metrics carry tenant IDs and are served on their own port so the public listener never exposes them",
+			f.metricsListen, f.listen)
+	}
 	return f, nil
+}
+
+// sameListenAddr reports whether two listen addresses would bind the same
+// socket: the same port, and the same host or a wildcard host on either side
+// (":8080" and "0.0.0.0:8080" collide; "127.0.0.1:9090" and "10.0.0.1:9090"
+// do not). Addresses it cannot parse are compared verbatim and otherwise left
+// for net.Listen to reject.
+func sameListenAddr(a, b string) bool {
+	ah, ap, errA := net.SplitHostPort(a)
+	bh, bp, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	if ap != bp {
+		return false
+	}
+	wild := func(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" }
+	return ah == bh || wild(ah) || wild(bh)
 }
 
 func envOr(key, def string) string {
@@ -162,17 +192,37 @@ func run(args []string, stdout io.Writer) error {
 		}
 	}
 
-	sp, err := buildSendplane(ctx, cfg, provider, logger)
+	var exporter *prommetrics.Exporter
+	if flags.metricsListen != "" {
+		exporter = prommetrics.New(prommetrics.Options{Logger: logger.With("component", "metrics")})
+	}
+
+	sp, err := buildSendplane(ctx, cfg, provider, logger, exporter)
 	if err != nil {
 		return err
 	}
 
-	return serve(ctx, cfg, flags, roles, sp, logger)
+	if exporter != nil && roles.control {
+		// The backlog is a cluster-wide store read, so only control
+		// publishes it (sender and bounce replicas would only multiply the
+		// query). Every control replica still reports the same value: a
+		// dashboard, alert or KEDA trigger must aggregate it across replicas
+		// with max(), not sum().
+		if err := exporter.Registry().Register(prommetrics.NewQueueDepthCollector(sp.QueueDepth,
+			prommetrics.QueueDepthOptions{Logger: logger.With("component", "metrics")})); err != nil {
+			return fmt.Errorf("metrics: %w", err)
+		}
+	}
+
+	return serve(ctx, cfg, flags, roles, sp, exporter, logger)
 }
 
 // buildSendplane wires config into sendplane.Options and constructs the
 // engine instance.
-func buildSendplane(ctx context.Context, cfg *Config, provider store.Provider, logger *slog.Logger) (*sendplane.Sendplane, error) {
+//
+// exporter may be nil (--metrics-listen unset), which leaves Options.Metrics
+// at sendplane's no-op default.
+func buildSendplane(ctx context.Context, cfg *Config, provider store.Provider, logger *slog.Logger, exporter *prommetrics.Exporter) (*sendplane.Sendplane, error) {
 	authenticator, err := buildAuthenticator(ctx, cfg.Auth, logger)
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
@@ -215,6 +265,11 @@ func buildSendplane(ctx context.Context, cfg *Config, provider store.Provider, l
 		// an empty section changes nothing (ADR-0017).
 		Platform: cfg.Platform.ToHost(),
 		Logger:   logger,
+	}
+	// Assigned only when non-nil: a nil *Exporter in the interface would be
+	// a non-nil Metrics that panics on the first Count.
+	if exporter != nil {
+		opts.Metrics = exporter
 	}
 	// Per-request tenant selection, off unless auth.tenant_header asks for
 	// it. Leaving Options.Tenants nil keeps sendplane's own default (the
@@ -306,38 +361,62 @@ func buildMux(cfg *Config, roles roleSet, sp *sendplane.Sendplane) *http.ServeMu
 	return mux
 }
 
-// serve runs the HTTP server and the selected roles until ctx is cancelled,
-// then drains for up to drainTimeout.
+// buildMetricsMux is the metrics server's routing: GET /metrics and nothing
+// else. It is a separate server from buildMux's on purpose — the main
+// listener is what the Ingress exposes, and the metrics carry tenant IDs
+// (sendplane_sender_claimed_total{tenant}) that must not be public.
+func buildMetricsMux(exporter *prommetrics.Exporter) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", exporter.Handler())
+	return mux
+}
+
+// serve runs the HTTP server(s) and the selected roles until ctx is
+// cancelled, then drains for up to drainTimeout.
 //
 // The HTTP server always starts (not only when roles.control is set): it is
 // how every role, including a sender-only or bounce-only pod, answers
-// Kubernetes' /healthz probe.
-func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *sendplane.Sendplane, logger *slog.Logger) error {
-	mux := buildMux(cfg, roles, sp)
-	httpServer := &http.Server{
+// Kubernetes' /healthz probe. The metrics server starts, for every role, only
+// when exporter is non-nil.
+func serve(ctx context.Context, cfg *Config, flags cliFlags, roles roleSet, sp *sendplane.Sendplane, exporter *prommetrics.Exporter, logger *slog.Logger) error {
+	g, gctx := errgroup.WithContext(ctx)
+
+	type namedServer struct {
+		name   string
+		addr   string
+		server *http.Server
+	}
+	servers := []namedServer{{"http server", flags.listen, &http.Server{
 		Addr:    flags.listen,
-		Handler: mux,
+		Handler: buildMux(cfg, roles, sp),
 		// Bounds the slow-header attack: the body size is already bounded by
 		// host.Limits, the header phase was not (gosec G112).
 		ReadHeaderTimeout: readHeaderTimeout,
+	}}}
+	if exporter != nil {
+		servers = append(servers, namedServer{"metrics server", flags.metricsListen, &http.Server{
+			Addr:              flags.metricsListen,
+			Handler:           buildMetricsMux(exporter),
+			ReadHeaderTimeout: readHeaderTimeout,
+		}})
 	}
 
-	g, gctx := errgroup.WithContext(ctx)
-
-	g.Go(func() error {
-		logger.Info("http server listening", "addr", flags.listen, "control", roles.control)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("http server: %w", err)
-		}
-		return nil
-	})
-	g.Go(func() error {
-		<-gctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
-		defer cancel()
-		logger.Info("shutting down http server", "drain", drainTimeout)
-		return httpServer.Shutdown(shutdownCtx)
-	})
+	for _, s := range servers {
+		g.Go(func() error {
+			logger.Info(s.name+" listening", "addr", s.addr, "control", roles.control)
+			if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("%s: %w", s.name, err)
+			}
+			return nil
+		})
+		g.Go(func() error {
+			<-gctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			defer cancel()
+			logger.Info("shutting down "+s.name, "drain", drainTimeout)
+			return s.server.Shutdown(shutdownCtx)
+		})
+	}
 
 	if roles.control {
 		g.Go(func() error {

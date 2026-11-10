@@ -160,6 +160,15 @@ func New(o Options) (*Sendplane, error) {
 // Options returns the effective options, with defaults applied.
 func (s *Sendplane) Options() Options { return s.opts }
 
+// QueueDepth returns the cluster-wide count of non-terminal deliveries per
+// (lane, status), for a metrics exporter to publish as a gauge
+// (architecture 12). It returns errors.ErrUnsupported when Options.Store does
+// not implement store.QueueDepthReader. It queries the store on every call;
+// callers poll it on a scrape interval, not per request.
+func (s *Sendplane) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) {
+	return store.ReadQueueDepth(ctx, s.opts.Store)
+}
+
 // Handler returns the router to mount on the host's mux: /api/v1, the public
 // tracking routes under /t and /healthz.
 //

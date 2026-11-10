@@ -151,6 +151,43 @@ func (p *Provider) ActiveTenants(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
+var _ store.QueueDepthReader = (*Provider)(nil)
+
+// QueueDepth counts the non-terminal deliveries of every tenant per (lane,
+// status) (store.QueueDepthReader). Unlike ActiveTenants it does not skip the
+// system tenant: it counts rows, the same as the SQL and Mongo versions, which
+// have no tenant predicate at all.
+func (p *Provider) QueueDepth(_ context.Context) ([]store.QueueDepth, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	type cell struct {
+		lane   store.Lane
+		status store.DeliveryStatus
+	}
+	counts := map[cell]int64{}
+	for _, d := range p.tenants {
+		for _, dl := range d.deliveries {
+			if !dl.Status.Terminal() {
+				counts[cell{dl.Lane, dl.Status}]++
+			}
+		}
+	}
+	out := make([]store.QueueDepth, 0, len(counts))
+	for c, n := range counts {
+		out = append(out, store.QueueDepth{Lane: c.lane, Status: c.status, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Lane != out[j].Lane {
+			return out[i].Lane < out[j].Lane
+		}
+		return out[i].Status < out[j].Status
+	})
+	return out, nil
+}
+
 // Tenants lists every tenant with a settings row or a configuration row
 // (store.Provider).
 func (p *Provider) Tenants(_ context.Context) ([]string, error) {

@@ -35,11 +35,20 @@ spec:
             - --config=/etc/sendplane/config.yaml
             - --roles={{ .Values.sender.roles }}
             - --listen=:{{ .Values.sender.listen }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-listen=:{{ .Values.metrics.port }}
+            {{- end }}
           ports:
             # No inbound traffic is routed here (no Service for sender);
             # this exists only for the kubelet's own /healthz probe below.
+            # (Metrics are served on the separate `metrics` port.)
             - name: http
               containerPort: {{ .Values.sender.listen }}
+            {{- if .Values.metrics.enabled }}
+            # Prometheus /metrics, scraped via the <fullname>-metrics Service.
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           envFrom:
             {{- include "sendplane.envFrom" . | nindent 12 }}
           volumeMounts:

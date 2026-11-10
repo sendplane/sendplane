@@ -32,7 +32,7 @@ ENV VITE_BASE=/console/
 RUN pnpm build
 
 # --- build stage -------------------------------------------------------
-FROM golang:1.25-bookworm AS build
+FROM golang:1.26-bookworm AS build
 
 WORKDIR /src
 
