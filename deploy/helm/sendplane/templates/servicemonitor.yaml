@@ -1,12 +1,13 @@
 {{/*
-Requires the Prometheus Operator CRDs. Scrapes the control Service, which
-every role's pod answers on (the port is shared for /healthz), at
-.Values.serviceMonitor.path. The Metrics interface (host.Metrics,
-docs/architecture.md 12) still needs a Prometheus-exporting adapter wired
-into Options.Metrics for that path to serve anything; this template only
-wires the Kubernetes-side scrape config.
+Requires the Prometheus Operator CRDs and metrics.enabled. Scrapes the
+<fullname>-metrics Service (every role's pods) on the `metrics` port at
+/metrics, served by the binary's --metrics-listen. podTargetLabels copies the
+pod's component label onto each series so dashboards can tell roles apart.
 */}}
 {{- if .Values.serviceMonitor.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "serviceMonitor.enabled requires metrics.enabled=true (the ServiceMonitor scrapes the metrics Service)" }}
+{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -20,10 +21,12 @@ spec:
   selector:
     matchLabels:
       {{- include "sendplane.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: control
+      app.kubernetes.io/component: metrics
+  podTargetLabels:
+    - app.kubernetes.io/component
   endpoints:
-    - port: http
-      path: {{ .Values.serviceMonitor.path }}
+    - port: metrics
+      path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
 {{- end }}

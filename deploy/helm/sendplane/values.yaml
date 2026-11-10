@@ -92,14 +92,21 @@ migrate:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { memory: 512Mi }
 
+# Prometheus /metrics, served by every role (control, sender, bounce) on its
+# own port via the binary's --metrics-listen flag. Deliberately NOT the main
+# `http` port: that one is reachable through the Ingress, and metrics carry
+# tenant IDs. A headless Service <fullname>-metrics selects all role pods.
+metrics:
+  enabled: true
+  port: 9090
+
 serviceMonitor:
-  # Requires the Prometheus Operator CRDs. sendplane's Metrics interface
-  # (host.Metrics) needs a Prometheus-exporting adapter wired in by whoever
-  # builds Options.Metrics; this only wires the Kubernetes scrape config.
+  # Requires metrics.enabled and the Prometheus Operator CRDs. Scrapes the
+  # <fullname>-metrics Service on /metrics (the only path the binary serves);
+  # each series gets an app.kubernetes.io/component label for its role.
   enabled: false
   interval: 30s
   scrapeTimeout: 10s
-  path: /metrics
   labels: {}
 
 # config.yaml, rendered verbatim into the ConfigMap

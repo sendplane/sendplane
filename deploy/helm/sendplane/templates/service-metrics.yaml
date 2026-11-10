@@ -1,0 +1,21 @@
+{{- if .Values.metrics.enabled }}
+# Headless: Prometheus scrapes pod IPs directly via EndpointSlices. The
+# selector omits the component label on purpose, so it covers control, sender
+# and bounce pods. The migrate Job pod also matches this selector but exposes
+# no `metrics` port, so EndpointSlices exclude it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sendplane.fullname" . }}-metrics
+  labels:
+    {{- include "sendplane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  clusterIP: None
+  selector:
+    {{- include "sendplane.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+{{- end }}

@@ -824,7 +824,7 @@ for sender in tenant.senders (주기 기본 6h, transport/domain 변경 시, 수
 - `delivery.sent`/`delivery.failed`는 sender의 배치 `Complete` 이후 같은 스토어에 씁니다. 계약은 **delivery 하나당 outbox 행 하나**이고, 그래서 100만 수신자 캠페인을 구독하면 outbox 행·dispatch·HTTP POST가 100만 건입니다 — `delivery.sent`가 기본 집합에서 빠져 있는 이유가 그것입니다. 켜기 전에 그 비용을 계산하십시오.
 - outbox 디스패처는 두 개입니다: active 테넌트(+3틱 유예)를 1초마다 도는 것(캠페인 전이의 지연을 짧게)과, **모든 테넌트**(`Provider.Tenants`)를 10초마다 도는 `outbox-sweep`. 바운스(며칠 뒤)·프로브 판정(1분 뒤)처럼 테넌트가 한가해진 뒤에 생기는 이벤트는 sweep이 아니면 다음 캠페인 때까지 pending으로 남습니다. `ClaimPending`이 lease를 잡으므로 둘이 같은 행을 두 번 보내지 않습니다.
 - 디스패치 실패는 `1m·5m·30m·2h·12h`(마지막 값 반복) 백오프이고, **10회 실패 후 `failed`로 고정**(dead letter, `GET /events?status=failed` + `POST /events/{id}/replay`). `Hooks.Events`가 nil이면 두 디스패처 루프 자체를 등록하지 않습니다 — 아무도 소비하지 않는 행의 시도 횟수만 태우는 걸 막기 위해서입니다.
-- 메트릭(OpenTelemetry/Prometheus): 큐 깊이(lane/tenant), claim 지연, 렌더/SMTP 지연 히스토그램, 상태 전이 카운터, transport 상태, rate limiter 대기. HPA/KEDA는 큐 깊이 메트릭 사용.
+- 메트릭(OpenTelemetry/Prometheus): 큐 깊이(lane/status), claim 지연, 렌더/SMTP 지연 히스토그램, 상태 전이 카운터, transport 상태, rate limiter 대기. HPA/KEDA는 claim 가능 건수 메트릭(`sendplane_delivery_claimable`) 사용. 구현: `prommetrics` 어댑터(`host.Metrics` → Prometheus)를 참조 바이너리가 `--metrics-listen=<addr>`(기본 꺼짐)로 별도 포트에 `GET /metrics`로 노출합니다(메인 `http` 포트는 Ingress로 도달 가능하고 메트릭에 테넌트 ID가 있어 분리). 메트릭: `sendplane_sender_{claimed_total,processed_total,render_seconds,smtp_seconds,limiter_wait_seconds,conn_opened_total,conn_closed_total,transport_status_total}`, `sendplane_bounce_{handled_total,skipped_total,poll_errors_total,platform_suppressed_total}`, control 파드 전용 게이지 `sendplane_delivery_queue_depth{lane,status}`(클러스터 전역, 약 15초 캐시, 모든 control replica가 같은 값을 보고하므로 `max`로 집계; 예약/일시중지 캠페인의 `pending`도 포함하므로 상태별 대시보드용)과 오토스케일 신호 `sendplane_delivery_claimable{lane}`(`Claim`과 같은 자격 규칙으로 센 지금 claim 가능한 건수: 기한이 된 queued/deferred + running 캠페인의 기한이 된 pending, 같은 캐시·`max` 집계, 읽기는 queue_depth와 독립), 그리고 `sendplane_metrics_dropped_total`, `sendplane_delivery_queue_depth_errors_total`, `sendplane_delivery_claimable_errors_total`, Go/process 컬렉터.
 - 로그는 `slog`, 요청/딜리버리 ID 상관관계.
 
 ## 13. 프론트엔드
@@ -846,7 +846,7 @@ web/
 
 ## 14. 배포 (Helm), 콘솔 임베드
 
-- 차트 `deploy/helm/sendplane`: `control`(Deployment, ≥2, PDB), `sender`(Deployment + HPA, CPU 기준), `bounce`(Deployment, 1), `migrate`(pre-install/upgrade Job), ConfigMap(config.yaml), Secret(DSN, 암호화 키, API key), ServiceMonitor 선택. 큐 깊이 기반 KEDA `ScaledObject`는 `templates/hpa-sender.yaml`에 **주석 처리된 예시로만** 있습니다 — 클러스터에 KEDA가 설치돼 있을 때 CPU HPA를 끄고 별도 적용하는 용도이고, 이 차트가 기본으로 만드는 실제 리소스는 아닙니다.
+- 차트 `deploy/helm/sendplane`: `control`(Deployment, ≥2, PDB), `sender`(Deployment + HPA, CPU 기준), `bounce`(Deployment, 1), `migrate`(pre-install/upgrade Job), ConfigMap(config.yaml), Secret(DSN, 암호화 키, API key), ServiceMonitor 선택(`metrics.enabled` 필요, 별도 `metrics` 포트의 headless Service를 스크레이프). 큐 깊이 기반 KEDA `ScaledObject`는 `templates/hpa-sender.yaml`에 **주석 처리된 예시로만** 있습니다 — 클러스터에 KEDA가 설치돼 있을 때 CPU HPA를 끄고 별도 적용하는 용도이고, 이 차트가 기본으로 만드는 실제 리소스는 아닙니다.
 - DB는 차트에 포함하지 않음(외부 Postgres/Mongo). 참조 바이너리는 설정 파일로 auth/webhook을 구성하므로 Go 없이도 배포 가능.
 - 이미지 하나(`sendplane` + `chaos-smtp`, `deploy/dev/Dockerfile`)를 `--roles`로 나눠 씀 → 버전 불일치 위험 제거. 같은 Dockerfile이 **웹 빌드 스테이지**(`node:22-alpine`에서 `pnpm build`)를 먼저 돌려 `web/apps/console/dist`를 만들고, Go 빌드 스테이지가 그 결과를 `cmd/sendplane/console/dist`로 복사해 `//go:embed`합니다(ADR-0010) — 이미지 빌드에 Node가 필요하지만 로컬 `go build ./cmd/sendplane`은 커밋된 플레이스홀더 `dist/index.html` 덕분에 Node 없이도 됩니다.
 - 콘솔은 control 역할이 켜져 있을 때만 `config.yaml`의 `console.path`(기본 `/console`, 끌 수 있음)에 마운트됩니다. `sp.Handler()`가 이미 `/api/v1`과 `/t/`를 `/` 아래에 소유하므로 `/`가 아니라 `/console`입니다. `make console-sync`(`VITE_BASE=/console/ pnpm build` → `cmd/sendplane/console/dist`로 복사)로 로컬 빌드를 갱신합니다.
@@ -898,7 +898,7 @@ web/
 
 | 영역 | 선택(go.mod / web/package.json 기준) | 대안/비고 |
 |---|---|---|
-| Go | 1.25.0 | |
+| Go | 1.26.0 | |
 | HTTP | `net/http` + `go-chi/chi/v5` v5.3.2 (경량, 호스트 mux에 마운트 용이) | echo/gin은 호스트와 충돌 가능성 |
 | OpenAPI | `oapi-codegen/v2` v2.8.0(서버 타입, `tool` 디렉티브로 고정) + `openapi-typescript` v7.13.0(클라이언트) | 스펙 우선 |
 | Postgres | `jackc/pgx/v5` v5.11.0, 마이그레이션은 `migrations/*.sql`을 `embed`로 넣은 **자체 구현**(advisory lock으로 동시 기동 안전) | `golang-migrate` 등 외부 마이그레이션 라이브러리는 쓰지 않음 |
@@ -916,7 +916,7 @@ web/
 | ID | UUIDv7 (`google/uuid`) | 시간 정렬, 양 DB 호환 |
 | YAML | `gopkg.in/yaml.v3` | i18n 번들 export의 결정적 순서 보장 |
 | 프론트 | Vue 3.5 + Vite 7 + TS 5.9, pnpm 10 workspace, vue-i18n 11, vue-router 4(콘솔만), GrapesJS 0.23 + grapesjs-mjml 1.0(에디터, 동적 import) | Node ≥22 |
-| 관측 | OpenTelemetry(`Metrics` 인터페이스로 주입), slog | Prometheus exporter는 호스트가 `Metrics` 구현체로 제공(엔진 자체는 특정 exporter에 묶이지 않음) |
+| 관측 | OpenTelemetry(`Metrics` 인터페이스로 주입), slog | 엔진 자체는 특정 exporter에 묶이지 않음. Prometheus 어댑터는 `prommetrics`이고 참조 바이너리는 `--metrics-listen`으로 노출, 그 외 호스트는 자체 `Metrics` 구현체를 주입 |
 
 ## 18. 열어 둔 것 (2026-09-21 기준, 실제로 남아 있는 것)
 
@@ -924,9 +924,9 @@ Liquid 문법(ADR-0004)과 내장 suppression 기본 on(ADR-0008)은 사용자 �
 
 1. **`probe.Trigger`는 첫 메일박스의 run id만 돌려줍니다.** 한 트리거가 만든 run들은 `GroupID`를 공유하지만 `ProbeRunRepo.ListByGroup`이 없어 `POST /senders/{id}/probe`가 그룹 전체를 한 번에 조회해 주지 못합니다(`internal/probe/README.md`).
 2. **`SendingDomain.OutboundIPs`는 프로브가 갱신하지 않습니다.** 관측 아웃바운드 IP는 `ProbeRun.ObservedIP`에만 남고, 도메인 행까지 쓰려면 낙관적 갱신이 하나 더 필요합니다 — 그 소유권을 control에 둘지는 아직 미정입니다.
-3. **Helm 차트의 KEDA는 예시 코드일 뿐 실제 리소스가 아닙니다.** `templates/hpa-sender.yaml`의 큐 깊이 기반 `ScaledObject`는 주석 처리돼 있고, 이 차트가 기본으로 만드는 것은 CPU HPA뿐입니다. 큐 깊이 기반 오토스케일을 쓰려면 KEDA를 따로 설치하고 그 예시를 직접 적용해야 합니다.
+3. **Helm 차트의 KEDA는 예시 코드일 뿐 실제 리소스가 아닙니다.** `templates/hpa-sender.yaml`의 claimable 기반 `ScaledObject`는 주석 처리돼 있고, 이 차트가 기본으로 만드는 것은 CPU HPA뿐입니다. claim 가능 건수 메트릭(`sendplane_delivery_claimable`)은 이제 존재하지만, 이를 쓰는 오토스케일을 하려면 KEDA를 따로 설치하고 그 예시를 직접 적용해야 합니다.
 4. **mongo는 CI에서 nightly에만 돕니다** (`ci.yml`의 storetest 매트릭스는 매 PR, `e2e.yml`의 mongo 오버레이는 02:40 UTC 스케줄에서만). PR 단위로는 mongo 경로의 e2e 회귀를 못 잡습니다.
-5. **Helm 차트는 실제 k8s 클러스터에 배포해 본 적이 없습니다.** `helm template`/`helm lint` 수준 검증만 가능하고, HPA·PDB·ServiceMonitor가 실 클러스터에서 기대대로 동작하는지는 확인되지 않았습니다.
+5. **Helm 차트는 실제 k8s 클러스터에 배포해 본 적이 없습니다.** `helm template`/`helm lint` 수준 검증만 가능하고, HPA·PDB·metrics Service·ServiceMonitor가 실 클러스터에서 기대대로 동작하는지는 확인되지 않았습니다.
 6. **GitHub Actions 실행 이력이 없습니다.** `git remote`는 `github.com/sendplane/sendplane`를 가리키고 저장소 자체는 존재하지만(`gh repo view` 확인), 이 문서 갱신 시점까지 `gh run list`에 워크플로 실행이 한 건도 없습니다 — `ci.yml`/`e2e.yml`/`load-1m.yml`이 실제 GitHub 러너에서 통과하는지는 로컬 실행으로만 확인된 상태입니다.
 7. **store 계약에 없어서 못 하는 것들** (`internal/control/README.md`, `internal/bounce/README.md`): `TrackingEvent`에 유니크 여부를 남기는 필드가 없어 유니크 판정은 `CountUnique` 재계산에만 의존; 캠페인이 없는(transactional) delivery의 보존기간 삭제 경로가 없음; "pending 이벤트가 있는 테넌트"·"최근 완료된 캠페인"을 직접 조회할 방법이 없어 `outbox-sweep`과 finalizer의 커서 훑기로 대신함; `BounceType`에 auto-reply 값이, `BounceSource`에 "상관관계 실패" 값이 없어 각각 플래그와 `heuristic`으로 대신 표시.
 8. **낙관적 동시성의 `version`이 응답에서 읽기 전용**이라 편집 화면은 항상 "읽은 객체"를 들고 있어야 업데이트를 보낼 수 있습니다(`web/README.md` "아직 남은 것").

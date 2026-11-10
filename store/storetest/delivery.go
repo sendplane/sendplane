@@ -1201,3 +1201,273 @@ func testLookupDeliveryTenant(t *testing.T, p store.Provider) {
 	must(t, "LookupDeliveryTenant first tenant again", err)
 	eq(t, "first tenant", got, tenantID)
 }
+
+// queueCell is one (lane, status) cell of store.QueueDepthReader's result.
+type queueCell struct {
+	lane   store.Lane
+	status store.DeliveryStatus
+}
+
+// testQueueDepth checks store.QueueDepthReader by delta. The suite shares one
+// provider, and on a real database the rows of every earlier run, so the
+// absolute counts are unknown; what this test adds to each cell is not.
+func testQueueDepth(t *testing.T, p store.Provider) {
+	r, ok := p.(store.QueueDepthReader)
+	if !ok {
+		t.Skip("provider does not implement store.QueueDepthReader")
+	}
+	want := map[queueCell]int64{
+		{store.LaneBulk, store.DeliveryPending}:           1,
+		{store.LaneBulk, store.DeliveryQueued}:            2,
+		{store.LaneTransactional, store.DeliveryQueued}:   1,
+		{store.LaneTransactional, store.DeliveryLeased}:   1,
+		{store.LaneTransactional, store.DeliveryDeferred}: 1,
+		{store.LaneProbe, store.DeliveryPending}:          1,
+	}
+	// Another run writing to the same database can move a cell between the
+	// two reads. A broken implementation is off on every attempt, so a few
+	// attempts tell the two apart without loosening the comparison.
+	var diff []string
+	for attempt := 0; attempt < 3; attempt++ {
+		before := readQueueDepth(t, r)
+		seedQueueDepth(t, p)
+		after := readQueueDepth(t, r)
+		diff = diff[:0]
+		cells := map[queueCell]bool{}
+		for c := range before {
+			cells[c] = true
+		}
+		for c := range after {
+			cells[c] = true
+		}
+		for c := range want {
+			cells[c] = true
+		}
+		for c := range cells {
+			if got := after[c] - before[c]; got != want[c] {
+				diff = append(diff, fmt.Sprintf("%s/%s: +%d, want +%d", c.lane, c.status, got, want[c]))
+			}
+		}
+		if len(diff) == 0 {
+			return
+		}
+	}
+	slices.Sort(diff)
+	t.Fatalf("QueueDepth deltas: %v", diff)
+}
+
+// readQueueDepth reads the depth and checks the shape the contract promises:
+// sorted by lane then status, one entry per cell, no terminal status.
+func readQueueDepth(t *testing.T, r store.QueueDepthReader) map[queueCell]int64 {
+	t.Helper()
+	depth, err := r.QueueDepth(context.Background())
+	must(t, "QueueDepth", err)
+	out := make(map[queueCell]int64, len(depth))
+	for i, d := range depth {
+		if d.Status.Terminal() {
+			t.Fatalf("QueueDepth[%d] = %s/%s: terminal status counted", i, d.Lane, d.Status)
+		}
+		if d.Count < 0 {
+			t.Fatalf("QueueDepth[%d] = %s/%s: negative count %d", i, d.Lane, d.Status, d.Count)
+		}
+		if i > 0 {
+			prev := depth[i-1]
+			if prev.Lane > d.Lane || (prev.Lane == d.Lane && prev.Status >= d.Status) {
+				t.Fatalf("QueueDepth not sorted by (lane, status) or has a duplicate cell: %v", depth)
+			}
+		}
+		out[queueCell{d.Lane, d.Status}] = d.Count
+	}
+	return out
+}
+
+// seedQueueDepth writes testQueueDepth's want set into two fresh tenants, plus
+// terminal rows in both that must not be counted. The leased row comes from a
+// real Claim rather than an insert, so the count sees the state Claim writes.
+func seedQueueDepth(t *testing.T, p store.Provider) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seq := 0
+	mk := func(campaignID string, lane store.Lane, st store.DeliveryStatus, at time.Duration) store.Delivery {
+		seq++
+		email := fmt.Sprintf("q%d@example.com", seq)
+		return store.Delivery{
+			ID: store.NewID(), CampaignID: campaignID, Lane: lane, Status: st,
+			Email: email, EmailNorm: email, NextAttemptAt: now.Add(at),
+		}
+	}
+
+	bulk, _ := fresh(t, p)
+	campaignID := store.NewID()
+	seed(t, bulk, []store.Delivery{
+		mk(campaignID, store.LaneBulk, store.DeliveryPending, 0),
+		mk(campaignID, store.LaneBulk, store.DeliveryQueued, -time.Minute),
+		mk(campaignID, store.LaneBulk, store.DeliveryQueued, -time.Minute),
+		mk(campaignID, store.LaneBulk, store.DeliverySent, -time.Minute),
+	})
+
+	other, _ := fresh(t, p)
+	seed(t, other, []store.Delivery{
+		mk("", store.LaneTransactional, store.DeliveryQueued, -time.Minute),
+		mk("", store.LaneTransactional, store.DeliveryQueued, -time.Minute),
+		// In the future, so the Claim below cannot take it instead.
+		mk("", store.LaneTransactional, store.DeliveryDeferred, time.Hour),
+		mk("", store.LaneTransactional, store.DeliveryFailed, -time.Minute),
+		mk("", store.LaneProbe, store.DeliveryPending, 0),
+		mk("", store.LaneProbe, store.DeliveryCancelled, 0),
+	})
+	batch, err := other.Deliveries().Claim(ctx, store.ClaimRequest{
+		Lane: store.LaneTransactional, Limit: 1, LeaseFor: time.Minute,
+		WorkerID: "queue-depth", Now: now,
+	})
+	must(t, "Claim", err)
+	eq(t, "claimed one", len(batch), 1)
+}
+
+// testClaimable checks store.QueueDepthReader.Claimable by delta, the same way
+// testQueueDepth does, and then pins its meaning to DeliveryRepo.Claim's: for
+// each lane of the seeded tenant, a real Claim with that tenant's running
+// campaigns must return exactly as many rows as Claimable added.
+func testClaimable(t *testing.T, p store.Provider) {
+	r, ok := p.(store.QueueDepthReader)
+	if !ok {
+		t.Skip("provider does not implement store.QueueDepthReader")
+	}
+	// The bulk and transactional counts come from the main tenant alone,
+	// which is what lets the Claim below check them; probe comes from the
+	// other tenant's running campaign.
+	want := map[store.Lane]int64{
+		store.LaneBulk:          3,
+		store.LaneTransactional: 3,
+		store.LaneProbe:         1,
+	}
+	// One fixed instant for both reads, so only the seeded rows can move
+	// the counts; a concurrent run still can, hence the attempts.
+	now := time.Now().UTC()
+	var diff []string
+	var main store.Store
+	for attempt := 0; attempt < 3; attempt++ {
+		before := readClaimable(t, r, now)
+		main = seedClaimable(t, p, now)
+		after := readClaimable(t, r, now)
+		diff = diff[:0]
+		for _, lane := range []store.Lane{store.LaneTransactional, store.LaneBulk, store.LaneProbe} {
+			if got := after[lane] - before[lane]; got != want[lane] {
+				diff = append(diff, fmt.Sprintf("%s: +%d, want +%d", lane, got, want[lane]))
+			}
+		}
+		if len(diff) == 0 {
+			break
+		}
+	}
+	if len(diff) > 0 {
+		t.Fatalf("Claimable deltas: %v", diff)
+	}
+
+	// Last, because Claim leases what it returns.
+	ctx := context.Background()
+	res, err := main.Campaigns().ListByStatus(ctx, []store.CampaignStatus{store.CampaignRunning},
+		store.Page{Limit: store.MaxPageLimit})
+	must(t, "ListByStatus running", err)
+	running := []string{}
+	for _, c := range res.Items {
+		running = append(running, c.ID)
+	}
+	for _, lane := range []store.Lane{store.LaneBulk, store.LaneTransactional} {
+		batch, err := main.Deliveries().Claim(ctx, store.ClaimRequest{
+			Lane: lane, CampaignIDs: running, Limit: 1000, LeaseFor: time.Minute,
+			WorkerID: "claimable", Now: now,
+		})
+		must(t, "Claim "+lane.String(), err)
+		eq(t, "Claim "+lane.String()+" returns what Claimable counted", int64(len(batch)), want[lane])
+	}
+}
+
+// readClaimable reads Claimable and checks the shape the contract promises:
+// sorted by lane, one entry per lane.
+func readClaimable(t *testing.T, r store.QueueDepthReader, now time.Time) map[store.Lane]int64 {
+	t.Helper()
+	counts, err := r.Claimable(context.Background(), now)
+	must(t, "Claimable", err)
+	out := make(map[store.Lane]int64, len(counts))
+	for i, c := range counts {
+		if c.Count < 0 {
+			t.Fatalf("Claimable[%d] = %s: negative count %d", i, c.Lane, c.Count)
+		}
+		if i > 0 && counts[i-1].Lane >= c.Lane {
+			t.Fatalf("Claimable not sorted by lane or has a duplicate lane: %v", counts)
+		}
+		out[c.Lane] = c.Count
+	}
+	return out
+}
+
+// seedClaimable writes testClaimable's want set into two fresh tenants, with
+// next to each counted row the near miss that must not be counted. It
+// returns the main tenant's store.
+func seedClaimable(t *testing.T, p store.Provider, now time.Time) store.Store {
+	t.Helper()
+	ctx := context.Background()
+	seq := 0
+	mk := func(campaignID string, lane store.Lane, st store.DeliveryStatus, at time.Duration) store.Delivery {
+		seq++
+		email := fmt.Sprintf("c%d@example.com", seq)
+		return store.Delivery{
+			ID: store.NewID(), CampaignID: campaignID, Lane: lane, Status: st,
+			Email: email, EmailNorm: email, NextAttemptAt: now.Add(at),
+		}
+	}
+	campaign := func(s store.Store, st store.CampaignStatus) string {
+		c := &store.Campaign{Name: st.String(), Status: st}
+		must(t, "Create "+st.String()+" campaign", s.Campaigns().Create(ctx, c))
+		return c.ID
+	}
+	const due, later = -time.Minute, time.Hour
+
+	other, _ := fresh(t, p)
+	otherRunning := campaign(other, store.CampaignRunning)
+	seed(t, other, []store.Delivery{
+		mk(otherRunning, store.LaneProbe, store.DeliveryPending, due), // counted
+		mk("", store.LaneTransactional, store.DeliveryQueued, due),    // leased below
+	})
+	batch, err := other.Deliveries().Claim(ctx, store.ClaimRequest{
+		Lane: store.LaneTransactional, Limit: 1, LeaseFor: time.Minute,
+		WorkerID: "claimable", Now: now,
+	})
+	must(t, "Claim", err)
+	eq(t, "claimed one", len(batch), 1)
+
+	main, _ := fresh(t, p)
+	running := campaign(main, store.CampaignRunning)
+	paused := campaign(main, store.CampaignPaused)
+	scheduled := campaign(main, store.CampaignScheduled)
+	seed(t, main, []store.Delivery{
+		// Bulk: a running campaign's due rows, pending or queued, count.
+		mk(running, store.LaneBulk, store.DeliveryPending, due),
+		mk(running, store.LaneBulk, store.DeliveryPending, due),
+		mk(running, store.LaneBulk, store.DeliveryQueued, due),
+		mk(running, store.LaneBulk, store.DeliveryPending, later),
+		// Not running: pending stays put, and Claim's campaign filter leaves
+		// out even a paused campaign's queued and deferred rows.
+		mk(paused, store.LaneBulk, store.DeliveryPending, due),
+		mk(paused, store.LaneBulk, store.DeliveryQueued, due),
+		mk(paused, store.LaneBulk, store.DeliveryDeferred, due),
+		mk(scheduled, store.LaneBulk, store.DeliveryPending, due),
+		// Pending needs a campaign running in this tenant: none, or another
+		// tenant's running campaign, is not enough.
+		mk("", store.LaneBulk, store.DeliveryPending, due),
+		mk(otherRunning, store.LaneBulk, store.DeliveryPending, due),
+		mk(running, store.LaneBulk, store.DeliverySent, due),
+
+		// Transactional: queued and deferred without a campaign, once due.
+		mk("", store.LaneTransactional, store.DeliveryQueued, due),
+		mk("", store.LaneTransactional, store.DeliveryQueued, 0),
+		mk("", store.LaneTransactional, store.DeliveryDeferred, due),
+		mk("", store.LaneTransactional, store.DeliveryQueued, later),
+		mk("", store.LaneTransactional, store.DeliveryDeferred, later),
+		mk("", store.LaneTransactional, store.DeliveryFailed, due),
+		mk("", store.LaneTransactional, store.DeliveryCancelled, due),
+	})
+	return main
+}

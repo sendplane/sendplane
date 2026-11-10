@@ -160,6 +160,25 @@ func New(o Options) (*Sendplane, error) {
 // Options returns the effective options, with defaults applied.
 func (s *Sendplane) Options() Options { return s.opts }
 
+// QueueDepth returns the cluster-wide count of non-terminal deliveries per
+// (lane, status), for a metrics exporter to publish as a gauge
+// (architecture 12). It returns errors.ErrUnsupported when Options.Store does
+// not implement store.QueueDepthReader. It queries the store on every call;
+// callers poll it on a scrape interval, not per request.
+func (s *Sendplane) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) {
+	return store.ReadQueueDepth(ctx, s.opts.Store)
+}
+
+// Claimable returns, per lane, how many deliveries a sender could claim right
+// now (store.QueueDepthReader.Claimable at Options.Clock()). It is the
+// autoscaling signal: unlike QueueDepth it excludes the pending rows of
+// scheduled and paused campaigns and the deferred rows not yet due. Like
+// QueueDepth it returns errors.ErrUnsupported for a store without the
+// capability and queries the store on every call.
+func (s *Sendplane) Claimable(ctx context.Context) ([]store.LaneCount, error) {
+	return store.ReadClaimable(ctx, s.opts.Store, s.opts.Clock())
+}
+
 // Handler returns the router to mount on the host's mux: /api/v1, the public
 // tracking routes under /t and /healthz.
 //

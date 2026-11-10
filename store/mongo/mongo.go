@@ -169,6 +169,144 @@ func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+var _ store.QueueDepthReader = (*Provider)(nil)
+
+// QueueDepth counts the non-terminal deliveries of every tenant per (lane,
+// status) in one aggregate (store.QueueDepthReader). Shared mode keeps every
+// tenant in one collection, so there is no tenant predicate; the status match
+// can be served by the lease_expiry index, which leads with status.
+func (p *Provider) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) {
+	cur, err := p.db.Collection(collDelivery).Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(openStatuses)}}},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{{Key: "lane", Value: "$lane"}, {Key: "status", Value: "$status"}}},
+			{Key: "n", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id.lane", Value: 1}, {Key: "_id.status", Value: 1}}}},
+	})
+	if err != nil {
+		return nil, wrap("queue depth", err)
+	}
+	var rows []struct {
+		ID struct {
+			Lane   int32 `bson:"lane"`
+			Status int32 `bson:"status"`
+		} `bson:"_id"`
+		N int64 `bson:"n"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, wrap("queue depth", err)
+	}
+	out := make([]store.QueueDepth, len(rows))
+	for i, row := range rows {
+		out[i] = store.QueueDepth{
+			Lane:   store.Lane(enum8(row.ID.Lane)),
+			Status: store.DeliveryStatus(enum8(row.ID.Status)),
+			Count:  row.N,
+		}
+	}
+	return out, nil
+}
+
+// Claimable counts, per lane, the deliveries a sender could claim at now
+// (store.QueueDepthReader), with deliveryRepo.Claim's predicate for the
+// running campaign set the sender passes it: due, and either queued/deferred
+// without a campaign, or pending/queued/deferred of a campaign running in the
+// delivery's own tenant.
+//
+// It reads the running campaigns first and then aggregates the deliveries,
+// rather than $lookup-ing the campaign of every open delivery: running
+// campaigns are few, while the open deliveries include every pending row of
+// every scheduled and paused campaign, which a per-document $lookup would
+// visit and this $match never reads. The two branches of the $or each have an
+// index (campaign_status serves both: campaign_id null bounds for the first,
+// the running ids for the second). The campaign ids are matched with one $in
+// across tenants, not one $or branch per tenant, so the plan does not grow
+// with the number of tenants; that $in alone would also count a delivery
+// whose campaign_id names another tenant's running campaign, so the group key
+// keeps (tenant, campaign) and that pairing is checked here.
+//
+// The two reads are not a snapshot: a campaign that starts or pauses between
+// them is counted by the state of the first, which is no worse than the
+// sender's own cached running set (ADR-0002).
+func (p *Provider) Claimable(ctx context.Context, now time.Time) ([]store.LaneCount, error) {
+	cur, err := p.db.Collection(collCampaign).Find(ctx,
+		bson.D{{Key: "status", Value: int32(store.CampaignRunning)}},
+		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}, {Key: "tenant_id", Value: 1}}))
+	if err != nil {
+		return nil, wrap("claimable: running campaigns", err)
+	}
+	var campaigns []struct {
+		ID       string `bson:"_id"`
+		TenantID string `bson:"tenant_id"`
+	}
+	if err := cur.All(ctx, &campaigns); err != nil {
+		return nil, wrap("claimable: running campaigns", err)
+	}
+	type tenantCampaign struct{ tenant, campaign string }
+	running := make(map[tenantCampaign]bool, len(campaigns))
+	ids := make([]string, 0, len(campaigns))
+	for _, c := range campaigns {
+		running[tenantCampaign{c.TenantID, c.ID}] = true
+		ids = append(ids, c.ID)
+	}
+
+	due := bson.E{Key: "next_attempt_at", Value: bson.D{{Key: "$lte", Value: ts(now)}}}
+	branches := bson.A{bson.D{
+		due,
+		{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(claimable)}}},
+		{Key: "campaign_id", Value: bson.D{{Key: "$exists", Value: false}}},
+	}}
+	if len(ids) > 0 {
+		branches = append(branches, bson.D{
+			due,
+			{Key: "status", Value: bson.D{{Key: "$in", Value: statusInts(
+				append([]store.DeliveryStatus{store.DeliveryPending}, claimable...))}}},
+			{Key: "campaign_id", Value: bson.D{{Key: "$in", Value: ids}}},
+		})
+	}
+	cur, err = p.db.Collection(collDelivery).Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "$or", Value: branches}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: bson.D{
+				{Key: "lane", Value: "$lane"},
+				{Key: "tenant", Value: "$tenant_id"},
+				{Key: "campaign", Value: "$campaign_id"},
+			}},
+			{Key: "n", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+	})
+	if err != nil {
+		return nil, wrap("claimable", err)
+	}
+	var rows []struct {
+		ID struct {
+			Lane     int32  `bson:"lane"`
+			Tenant   string `bson:"tenant"`
+			Campaign string `bson:"campaign"`
+		} `bson:"_id"`
+		N int64 `bson:"n"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, wrap("claimable", err)
+	}
+	counts := map[store.Lane]int64{}
+	for _, row := range rows {
+		if row.ID.Campaign != "" && !running[tenantCampaign{row.ID.Tenant, row.ID.Campaign}] {
+			continue
+		}
+		counts[store.Lane(enum8(row.ID.Lane))] += row.N
+	}
+	out := make([]store.LaneCount, 0, len(counts))
+	for lane, n := range counts {
+		out = append(out, store.LaneCount{Lane: lane, Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Lane < out[j].Lane })
+	return out, nil
+}
+
 // knownTenantCollections are the configuration collections Tenants unions
 // over: the small, tenant-keyed ones (store.Provider.Tenants).
 var knownTenantCollections = []string{

@@ -33,9 +33,17 @@ spec:
             - --config=/etc/sendplane/config.yaml
             - --roles={{ .Values.control.roles }}
             - --listen=:{{ .Values.control.listen }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-listen=:{{ .Values.metrics.port }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.control.listen }}
+            {{- if .Values.metrics.enabled }}
+            # Prometheus /metrics, scraped via the <fullname>-metrics Service.
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           envFrom:
             {{- include "sendplane.envFrom" . | nindent 12 }}
           volumeMounts:

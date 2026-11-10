@@ -166,19 +166,9 @@ func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store
 	}
 	cands := make([]*store.Delivery, 0, 64)
 	for _, d := range r.s.d.deliveries {
-		if d.Lane != req.Lane {
-			continue
+		if d.Lane == req.Lane && claimEligible(d, campaigns, now) {
+			cands = append(cands, d)
 		}
-		if !claimableStatus(d, campaigns) {
-			continue
-		}
-		if d.NextAttemptAt.After(now) {
-			continue
-		}
-		if campaigns != nil && d.CampaignID != "" && !campaigns[d.CampaignID] {
-			continue
-		}
-		cands = append(cands, d)
 	}
 	sort.Slice(cands, func(i, j int) bool {
 		a, b := cands[i], cands[j]
@@ -203,6 +193,16 @@ func (r *deliveryRepo) Claim(_ context.Context, req store.ClaimRequest) ([]store
 		out = append(out, *d)
 	}
 	return out, nil
+}
+
+// claimEligible is the Claim predicate without the lane: what Claim takes and
+// what Provider.Claimable counts, kept in one place so the two cannot drift.
+// campaigns is the caller's CampaignIDs as a set, nil when it was nil.
+func claimEligible(d *store.Delivery, campaigns map[string]bool, now time.Time) bool {
+	if !claimableStatus(d, campaigns) || d.NextAttemptAt.After(now) {
+		return false
+	}
+	return campaigns == nil || d.CampaignID == "" || campaigns[d.CampaignID]
 }
 
 // claimableStatus is the status half of the Claim predicate: queued and

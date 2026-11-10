@@ -144,6 +144,88 @@ func (p *Provider) ActiveTenants(ctx context.Context) ([]string, error) {
 	return out, mapErr(rows.Err())
 }
 
+var _ store.QueueDepthReader = (*Provider)(nil)
+
+// QueueDepth counts the non-terminal deliveries of every tenant per (lane,
+// status) in one statement (store.QueueDepthReader).
+//
+// The predicate is spelled as the two partial-index predicates OR-ed, not as
+// status IN (0, 1, 2, 3): the planner only uses a partial index whose
+// predicate the WHERE clause implies, and an IN list implies neither
+// delivery_claim_v2 (status IN (0, 1, 3)) nor delivery_lease (status = 2), so
+// it falls back to a sequential scan of every terminal row. Split, it
+// BitmapOr-s the two indexes and reads only the heap pages that hold open rows.
+// Measured on PostgreSQL 16 with 3M terminal and 60k open rows: 18 ms and 1.9k
+// buffers against 507 ms and 56k for the IN form when the open rows are
+// clustered (as freshly ingested chunks are); when every open row sits on its
+// own heap page both shapes read the whole heap and cost about the same. It
+// is a scrape-interval query, so that worst case does not justify an extra
+// (lane, status) index on the claim path's write side.
+func (p *Provider) QueueDepth(ctx context.Context) ([]store.QueueDepth, error) {
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	const q = `SELECT lane, status, count(*) FROM delivery
+	           WHERE status IN (0, 1, 3) OR status = 2
+	           GROUP BY lane, status ORDER BY lane, status`
+	rows, err := p.pool.Query(ctx, q)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []store.QueueDepth
+	for rows.Next() {
+		var lane, status int16
+		var n int64
+		if err := rows.Scan(&lane, &status, &n); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, store.QueueDepth{
+			Lane: enumOut[store.Lane](lane), Status: enumOut[store.DeliveryStatus](status), Count: n,
+		})
+	}
+	return out, mapErr(rows.Err())
+}
+
+// claimableSQL is QueueDepthReader.Claimable as one statement, with
+// deliveryRepo.Claim's predicate for the running set the sender passes it
+// (queued/deferred without a campaign, or any open row of a campaign running
+// in the same tenant). The leading status IN (0, 1, 3) is there for the same
+// reason as in Claim: it lets the planner prove delivery_claim_v2's partial
+// predicate, so the terminal rows are never read. The running campaigns are
+// few, so the IN becomes a hashed subplan over them rather than a join.
+// Measured on PostgreSQL 16 (200k terminal rows, 10k pending of running and
+// 10k of paused campaigns, 3.5k other open rows): bitmap scan of
+// delivery_claim_v2, 9 ms, about 930 buffers.
+const claimableSQL = `SELECT lane, count(*) FROM delivery
+	WHERE status IN (0, 1, 3) AND next_attempt_at <= $1
+	  AND ((status IN (1, 3) AND campaign_id IS NULL)
+	    OR (tenant_id, campaign_id) IN (SELECT tenant_id, id FROM campaign WHERE status = 2))
+	GROUP BY lane ORDER BY lane`
+
+// Claimable counts, per lane, the deliveries a sender could claim at now
+// (store.QueueDepthReader).
+func (p *Provider) Claimable(ctx context.Context, now time.Time) ([]store.LaneCount, error) {
+	if err := p.check(); err != nil {
+		return nil, err
+	}
+	rows, err := p.pool.Query(ctx, claimableSQL, tsInNN(now))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []store.LaneCount
+	for rows.Next() {
+		var lane int16
+		var n int64
+		if err := rows.Scan(&lane, &n); err != nil {
+			return nil, mapErr(err)
+		}
+		out = append(out, store.LaneCount{Lane: enumOut[store.Lane](lane), Count: n})
+	}
+	return out, mapErr(rows.Err())
+}
+
 // knownTenantTables are the configuration tables Tenants unions over. They are
 // the small, tenant-keyed ones, each with a (tenant_id, ...) index leading
 // with the column being distinct-ed, so the scan stays cheap; the
