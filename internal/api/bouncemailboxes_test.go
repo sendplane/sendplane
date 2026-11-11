@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"testing"
+
+	"github.com/sendplane/sendplane/store"
 )
 
 // TestBounceMailboxCRUD covers the tenant resource the bounce poller reads its
@@ -45,8 +47,8 @@ func TestBounceMailboxCRUD(t *testing.T) {
 	if string(stored.Password) == "s3cret" {
 		t.Error("the password was stored in the clear")
 	}
-	if string(xorAll(stored.Password)) != "s3cret" {
-		t.Errorf("stored password = %q, want the encrypted secret", stored.Password)
+	if got := xorPlain(stored.Password, store.BounceMailboxPasswordContext(stored)); got != "s3cret" {
+		t.Errorf("stored password decrypts to %q under its row's context, want the secret", got)
 	}
 	if stored.AfterProcess != "move:Handled" {
 		t.Errorf("after_process = %q", stored.AfterProcess)

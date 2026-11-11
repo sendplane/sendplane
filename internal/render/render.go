@@ -64,7 +64,14 @@ type Bindings struct {
 	// TenantVars are the tenant attributes of this send, exposed as
 	// `{{ tenant.* }}`. They come from the request, not from a tenant table:
 	// sendplane stores no tenant attributes (ADR-0017).
-	TenantVars     map[string]any
+	TenantVars map[string]any
+	// Secret is a sensitive delivery's secret_vars, exposed as
+	// `{{ secret.* }}` and nowhere else (ADR-0019): it is deliberately not
+	// merged into Vars or Recipient.Vars, so a template that dumps `vars`
+	// cannot print it by accident, and nothing that is handed the ordinary
+	// variables (hooks, the unsubscribe URL template) ever sees it. Nil for
+	// every other delivery and for previews.
+	Secret         map[string]any
 	Campaign       Campaign
 	UnsubscribeURL string
 	// Locale overrides the locale exposed as {{ locale }}; it defaults to the
@@ -336,10 +343,18 @@ func (p *Prepared) baseBindings(b Bindings, locale string) map[string]any {
 		tenant = map[string]any{}
 	}
 
+	secret := b.Secret
+	if secret == nil {
+		// Empty for the same reason as tenant. A send that needs a secret key
+		// it was not given is refused at the API (ADR-0019), not here.
+		secret = map[string]any{}
+	}
+
 	return map[string]any{
 		"recipient":       recipient,
 		"vars":            vars,
 		"tenant":          tenant,
+		"secret":          secret,
 		"campaign":        map[string]any{"id": b.Campaign.ID, "name": b.Campaign.Name},
 		"unsubscribe_url": b.UnsubscribeURL,
 		"locale":          locale,

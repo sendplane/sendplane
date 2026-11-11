@@ -33,6 +33,40 @@ func campaignEq(campaignID string) bson.E {
 	return bson.E{Key: "campaign_id", Value: campaignID}
 }
 
+// insertSecret is the secret invariant (store.Delivery) on the way in: only a
+// pending secret has a ciphertext, and a row inserted already terminal
+// (suppressed at ingest) has nothing left to send it to.
+func insertSecret(d *store.Delivery) {
+	if d.SecretState == store.SecretPending && d.Status.Terminal() {
+		d.SecretState = store.SecretDiscarded
+	}
+	if d.SecretState != store.SecretPending {
+		d.SecretCiphertext = nil
+	}
+}
+
+// ifPending is an aggregation expression that evaluates to then for a row
+// whose secret is still pending and leaves secret_state as it is otherwise.
+// Every write that moves a pending secret on pairs it with secret_ct: null in
+// the same $set, which is the whole invariant (store.Delivery). A row that
+// is not pending has no ciphertext left, so the null is a no-op there.
+//
+// A document written before the field existed has no secret_state at all;
+// "$secret_state" is then missing and $set leaves it missing, which decodes as
+// SecretNone.
+func ifPending(then any) bson.D {
+	return bson.D{{Key: "$cond", Value: bson.D{
+		{Key: "if", Value: bson.D{{Key: "$eq", Value: bson.A{"$secret_state", int32(store.SecretPending)}}}},
+		{Key: "then", Value: then},
+		{Key: "else", Value: "$secret_state"},
+	}}}
+}
+
+// wasSent is true for a row that already has a sent_at.
+var wasSent = bson.D{{Key: "$ne", Value: bson.A{
+	bson.D{{Key: "$ifNull", Value: bson.A{"$sent_at", nil}}}, nil,
+}}}
+
 // InsertBatch inserts with ordered:false and counts the duplicate-key errors:
 // re-sending a chunk inserts only the rows that are new (architecture 7.2).
 func (r *deliveryRepo) InsertBatch(ctx context.Context, ds []store.Delivery) (int, error) {
@@ -61,6 +95,7 @@ func (r *deliveryRepo) InsertBatch(ctx context.Context, ds []store.Delivery) (in
 		if d.NextAttemptAt.IsZero() {
 			d.NextAttemptAt = now
 		}
+		insertSecret(&d)
 		docs = append(docs, encDelivery(&d))
 	}
 	if _, err := r.coll().InsertMany(ctx, docs, options.InsertMany().SetOrdered(false)); err != nil {
@@ -242,6 +277,28 @@ func (r *deliveryRepo) Complete(ctx context.Context, results []store.DeliveryRes
 		}
 		if res.NewStatus.Terminal() {
 			set = append(set, bson.E{Key: "finished_at", Value: ts(now)})
+			// Settle a pending secret in this same update. Every expression
+			// in one $set stage reads the document as it was before it, so
+			// "$sent_at" is the MarkSent stamp, not the one set just above.
+			sent := any(wasSent)
+			if res.NewStatus == store.DeliverySent {
+				sent = true
+			}
+			expired := bson.D{{Key: "$and", Value: bson.A{
+				bson.D{{Key: "$ne", Value: bson.A{
+					bson.D{{Key: "$ifNull", Value: bson.A{"$secret_expires_at", nil}}}, nil,
+				}}},
+				bson.D{{Key: "$lte", Value: bson.A{"$secret_expires_at", ts(now)}}},
+			}}}
+			set = append(set,
+				bson.E{Key: "secret_state", Value: ifPending(bson.D{{Key: "$switch", Value: bson.D{
+					{Key: "branches", Value: bson.A{
+						bson.D{{Key: "case", Value: sent}, {Key: "then", Value: int32(store.SecretConsumed)}},
+						bson.D{{Key: "case", Value: expired}, {Key: "then", Value: int32(store.SecretExpired)}},
+					}},
+					{Key: "default", Value: int32(store.SecretDiscarded)},
+				}}})},
+				bson.E{Key: "secret_ct", Value: nil})
 		}
 		upd, err := r.coll().UpdateOne(ctx,
 			r.s.scope(
@@ -285,13 +342,17 @@ func (r *deliveryRepo) MarkSent(ctx context.Context, id, owner, messageID string
 			bson.E{Key: "lease_owner", Value: owner},
 			bson.E{Key: "status", Value: int32(store.DeliveryLeased)},
 		),
-		bson.D{{Key: "$set", Value: bson.D{
+		// A pipeline update, so that the secret is settled in the same
+		// write as the status (ADR-0019).
+		mongo.Pipeline{{{Key: "$set", Value: bson.D{
 			{Key: "status", Value: int32(store.DeliverySent)},
-			{Key: "message_id", Value: messageID},
+			{Key: "message_id", Value: lit(messageID)},
 			{Key: "sent_at", Value: ts(at)},
 			{Key: "finished_at", Value: ts(at)},
 			{Key: "updated_at", Value: ts(at)},
-		}}})
+			{Key: "secret_state", Value: ifPending(int32(store.SecretConsumed))},
+			{Key: "secret_ct", Value: nil},
+		}}}})
 	if err != nil {
 		return wrap("mark sent", err)
 	}
@@ -376,6 +437,39 @@ func (r *deliveryRepo) ReleaseExpiredLeases(ctx context.Context, now time.Time, 
 	return int(res.MatchedCount), nil
 }
 
+// ExpireSecrets fails pending secrets whose expiry has passed. The update
+// re-applies the filter, so a row a sender claimed between the find and the
+// update stays with that sender. A null secret_expires_at ("no expiry") never
+// matches $lte on a date.
+func (r *deliveryRepo) ExpireSecrets(ctx context.Context, now time.Time, limit int) (int, error) {
+	filter := r.s.scope(
+		bson.E{Key: "secret_state", Value: int32(store.SecretPending)},
+		bson.E{Key: "secret_expires_at", Value: bson.D{{Key: "$lte", Value: ts(now)}}},
+		bson.E{Key: "status", Value: bson.D{{Key: "$ne", Value: int32(store.DeliveryLeased)}}},
+	)
+	ids, err := findIDs(ctx, r.coll(), filter, secretExpirySort, limit)
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	res, err := r.coll().UpdateMany(ctx, and(filter, bson.D{inIDs(ids)}),
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "status", Value: int32(store.DeliveryFailed)},
+			{Key: "finished_at", Value: ts(now)},
+			{Key: "last_error_class", Value: int32(store.ErrorClassPermanent)},
+			{Key: "last_error", Value: store.SecretExpiredError},
+			{Key: "secret_state", Value: int32(store.SecretExpired)},
+			{Key: "secret_ct", Value: nil},
+			{Key: "updated_at", Value: ts(now)},
+		}}})
+	if err != nil {
+		return 0, wrap("expire secrets", err)
+	}
+	return int(res.MatchedCount), nil
+}
+
+// secretExpirySort walks pending secrets oldest expiry first.
+var secretExpirySort = bson.D{{Key: "secret_expires_at", Value: 1}, {Key: "_id", Value: 1}}
+
 func (r *deliveryRepo) CountByStatus(ctx context.Context, campaignID string) (map[store.DeliveryStatus]int64, error) {
 	cur, err := r.coll().Aggregate(ctx, mongo.Pipeline{
 		{{Key: "$match", Value: r.s.scope(campaignEq(campaignID))}},
@@ -420,10 +514,22 @@ func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, fr
 		{Key: "updated_at", Value: ts(now)},
 	}
 	if to.Terminal() {
-		set = append(set, bson.E{Key: "finished_at", Value: ts(now)})
+		// A pending secret is consumed if the row was sent and discarded
+		// otherwise; a cancel is never an expiry, even past
+		// secret_expires_at.
+		sent := bson.D{{Key: "$or", Value: bson.A{
+			bson.D{{Key: "$eq", Value: bson.A{"$status", int32(store.DeliverySent)}}},
+			wasSent,
+		}}}
+		set = append(set,
+			bson.E{Key: "finished_at", Value: ts(now)},
+			bson.E{Key: "secret_state", Value: ifPending(bson.D{{Key: "$cond", Value: bson.A{
+				sent, int32(store.SecretConsumed), int32(store.SecretDiscarded),
+			}}})},
+			bson.E{Key: "secret_ct", Value: nil})
 	}
 	res, err := r.coll().UpdateMany(ctx, and(filter, bson.D{inIDs(ids)}),
-		bson.D{{Key: "$set", Value: set}})
+		mongo.Pipeline{{{Key: "$set", Value: set}}})
 	if err != nil {
 		return 0, wrap("bulk transition", err)
 	}
@@ -431,9 +537,12 @@ func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, fr
 }
 
 // Requeue is the manual retry: matching deliveries go back to queued with
-// RetryGen bumped and AttemptCount kept.
+// RetryGen bumped and AttemptCount kept. A sensitive delivery is never
+// matched (ADR-0019); the null also matches a document written before
+// secret_state existed, which is SecretNone.
 func (r *deliveryRepo) Requeue(ctx context.Context, f store.RetryFilter, limit int) (int, error) {
-	filter := r.s.scope(campaignEq(f.CampaignID))
+	filter := r.s.scope(campaignEq(f.CampaignID),
+		bson.E{Key: "secret_state", Value: bson.D{{Key: "$in", Value: bson.A{int32(store.SecretNone), nil}}}})
 	if f.DeliveryIDs != nil {
 		// A non-nil but empty list matches nothing (store/delivery.go).
 		filter = append(filter, inIDs(f.DeliveryIDs))

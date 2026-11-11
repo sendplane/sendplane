@@ -414,6 +414,11 @@ type delivery struct {
 	// TenantVars is set only on a delivery with no campaign to inherit them
 	// from: a transactional send or a probe (ADR-0017).
 	TenantVars map[string]any `json:"tenant_vars"`
+	// The secret_vars lifecycle of ADR-0019. The secret itself is never part
+	// of a delivery; scenario 10 checks that too.
+	Sensitive       bool       `json:"sensitive"`
+	SecretState     string     `json:"secret_state"`
+	SecretExpiresAt *time.Time `json:"secret_expires_at"`
 }
 
 type linkClick struct {
@@ -437,6 +442,9 @@ type messageRecipient struct {
 	Name   string         `json:"name,omitempty"`
 	Locale string         `json:"locale,omitempty"`
 	Vars   map[string]any `json:"vars,omitempty"`
+	// SecretVars are rendered as {{ secret.* }} and never stored in clear
+	// (ADR-0019).
+	SecretVars map[string]any `json:"secret_vars,omitempty"`
 }
 
 type messageRequest struct {
@@ -446,6 +454,9 @@ type messageRequest struct {
 	TenantVars map[string]any     `json:"tenant_vars,omitempty"`
 	To         []messageRecipient `json:"to"`
 	Headers    map[string]string  `json:"headers,omitempty"`
+	// SecretTTLSeconds bounds how long the recipients' secret_vars may wait
+	// to be sent.
+	SecretTTLSeconds int `json:"secret_ttl_seconds,omitempty"`
 }
 
 type messageResultItem struct {

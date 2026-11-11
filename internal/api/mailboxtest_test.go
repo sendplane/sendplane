@@ -109,8 +109,8 @@ func TestProbeMailboxCredentialsEndpoint(t *testing.T) {
 	if string(cfg.Password) == "s3cret" {
 		t.Error("the plaintext password was handed to the tester")
 	}
-	if string(xorAll(cfg.Password)) != "s3cret" {
-		t.Errorf("the tester got %q, which is not the encrypted password", cfg.Password)
+	if got := xorPlain(cfg.Password, cfg.PasswordContext); got != "s3cret" {
+		t.Errorf("the tester's ciphertext decrypts to %q under the context it was given", got)
 	}
 
 	// Nothing was persisted.
@@ -193,8 +193,11 @@ func TestStoredProbeMailboxTestPersistsHealth(t *testing.T) {
 
 	// The stored ciphertext is what was dialed with.
 	cfg, _ := ft.seen()
-	if string(xorAll(cfg.Password)) != "s3cret" {
-		t.Errorf("the stored password was not used: %q", cfg.Password)
+	if got := xorPlain(cfg.Password, cfg.PasswordContext); got != "s3cret" {
+		t.Errorf("the stored password was not used: %q", got)
+	}
+	if cfg.PasswordContext.Purpose != store.PurposeProbeMailboxPassword || cfg.PasswordContext.ObjectID != m.Id {
+		t.Errorf("the tester was not given the row's context: %+v", cfg.PasswordContext)
 	}
 }
 
@@ -250,8 +253,13 @@ func TestStoredMailboxTestWithOverridePassword(t *testing.T) {
 			MailboxTestRequest{Password: ptr("a-typo")}), http.StatusOK)
 
 	cfg, _ := ft.seen()
-	if string(xorAll(cfg.Password)) != "a-typo" {
-		t.Errorf("the override password was not used: %q", xorAll(cfg.Password))
+	if got := xorPlain(cfg.Password, cfg.PasswordContext); got != "a-typo" {
+		t.Errorf("the override password was not used: %q", got)
+	}
+	// It is bound to a test context, never to the stored row: a ciphertext
+	// the row accepts only ever comes from writing the row.
+	if cfg.PasswordContext.Purpose != store.PurposeMailboxTestPassword || cfg.PasswordContext.ObjectID == m.Id {
+		t.Errorf("the override was encrypted under %+v", cfg.PasswordContext)
 	}
 
 	after := decodeInto[ProbeMailbox](t,
@@ -264,8 +272,8 @@ func TestStoredMailboxTestWithOverridePassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(xorAll(stored.Password)) != "s3cret" {
-		t.Errorf("the stored password was overwritten: %q", xorAll(stored.Password))
+	if got := xorPlain(stored.Password, store.ProbeMailboxPasswordContext(stored)); got != "s3cret" {
+		t.Errorf("the stored password was overwritten: %q", got)
 	}
 }
 

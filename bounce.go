@@ -145,10 +145,11 @@ func (s bounceMailboxes) ListMailboxes(ctx context.Context) ([]bounce.TenantMail
 					Host:     m.Host, Port: m.Port, TLS: m.TLS,
 					Username: m.Username,
 					// The ciphertext exactly as the store holds it; the dialer
-					// decrypts it with Options.Secrets.
-					Password:     m.Password,
-					Folder:       m.Folder,
-					AfterProcess: action,
+					// decrypts it with Options.Secrets, bound to this row.
+					Password:        m.Password,
+					PasswordContext: store.BounceMailboxPasswordContext(m),
+					Folder:          m.Folder,
+					AfterProcess:    action,
 				},
 			})
 		}

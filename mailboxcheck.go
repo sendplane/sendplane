@@ -206,7 +206,8 @@ func probeCheckConfig(m *store.ProbeMailbox) mailbox.Config {
 		Protocol: mailbox.ProtocolIMAP,
 		Host:     m.Host, Port: m.Port, TLS: m.TLS,
 		Username: m.Username, Password: m.Password,
-		Folder: folders[0], ExtraFolders: folders[1:],
+		PasswordContext: store.ProbeMailboxPasswordContext(m),
+		Folder:          folders[0], ExtraFolders: folders[1:],
 	}
 }
 
@@ -220,6 +221,7 @@ func bounceCheckConfig(m *store.BounceMailbox) mailbox.Config {
 		Protocol: protocol,
 		Host:     m.Host, Port: m.Port, TLS: m.TLS,
 		Username: m.Username, Password: m.Password,
-		Folder: m.Folder,
+		PasswordContext: store.BounceMailboxPasswordContext(m),
+		Folder:          m.Folder,
 	}
 }

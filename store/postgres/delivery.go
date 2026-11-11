@@ -25,6 +25,7 @@ var deliveryColumns = []string{
 	"sent_at", "finished_at",
 	"first_opened_at", "first_clicked_at", "unsubscribed_at",
 	"created_at", "updated_at",
+	"secret_ct", "secret_expires_at", "secret_state",
 }
 
 var (
@@ -64,6 +65,7 @@ func deliveryValues(d *store.Delivery) ([]any, error) {
 		tsIn(d.SentAt), tsIn(d.FinishedAt),
 		tsIn(d.FirstOpenedAt), tsIn(d.FirstClickedAt), tsIn(d.UnsubscribedAt),
 		tsInNN(d.CreatedAt), tsInNN(d.UpdatedAt),
+		d.SecretCiphertext, tsIn(d.SecretExpiresAt), i16(d.SecretState),
 	}, nil
 }
 
@@ -71,9 +73,9 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	var d store.Delivery
 	var campaign *string
 	var vars, tenantVars, headers []byte
-	var lane, status, errClass int16
+	var lane, status, errClass, secretState int16
 	var nextAt time.Time
-	var leaseUntil, sentAt, finishedAt, opened, clicked, unsubscribed *time.Time
+	var leaseUntil, sentAt, finishedAt, opened, clicked, unsubscribed, secretExpires *time.Time
 	if err := r.Scan(
 		&d.ID, &d.TenantID, &campaign, &d.VersionID, &d.SenderID, &lane,
 		&d.Priority, &status, &d.Email, &d.EmailNorm, &d.Name, &d.Locale,
@@ -82,6 +84,7 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 		&errClass, &d.LastSMTPCode, &d.LastError, &d.MessageID,
 		&sentAt, &finishedAt, &opened, &clicked, &unsubscribed,
 		&d.CreatedAt, &d.UpdatedAt,
+		&d.SecretCiphertext, &secretExpires, &secretState,
 	); err != nil {
 		return nil, err
 	}
@@ -96,6 +99,8 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 	d.FirstOpenedAt = tsOut(opened)
 	d.FirstClickedAt = tsOut(clicked)
 	d.UnsubscribedAt = tsOut(unsubscribed)
+	d.SecretExpiresAt = tsOut(secretExpires)
+	d.SecretState = enumOut[store.SecretState](secretState)
 	d.CreatedAt, d.UpdatedAt = d.CreatedAt.UTC(), d.UpdatedAt.UTC()
 	if err := jsonOut(headers, &d.Headers); err != nil {
 		return nil, err
@@ -109,6 +114,18 @@ func scanDelivery(r rowScanner) (*store.Delivery, error) {
 type deliveryRepo struct {
 	p      *Provider
 	tenant string
+}
+
+// insertSecret is the secret invariant (store.Delivery) on the way in: only a
+// pending secret has a ciphertext, and a row inserted already terminal
+// (suppressed at ingest) has nothing left to send it to.
+func insertSecret(d *store.Delivery) {
+	if d.SecretState == store.SecretPending && d.Status.Terminal() {
+		d.SecretState = store.SecretDiscarded
+	}
+	if d.SecretState != store.SecretPending {
+		d.SecretCiphertext = nil
+	}
 }
 
 // campaignPredicate matches one campaign, or the deliveries without a campaign
@@ -160,6 +177,7 @@ func (r *deliveryRepo) InsertBatch(ctx context.Context, ds []store.Delivery) (in
 		if d.NextAttemptAt.IsZero() {
 			d.NextAttemptAt = now
 		}
+		insertSecret(&d)
 		vals, err := deliveryValues(&d)
 		if err != nil {
 			return 0, err
@@ -411,6 +429,11 @@ func (r *deliveryRepo) Claim(ctx context.Context, req store.ClaimRequest) ([]sto
 // UPDATE ... FROM unnest(...) transitions every row still held by its worker
 // and returns the ids that matched, and only those get an attempt row. A
 // replayed batch therefore changes nothing.
+//
+// A terminal result settles a pending secret in the same UPDATE (the
+// secret_state/secret_ct CASEs, which see the row's old values): consumed if
+// it was sent, expired once secret_expires_at has passed, discarded
+// otherwise.
 func (r *deliveryRepo) Complete(ctx context.Context, results []store.DeliveryResult) error {
 	if err := r.p.check(); err != nil {
 		return err
@@ -460,6 +483,12 @@ UPDATE delivery d SET
     next_attempt_at  = COALESCE(r.next_attempt_at, d.next_attempt_at),
     sent_at          = CASE WHEN r.new_status = 4 AND d.sent_at IS NULL THEN $11 ELSE d.sent_at END,
     finished_at      = CASE WHEN r.terminal THEN $11 ELSE d.finished_at END,
+    secret_state     = CASE WHEN r.terminal AND d.secret_state = 1 THEN
+                         CASE WHEN r.new_status = 4 OR d.sent_at IS NOT NULL THEN 2
+                              WHEN d.secret_expires_at IS NOT NULL AND d.secret_expires_at <= $11 THEN 4
+                              ELSE 3 END
+                       ELSE d.secret_state END,
+    secret_ct        = CASE WHEN r.terminal THEN NULL ELSE d.secret_ct END,
     lease_owner      = '',
     lease_until      = NULL,
     updated_at       = $11
@@ -513,8 +542,11 @@ func (r *deliveryRepo) MarkSent(ctx context.Context, id, owner, messageID string
 	if err := r.p.check(); err != nil {
 		return err
 	}
+	// The secret goes in the same statement as the status (ADR-0019).
 	const q = `UPDATE delivery SET status = 4, message_id = $3,
-	    sent_at = $4, finished_at = $4, updated_at = $4
+	    sent_at = $4, finished_at = $4, updated_at = $4,
+	    secret_state = CASE WHEN secret_state = 1 THEN 2 ELSE secret_state END,
+	    secret_ct = NULL
 	  WHERE id = $1 AND tenant_id = $2 AND status = 2 AND lease_owner <> '' AND lease_owner = $5`
 	tag, err := r.p.pool.Exec(ctx, q, id, r.tenant, messageID, tsInNN(at), owner)
 	if err != nil {
@@ -588,6 +620,31 @@ func (r *deliveryRepo) ReleaseExpiredLeases(ctx context.Context, now time.Time, 
 	return int(tag.RowsAffected()), nil
 }
 
+// ExpireSecrets fails pending secrets whose expiry has passed, in expiry
+// order, off the delivery_secret_expiry partial index. Leased rows belong to
+// their sender, which checks the expiry itself after the claim.
+func (r *deliveryRepo) ExpireSecrets(ctx context.Context, now time.Time, limit int) (int, error) {
+	if err := r.p.check(); err != nil {
+		return 0, err
+	}
+	a := &args{}
+	at := a.add(tsInNN(now))
+	q := "WITH c AS (SELECT id FROM delivery WHERE tenant_id = " + a.add(r.tenant) +
+		" AND secret_state = 1 AND secret_expires_at <= " + at + " AND status <> 2" +
+		" ORDER BY secret_expires_at, id LIMIT " + a.add(limitOrAll(limit)) +
+		" FOR UPDATE SKIP LOCKED) " +
+		"UPDATE delivery d SET status = 5, finished_at = " + at +
+		", last_error_class = " + a.add(i16(store.ErrorClassPermanent)) +
+		", last_error = " + a.add(store.SecretExpiredError) +
+		", secret_state = 4, secret_ct = NULL, updated_at = " + at +
+		" FROM c WHERE d.id = c.id"
+	tag, err := r.p.pool.Exec(ctx, q, a.v...)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // BulkTransition moves up to limit deliveries between statuses, so cancel can
 // walk a million rows in chunks.
 func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, from []store.DeliveryStatus, to store.DeliveryStatus, limit int) (int, error) {
@@ -605,7 +662,14 @@ func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, fr
 		" ORDER BY id LIMIT " + a.add(limitOrAll(limit)) + " FOR UPDATE SKIP LOCKED) " +
 		"UPDATE delivery d SET status = " + a.add(i16(to))
 	if to.Terminal() {
-		q += ", finished_at = " + a.add(tsInNN(now))
+		// A pending secret is consumed if the row was sent and discarded
+		// otherwise, in this same UPDATE; a cancel is never an expiry, even
+		// past secret_expires_at. A row that is not pending has no ciphertext
+		// left, so clearing it there is a no-op.
+		q += ", finished_at = " + a.add(tsInNN(now)) +
+			", secret_state = CASE WHEN d.secret_state = 1 THEN" +
+			" CASE WHEN d.status = 4 OR d.sent_at IS NOT NULL THEN 2 ELSE 3 END" +
+			" ELSE d.secret_state END, secret_ct = NULL"
 	}
 	q += ", updated_at = " + a.add(tsInNN(now)) + " FROM c WHERE d.id = c.id"
 	tag, err := r.p.pool.Exec(ctx, q, a.v...)
@@ -616,13 +680,15 @@ func (r *deliveryRepo) BulkTransition(ctx context.Context, campaignID string, fr
 }
 
 // Requeue is the manual retry: matching deliveries go back to queued with
-// RetryGen bumped and AttemptCount kept.
+// RetryGen bumped and AttemptCount kept. A sensitive delivery
+// (secret_state <> 0) is never matched (ADR-0019).
 func (r *deliveryRepo) Requeue(ctx context.Context, f store.RetryFilter, limit int) (int, error) {
 	if err := r.p.check(); err != nil {
 		return 0, err
 	}
 	a := &args{}
-	where := "tenant_id = " + a.add(r.tenant) + campaignPredicate(a, f.CampaignID)
+	where := "tenant_id = " + a.add(r.tenant) + campaignPredicate(a, f.CampaignID) +
+		" AND secret_state = 0"
 	if f.DeliveryIDs != nil {
 		// A non-nil but empty list selects nothing, like the reference store.
 		where += " AND id = ANY(" + a.add(f.DeliveryIDs) + "::text[])"

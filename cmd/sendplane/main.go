@@ -4,6 +4,9 @@
 // AES-GCM secret encryption, and runs any combination of the control, sender
 // and bounce roles from one binary and one image (--roles).
 //
+// `sendplane secrets rewrap` is the one subcommand: a one-off upgrade step
+// that binds pre-existing secret ciphertexts to their rows (rewrap.go).
+//
 // See config.example.yaml for the configuration schema and README.md for an
 // overview in Korean.
 package main
@@ -142,6 +145,10 @@ func parseRoles(s string) (roleSet, error) {
 }
 
 func run(args []string, stdout io.Writer) error {
+	// One-off maintenance subcommands come before the serving flags.
+	if len(args) > 0 && args[0] == "secrets" {
+		return runSecrets(args[1:], stdout)
+	}
 	flags, err := parseFlags(args)
 	if err != nil {
 		return err

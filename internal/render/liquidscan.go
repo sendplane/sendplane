@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // This file holds the small, quote-aware scanner that lets us look at Liquid
@@ -322,12 +323,18 @@ func ExtractKeys(subject, body, text string) ([]string, error) {
 // chain or a tag argument (`{% if tenant.plan == "pro" %}`), and the bracket
 // form `{{ root["slug"] }}`. A path built at render time
 // (`{{ tenant[key] }}`) cannot be known statically and is skipped, as is a
-// bare `{{ root }}` with no path at all.
+// bare `{{ root }}` with no path at all. Only the top-level variable counts
+// (scanRootRefs): `{{ vars.tenant.slug }}` and `{{ "tenant.slug" | t }}` do
+// not read it.
 func ExtractVars(root string, srcs ...string) []string {
 	seen := map[string]struct{}{}
 	for _, src := range srcs {
-		for _, sp := range scanLiquidSpans(src) {
-			collectVars(root, sp.inner, seen)
+		for _, sp := range liveSpans(src) {
+			scanRootRefs(root, sp.inner, func(path string) {
+				if path != "" {
+					seen[path] = struct{}{}
+				}
+			})
 		}
 	}
 	out := make([]string, 0, len(seen))
@@ -338,26 +345,111 @@ func ExtractVars(root string, srcs ...string) []string {
 	return out
 }
 
-// collectVars finds every `root.<path>` and `root["path"]` reference in one
-// Liquid construct's inner text.
-func collectVars(root, inner string, seen map[string]struct{}) {
-	for i := 0; i+len(root) <= len(inner); {
-		j := strings.Index(inner[i:], root)
-		if j < 0 {
-			return
+// liveSpans is scanLiquidSpans without the constructs inside a
+// {% comment %} or {% raw %} block. Neither block is evaluated, so nothing in
+// it reads or declares a variable.
+func liveSpans(src string) []span {
+	all := scanLiquidSpans(src)
+	out := make([]span, 0, len(all))
+	comment, raw := 0, false
+	for _, sp := range all {
+		name := ""
+		if sp.kind == spanTag {
+			name, _ = tagNameArgs(sp.inner)
 		}
-		at := i + j
-		i = at + len(root)
-		// The match has to be a whole identifier: `subtenant.slug` is not a
-		// reference to `tenant`.
-		if at > 0 && isIdentByte(inner[at-1]) {
-			continue
-		}
-		if path, n := scanVarPath(inner[i:]); path != "" {
-			seen[path] = struct{}{}
-			i += n
+		switch {
+		case raw:
+			raw = name != "endraw"
+		case comment > 0:
+			switch name {
+			case "comment":
+				comment++
+			case "endcomment":
+				comment--
+			}
+		case name == "raw":
+			raw = true
+		case name == "comment":
+			comment++
+		default:
+			out = append(out, sp)
 		}
 	}
+	return out
+}
+
+// tagNameArgs splits a tag's inner text into its name and the rest.
+func tagNameArgs(inner string) (name, args string) {
+	i := strings.IndexFunc(inner, unicode.IsSpace)
+	if i < 0 {
+		return inner, ""
+	}
+	return inner[:i], strings.TrimSpace(inner[i:])
+}
+
+// scanRootRefs calls fn for every reference to the top-level variable root
+// in one Liquid construct's inner text, with the static path that follows it
+// ("" for a bare `root`, for `root[expr]`, or for a reference passed on as a
+// whole to a filter or a tag).
+//
+// What is a reference follows the Liquid lexer (osteele/liquid):
+//
+//   - root has to be a whole identifier. An identifier continues with
+//     letters, digits, '_', '-' and non-ASCII bytes and may end in '?', so
+//     `subtenant`, `tenant_id` and `tenant-x` are other variables;
+//   - a '.' right before it makes it a property of something else
+//     (`vars.tenant`), except in a range (`(1..tenant)`), where ".." is its
+//     own token and what follows is a root;
+//   - inside a quoted string it is text (`"tenant.slug" | t`, `x["tenant"]`);
+//   - followed by ':' it is the name of a keyword argument (`t: tenant: x`),
+//     not a read.
+func scanRootRefs(root, inner string, fn func(path string)) {
+	for i := 0; i < len(inner); {
+		c := inner[i]
+		switch {
+		case c == '\'' || c == '"':
+			j := strings.IndexByte(inner[i+1:], c)
+			if j < 0 {
+				return // unterminated: the parser reports it
+			}
+			i += j + 2
+			continue
+		case !isNameByte(c):
+			i++
+			continue
+		}
+		start := i
+		end := identEnd(inner, i)
+		i = end
+		if inner[start:end] != root {
+			continue
+		}
+		if start > 0 && inner[start-1] == '.' && (start < 2 || inner[start-2] != '.') {
+			continue
+		}
+		k := end
+		for k < len(inner) && (inner[k] == ' ' || inner[k] == '\t' || inner[k] == '\n' || inner[k] == '\r') {
+			k++
+		}
+		if k < len(inner) && inner[k] == ':' {
+			continue
+		}
+		path, n := scanVarPath(inner[end:])
+		fn(path)
+		i = end + n
+	}
+}
+
+// identEnd returns the offset just past the identifier (or number) that
+// starts at i: a run of name bytes and an optional trailing '?'.
+func identEnd(s string, i int) int {
+	for i < len(s) && isNameByte(s[i]) {
+		i++
+	}
+	if i < len(s) && s[i] == '?' {
+		i++
+	}
+	return i
 }
 
 // scanVarPath reads the `.a.b` / `["a"]` suffix at the start of s and returns
@@ -369,12 +461,10 @@ func scanVarPath(s string) (string, int) {
 		switch s[i] {
 		case '.':
 			j := i + 1
-			for j < len(s) && isIdentByte(s[j]) {
-				j++
-			}
-			if j == i+1 {
+			if j >= len(s) || !isNameByte(s[j]) {
 				return join(parts), i
 			}
+			j = identEnd(s, j)
 			parts = append(parts, s[i+1:j])
 			i = j
 		case '[':
@@ -412,6 +502,9 @@ func join(parts []string) string {
 	return strings.Join(parts, ".")
 }
 
-func isIdentByte(c byte) bool {
-	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+// isNameByte is a byte of a Liquid identifier after its first: an ASCII
+// letter or digit, '_', '-', or a byte of a multi-byte UTF-8 character.
+func isNameByte(c byte) bool {
+	return c == '_' || c == '-' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c >= 0x80
 }

@@ -21,6 +21,10 @@ var (
 	// ErrNoVersion is returned by StartCampaign when the campaign was never
 	// bound to a published MessageVersion.
 	ErrNoVersion = errors.New("control: campaign has no message version")
+	// ErrSecretVars is returned when the version a campaign would send reads
+	// secret.*, which only a transactional send with secret_vars can supply
+	// (ADR-0019).
+	ErrSecretVars = errors.New("control: campaign version reads secret.*, which campaigns cannot supply")
 )
 
 // invalidTransition builds the ErrInvalidTransition message for one campaign.

@@ -1,6 +1,7 @@
 package memstore
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sort"
@@ -17,9 +18,44 @@ func emailKey(campaignID, emailNorm string) string { return campaignID + "\x00" 
 // the contract stores. It runs on the stored row after each transition, which
 // is where a SQL backend's column types would do it.
 func truncateDelivery(d *store.Delivery) {
-	truncate(&d.NextAttemptAt, &d.LeaseUntil, &d.SentAt, &d.FinishedAt,
+	truncate(&d.NextAttemptAt, &d.LeaseUntil, &d.SentAt, &d.FinishedAt, &d.SecretExpiresAt,
 		&d.FirstOpenedAt, &d.FirstClickedAt, &d.UnsubscribedAt,
 		&d.CreatedAt, &d.UpdatedAt)
+}
+
+// settleSecret applies the secret invariant (store.Delivery) to a delivery
+// that has just been moved into a terminal status: a pending secret becomes
+// consumed if the delivery was sent, expired if expireAt is non-zero and its
+// SecretExpiresAt is at or before it, discarded otherwise, and the ciphertext
+// goes in the same write. A delivery that is not pending is left alone.
+func settleSecret(d *store.Delivery, expireAt time.Time) {
+	if d.SecretState != store.SecretPending {
+		return
+	}
+	switch {
+	case d.Status == store.DeliverySent || !d.SentAt.IsZero():
+		d.SecretState = store.SecretConsumed
+	case !expireAt.IsZero() && !d.SecretExpiresAt.IsZero() && !d.SecretExpiresAt.After(expireAt):
+		d.SecretState = store.SecretExpired
+	default:
+		d.SecretState = store.SecretDiscarded
+	}
+	d.SecretCiphertext = nil
+}
+
+// insertSecret is the invariant on the way in: only a pending secret has a
+// ciphertext, and a row inserted already terminal (suppressed at ingest) has
+// nothing left to send it to.
+func insertSecret(d *store.Delivery) {
+	if d.SecretState == store.SecretPending && d.Status.Terminal() {
+		d.SecretState = store.SecretDiscarded
+	}
+	if d.SecretState == store.SecretPending {
+		// The caller's slice stays the caller's.
+		d.SecretCiphertext = bytes.Clone(d.SecretCiphertext)
+	} else {
+		d.SecretCiphertext = nil
+	}
 }
 
 func (r *deliveryRepo) InsertBatch(_ context.Context, ds []store.Delivery) (int, error) {
@@ -59,6 +95,7 @@ func (r *deliveryRepo) InsertBatch(_ context.Context, ds []store.Delivery) (int,
 		if d.NextAttemptAt.IsZero() {
 			d.NextAttemptAt = now
 		}
+		insertSecret(&d)
 		truncateDelivery(&d)
 		r.s.d.deliveries[d.ID] = &d
 		inserted++
@@ -248,6 +285,7 @@ func (r *deliveryRepo) Complete(_ context.Context, results []store.DeliveryResul
 		}
 		if res.NewStatus.Terminal() {
 			d.FinishedAt = now
+			settleSecret(d, now)
 		}
 		d.LeaseOwner, d.LeaseUntil = "", time.Time{}
 		d.UpdatedAt = now
@@ -288,6 +326,7 @@ func (r *deliveryRepo) MarkSent(_ context.Context, id, owner, messageID string, 
 	d.SentAt = at
 	d.FinishedAt = at
 	d.UpdatedAt = at
+	settleSecret(d, time.Time{})
 	truncateDelivery(d)
 	// The lease is kept so the batched Complete can still attach the attempt.
 	return nil
@@ -362,6 +401,39 @@ func (r *deliveryRepo) ReleaseExpiredLeases(_ context.Context, now time.Time, li
 	return len(ids), nil
 }
 
+func (r *deliveryRepo) ExpireSecrets(_ context.Context, now time.Time, limit int) (int, error) {
+	r.s.p.mu.Lock()
+	defer r.s.p.mu.Unlock()
+	if err := r.s.p.check(); err != nil {
+		return 0, err
+	}
+	now = store.TruncateTime(now)
+	ids := make([]string, 0, 16)
+	for id, d := range r.s.d.deliveries {
+		if d.SecretState != store.SecretPending || d.Status == store.DeliveryLeased ||
+			d.SecretExpiresAt.IsZero() || d.SecretExpiresAt.After(now) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if limit > 0 && len(ids) > limit {
+		ids = ids[:limit]
+	}
+	for _, id := range ids {
+		d := r.s.d.deliveries[id]
+		d.Status = store.DeliveryFailed
+		d.FinishedAt = now
+		d.LastErrorClass = store.ErrorClassPermanent
+		d.LastError = store.SecretExpiredError
+		d.SecretState = store.SecretExpired
+		d.SecretCiphertext = nil
+		d.UpdatedAt = now
+		truncateDelivery(d)
+	}
+	return len(ids), nil
+}
+
 func (r *deliveryRepo) CountByStatus(_ context.Context, campaignID string) (map[store.DeliveryStatus]int64, error) {
 	r.s.p.mu.Lock()
 	defer r.s.p.mu.Unlock()
@@ -401,6 +473,8 @@ func (r *deliveryRepo) BulkTransition(_ context.Context, campaignID string, from
 		d.Status = to
 		if to.Terminal() {
 			d.FinishedAt = now
+			// A cancel is never an expiry, even past SecretExpiresAt.
+			settleSecret(d, time.Time{})
 		}
 		d.UpdatedAt = now
 		truncateDelivery(d)
@@ -427,6 +501,9 @@ func (r *deliveryRepo) Requeue(_ context.Context, f store.RetryFilter, limit int
 	for id, d := range r.s.d.deliveries {
 		if d.CampaignID != f.CampaignID || (only != nil && !only[id]) {
 			continue
+		}
+		if d.Sensitive() {
+			continue // never retried, in any secret state (ADR-0019)
 		}
 		if !matchStatus(f.Statuses, d.Status) || !matchClass(f.ErrorClasses, d.LastErrorClass) {
 			continue

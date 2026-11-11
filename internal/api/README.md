@@ -19,6 +19,7 @@
 | `campaigns.go` | 캠페인 CRUD · 인제스트 · 수명주기 · 링크 리포트 · 수신거부 통지 |
 | `deliveries.go` | 테넌트 전역 delivery 목록 · delivery · attempt · bounce · retry |
 | `messages.go` | 트랜잭셔널 발송과 멱등 재생 |
+| `secretvars.go` | `secret_vars` 검증과 봉인(ADR-0019) |
 | `lists.go` | suppression / bounce / event(outbox) |
 | `tracking.go` | 공개 `/t/*` 라우트, IP 토큰버킷, 봇 판정, 1×1 gif |
 
@@ -81,6 +82,18 @@ make gen-check    # CI: 스펙과 gen.go가 어긋나면 실패
 - **`GET /events/{id}`**: `OutboxRepo.Get(id)` 한 번입니다.
 - **`POST /events/{id}/replay`**: `OutboxRepo.Reset(id, now)` — pending + `attempts = 0` + 에러/리스 초기화. 원인을 고치고 다시 보내는 것이므로 시도 예산을 온전히 돌려줍니다.
 - **`POST /messages`의 `headers`**: `store.Delivery.Headers`에 저장하고 sender가 화이트리스트를 통과시켜 실제 메일에 붙입니다. 검증은 sender와 **같은** 화이트리스트(`sender.ValidateCustomHeader`)로 하므로 허용되지 않는 이름은 발송 시점이 아니라 여기서 422입니다.
+- **`POST /messages`의 `secret_vars`**(ADR-0019): 수신자별 비밀 값. 검증은 행을 쓰기 전에 전부 합니다 —
+  `secret_ttl_seconds`는 30~86400(생략 시 600)이고 `secret_vars` 없이 오면 422; `Deps.Secrets`가 nil이면
+  `422 secret_cipher_required`(평문 폴백 없음); 버전의 subject·HTML·text·**번역 문자열**이 `secret` 을 읽으면(`render.SecretUsage`)
+  모든 수신자가 `secret_vars` 를, 정적으로 알 수 있는 최상위 키는 전부 줘야 하고(없으면 수신자 인덱스와 키를 담은 422 — `secret[k]` 처럼
+  계산된 키만 읽어도 `secret_vars` 자체는 필수), `secret` 을 읽지 않는 버전에 온 `secret_vars`도 422. `vars.secret.code` 처럼 다른 객체의
+  속성, 문자열 리터럴 안의 `secret`, `secret` 을 로컬로 선언한 레거시 버전은 `secret` 을 읽지 않는 것으로 봅니다;
+  수신자당 JSON 8 KiB 초과는 `422 limit_exceeded`. 통과하면 delivery ID·테넌트·`email_norm`을 채운 뒤
+  `DeliverySecretContext`로 암호화해 `secret_ct`/`secret_state=pending`/`secret_expires_at`을 씁니다. suppressed 수신자는
+  암호화하지 않고 처음부터 `discarded`. 멱등 재생은 결과만 돌려주므로 다시 암호화하지도 쓰지도 않습니다.
+  에러 메시지에는 값이 들어가지 않고, 응답의 `Delivery`에는 `sensitive`·`secret_state`·`secret_expires_at`만 있습니다.
+  캠페인은 `secret.*`를 읽는 버전을 쓸 수 없어, 생성·수정·시작 때 그 버전(고정 `version_id` 또는 템플릿의 현재 발행 버전)이면 `422 validation_failed`입니다.
+- **`POST /deliveries/{id}/retry`**: sensitive delivery는 상태와 무관하게 `Requeue` 전에 `409 not_retryable`.
 - **`POST /senders/{id}/probe`**: `Deps.Probe`가 없으면(=`Options.Probe.Enabled`가 false면) 501. 프로브 구현은 이 패키지 밖입니다.
 - **`/api/v1/bounce-mailboxes`**: 프로브 메일박스와 같은 모양의 CRUD. `after_process`는 `internal/mailbox.ParseAction`으로 검증하고, POP3에 `move:`는 422입니다 — 폴러가 매번 실패하는 행을 저장하지 않기 위해서입니다.
 - **tracking 서명 키**: `SecretCipher`를 **타지 않습니다**(`store.SigningKey` 참조). 토큰을 검증하는 모든 경로가 키를 그대로 읽고, 그 복제본에 cipher가 없을 수도 있기 때문입니다. 생략하면 저장값 유지라는 규칙은 동일합니다.

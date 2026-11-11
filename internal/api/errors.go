@@ -114,7 +114,8 @@ func errorFor(err error) *apiError {
 			message: err.Error(), cause: err}
 	case errors.Is(err, control.ErrNoRecipients),
 		errors.Is(err, control.ErrNoSender),
-		errors.Is(err, control.ErrNoVersion):
+		errors.Is(err, control.ErrNoVersion),
+		errors.Is(err, control.ErrSecretVars):
 		return &apiError{status: http.StatusUnprocessableEntity, code: ErrorCodePreconditionFailed,
 			message: err.Error(), cause: err}
 

@@ -8,7 +8,7 @@
 
 | | 어디서 도나 | 무엇이 보장하나 |
 |---|---|---|
-| 리더 루프 7종 | **리플리카 1대** | `LockRepo` lease (`_system` 테넌트의 `control-leader`) |
+| 리더 루프 8종 | **리플리카 1대** | `LockRepo` lease (`_system` 테넌트의 `control-leader`) |
 | `TrackingBuffer` | **모든 리플리카** | 픽셀/리다이렉트 핸들러가 받은 이벤트를 자기 메모리에 쌓음 |
 
 리더는 `ttl/3`마다 갱신하고, **갱신이 실패하면 루프를 먼저 멈춘 뒤** 다시 획득을 시도합니다.
@@ -27,6 +27,7 @@ lease를 잃은 리플리카가 쓰기를 계속하는 구간을 없애기 위�
 | `canceller` | 2s | active | `cancelled` 캠페인의 `pending/queued/deferred`를 틱당 10k씩 `cancelled`로. `leased`는 sender가 끝내도록 둠 |
 | `leaseReaper` | 30s | active | `ReleaseExpiredLeases(now, 5000)` — ADR-0002의 at-least-once 복구 경로 |
 | `retention` | 1h | **전체** | `RetentionDays` 지난 완료/취소 캠페인의 delivery + 테넌트의 tracking/bounce/디스패치된 outbox 행을 5k 청크로 삭제 |
+| `secret-expiry` | 1m | active | `ExpireSecrets(now, 1000)`을 짧게 돌아올 때까지(틱당 최대 50회): `secret_expires_at` 지난 pending 비밀의 delivery를 `failed`(`secret expired`) + `secret_state=expired` 로, 암호문은 같은 쓰기에서 삭제(ADR-0019). leased 행은 sender가 직접 판정하므로 건드리지 않음. 로그는 건수만 |
 | `outboxDispatcher` | 1s | active(+3틱 유예) | `ClaimPending` → 구독 필터 → `EventSink.Emit` → `MarkDelivered` / `MarkFailed`. 워커 풀 기본 8 |
 | `outbox-sweep` | 10s | **전체** | 같은 디스패처를 한가한 테넌트까지. 바운스·프로브 판정처럼 **일이 끝난 뒤** 생기는 이벤트용 |
 
@@ -112,7 +113,7 @@ memstore + 고정 시계를 씁니다. 리더 테스트만 실제 시간을 씁�
 그 순간 테넌트는 이미 active가 아닙니다. 캠페인이 `running`인 동안 계속 보이므로 finalizer가 그 틱을 놓치지 않습니다.
 `_system`(`store.SystemTenantID`)은 절대 반환되지 않습니다.
 
-그래서 여섯 루프 중 **다섯은 유예 기간이 없습니다.** active 집합에서 빠지면 그 자리에서 상태를 버립니다.
+그래서 outbox를 뺀 나머지 루프는 **유예 기간이 없습니다.** active 집합에서 빠지면 그 자리에서 상태를 버립니다.
 `outbox`만 `linger`(3틱)를 씁니다: 캠페인을 `completed`로 옮기는 그 전이가 `campaign.completed`를 enqueue하면서
 동시에 테넌트를 active 집합에서 빼기 때문에, 유예가 없으면 그 이벤트가 다음 캠페인 때까지 pending으로 남습니다.
 이건 창(window)이지 보장이 아닙니다 — dispatch가 실패한 이벤트는 outbox 백오프를 타고, 그 사이 테넌트가 계속

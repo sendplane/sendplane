@@ -32,6 +32,35 @@ func (r *leaseReaper) Tick(ctx context.Context, now time.Time) error {
 	return nil
 }
 
+// --- secret expiry -----------------------------------------------------
+
+// secretExpiry fails the sensitive deliveries whose secret ran out before
+// they could be sent, and drops the ciphertext in the same write (ADR-0019).
+// A secret must not outlive its TTL in the database just because nothing came
+// along to claim its delivery: the queue may be backed up, the transport
+// paused, the campaign lane starved. The sender checks the expiry too, after a
+// claim; this loop is for the rows no sender is going to look at in time.
+//
+// It logs counts only. There is nothing else to log: the rows it touches are
+// exactly the ones whose content must not appear anywhere.
+type secretExpiry struct {
+	st  store.Store
+	log *slog.Logger
+	cfg *config
+}
+
+func (e *secretExpiry) Tick(ctx context.Context, now time.Time) error {
+	n, err := chunkedDelete(ctx, e.st.Deliveries().ExpireSecrets, now,
+		e.cfg.batches.SecretExpiryChunk, e.cfg.batches.SecretExpiryMaxChunks)
+	if n > 0 {
+		e.log.Info("control: expired delivery secrets", "count", n)
+	}
+	if err != nil {
+		return fmt.Errorf("secret expiry: %w", err)
+	}
+	return nil
+}
+
 // --- retention ---------------------------------------------------------
 
 // retention enforces the tenant's RetentionDays on every per-recipient row:
@@ -117,7 +146,9 @@ func (r *retention) deleteTenantWide(ctx context.Context, cutoff time.Time) erro
 }
 
 // chunkedDelete calls one DeleteBefore repeatedly until it comes back short or
-// the tick's budget runs out; whatever is left waits for the next tick.
+// the tick's budget runs out; whatever is left waits for the next tick. Any
+// chunked "change up to limit rows due by cutoff" call has the same shape,
+// which is why ExpireSecrets goes through it as well.
 func chunkedDelete(ctx context.Context, del func(context.Context, time.Time, int) (int, error),
 	cutoff time.Time, chunk, maxChunks int) (int, error) {
 	total := 0

@@ -287,8 +287,15 @@ func varsOut(m map[string]any) *Vars {
 //
 // keep is the currently stored value: omitting the field on an update keeps
 // it, which is what makes a round trip of a GET body through a PUT
-// non-destructive even though the response never contains the secret.
-func (s *server) secret(ctx context.Context, in *string, keep []byte) ([]byte, error) {
+// non-destructive even though the response never contains the secret. It is
+// the same row's ciphertext, so it stays valid under sc.
+//
+// sc is the context of the row the secret is written to (store.SecretContext).
+// Its tenant and row ID have to be known before the secret is encrypted, so a
+// create assigns the row's ID itself rather than leaving it to the store; an
+// incomplete context is a bug here and is refused rather than producing a
+// ciphertext bound to the wrong row.
+func (s *server) secret(ctx context.Context, in *string, keep []byte, sc store.SecretContext) ([]byte, error) {
 	if in == nil {
 		return keep, nil
 	}
@@ -298,7 +305,11 @@ func (s *server) secret(ctx context.Context, in *string, keep []byte) ([]byte, e
 	if s.deps.Secrets == nil {
 		return []byte(*in), nil
 	}
-	enc, err := s.deps.Secrets.Encrypt(ctx, []byte(*in))
+	if sc.Purpose == "" || sc.TenantID == "" || sc.ObjectID == "" {
+		return nil, fmt.Errorf("api: encrypt secret: incomplete secret context %q/%q/%q",
+			sc.Purpose, sc.TenantID, sc.ObjectID)
+	}
+	enc, err := s.deps.Secrets.Encrypt(ctx, []byte(*in), sc)
 	if err != nil {
 		return nil, fmt.Errorf("api: encrypt secret: %w", err)
 	}

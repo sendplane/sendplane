@@ -174,7 +174,8 @@ func (o probeOpener) Open(ctx context.Context, m *store.ProbeMailbox) (probe.Mai
 			Protocol: mailbox.ProtocolIMAP,
 			Host:     m.Host, Port: m.Port, TLS: m.TLS,
 			Username: m.Username, Password: m.Password,
-			Folder: folder,
+			PasswordContext: store.ProbeMailboxPasswordContext(m),
+			Folder:          folder,
 		}, o.secrets)
 		if err != nil {
 			_ = f.close()

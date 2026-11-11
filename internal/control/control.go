@@ -5,7 +5,7 @@
 // Two things run here, and they have different cardinality:
 //
 //   - The leader loops (scheduler, finalizer, canceller, lease reaper,
-//     retention, outbox dispatcher) run on exactly one replica, kept singleton
+//     retention, secret expiry, outbox dispatcher) run on exactly one replica, kept singleton
 //     by a LockRepo lease (ADR-0002). They are periodic, idempotent and
 //     chunked: every one of them must be able to give up half way through a
 //     million rows and pick up where it left off on the next tick.
@@ -136,6 +136,16 @@ func (c *Control) loopSpecs() []loopSpec {
 			allTenants: true,
 			newTenant: func(st store.Store, tenantID string) tickLoop {
 				return &retention{st: st, tenant: tenantID, log: c.tenantLog("retention", tenantID), cfg: &c.cfg}
+			},
+		},
+		{
+			name:     "secret-expiry",
+			interval: c.cfg.intervals.SecretExpiry,
+			// Active tenants are enough: a pending secret belongs to a
+			// delivery that is not terminal yet, which is what keeps its
+			// tenant in ActiveTenants.
+			newTenant: func(st store.Store, tenantID string) tickLoop {
+				return &secretExpiry{st: st, log: c.tenantLog("secret-expiry", tenantID), cfg: &c.cfg}
 			},
 		},
 	}

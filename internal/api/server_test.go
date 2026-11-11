@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sendplane/sendplane/host"
+	"github.com/sendplane/sendplane/store"
 )
 
 func TestHealthzIsPublic(t *testing.T) {
@@ -198,7 +199,7 @@ func TestSecretsAreNeverEchoed(t *testing.T) {
 	if string(stored.Password) == password {
 		t.Fatal("the password reached the store in the clear")
 	}
-	plain, _ := xorCipher{}.Decrypt(t.Context(), stored.Password)
+	plain, _ := xorCipher{}.Decrypt(t.Context(), stored.Password, store.TransportPasswordContext(stored))
 	if string(plain) != password {
 		t.Fatalf("decrypted password = %q, want %q", plain, password)
 	}

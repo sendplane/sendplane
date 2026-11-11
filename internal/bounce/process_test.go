@@ -399,6 +399,34 @@ func TestHandleRetainRaw(t *testing.T) {
 	}
 }
 
+// A DSN for a sensitive delivery (ADR-0019) is never kept raw, even with
+// BounceRetainRaw on: it usually quotes the original message, which carried
+// the secret. Everything else about the bounce is recorded as usual.
+func TestHandleSensitiveDeliveryRetainsNoRaw(t *testing.T) {
+	e := newEnv(t, true)
+	e.setRetainRaw(t, true)
+	d := sentDelivery(testDelivery, "nosuch@example.org")
+	d.CampaignID = ""
+	d.Lane = store.LaneTransactional
+	d.SecretState = store.SecretConsumed
+	e.seed(t, d)
+
+	out := e.handle(t, "postfix_hard.eml")
+	if !out.Processed || !out.Recorded || out.NewStatus != store.DeliveryBounced {
+		t.Fatalf("Outcome = %+v", out)
+	}
+	evs := e.events(t)
+	if len(evs) != 1 {
+		t.Fatalf("events = %+v", evs)
+	}
+	if len(evs[0].Raw) != 0 {
+		t.Fatalf("raw was retained for a sensitive delivery: %d bytes", len(evs[0].Raw))
+	}
+	if evs[0].DeliveryID != testDelivery || evs[0].SMTPStatus != "5.1.1" {
+		t.Fatalf("event = %+v", evs[0])
+	}
+}
+
 func TestHandleProbeLaneIsNotSuppressed(t *testing.T) {
 	e := newEnv(t, true)
 	d := sentDelivery(testDelivery, "nosuch@example.org")

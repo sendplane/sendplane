@@ -25,3 +25,4 @@
 | 0016 | 프로브 수신 채널: IMAP + 전역 inbound webhook | accepted |
 | 0017 | 플랫폼 자원은 설정에서 코드로 해석, 테넌트 속성은 요청 변수 | accepted |
 | 0018 | 공유 템플릿과 테넌트 재정의 | accepted |
+| 0019 | 민감 정보 transactional 발송: `secret_vars` 와 AAD 바인딩 암호화 | accepted (사용자 확인: 폴백 없음, 별도 rewrap 도구) |

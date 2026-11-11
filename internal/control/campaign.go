@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sendplane/sendplane/internal/render"
 	"github.com/sendplane/sendplane/store"
 )
 
@@ -85,23 +86,46 @@ func (c *Control) StartCampaign(ctx context.Context, st store.Store, id string, 
 // so a template edited and republished in between is the one that goes out
 // (architecture 7.1). A campaign that pinned VersionID itself is left alone.
 func resolveCampaignVersion(ctx context.Context, st store.Store, cam *store.Campaign) error {
-	if cam.VersionID != "" {
+	if cam.VersionID == "" {
+		if cam.TemplateID == "" {
+			return fmt.Errorf("%w: campaign %s", ErrNoVersion, cam.ID)
+		}
+		tpl, err := st.Templates().Get(ctx, cam.TemplateID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("%w: template %s does not exist", ErrNoVersion, cam.TemplateID)
+			}
+			return err
+		}
+		if tpl.PublishedVersionID == "" {
+			return fmt.Errorf("%w: template %s has never been published", ErrNoVersion, tpl.ID)
+		}
+		if err := refuseSecretVersion(ctx, st, tpl.PublishedVersionID); err != nil {
+			return err
+		}
+		cam.VersionID = tpl.PublishedVersionID
 		return nil
 	}
-	if cam.TemplateID == "" {
-		return fmt.Errorf("%w: campaign %s", ErrNoVersion, cam.ID)
-	}
-	tpl, err := st.Templates().Get(ctx, cam.TemplateID)
+	return refuseSecretVersion(ctx, st, cam.VersionID)
+}
+
+// refuseSecretVersion keeps a campaign off a version that reads `secret.*`
+// (ADR-0019): a campaign delivery carries no secret_vars, so every mail would
+// render those as empty strings. The API refuses such a campaign early; this
+// is the check a template republished in between cannot get around. A version
+// that cannot be loaded is not this check's to report: the sender fails the
+// deliveries that name it.
+func refuseSecretVersion(ctx context.Context, st store.Store, versionID string) error {
+	v, err := st.Versions().Get(ctx, versionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%w: template %s does not exist", ErrNoVersion, cam.TemplateID)
+			return nil
 		}
 		return err
 	}
-	if tpl.PublishedVersionID == "" {
-		return fmt.Errorf("%w: template %s has never been published", ErrNoVersion, tpl.ID)
+	if _, reads := render.SecretUsage(v); reads {
+		return fmt.Errorf("%w: version %s", ErrSecretVars, versionID)
 	}
-	cam.VersionID = tpl.PublishedVersionID
 	return nil
 }
 

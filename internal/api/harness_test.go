@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -57,11 +59,38 @@ func (a *stubAuthz) Authorize(_ context.Context, _ *host.Principal, act host.Act
 
 // xorCipher is a stand-in SecretCipher. It is not a cipher anybody should
 // use; it exists so the tests can tell "encrypted before it reached the
-// store" apart from "written through".
+// store" apart from "written through". It binds like a real one does: the
+// ciphertext ends in a digest of the context's AAD, and Decrypt refuses a
+// different context, so a handler that encrypted under the wrong row fails
+// its test.
 type xorCipher struct{}
 
-func (xorCipher) Encrypt(_ context.Context, p []byte) ([]byte, error) { return xorAll(p), nil }
-func (xorCipher) Decrypt(_ context.Context, c []byte) ([]byte, error) { return xorAll(c), nil }
+func (xorCipher) Encrypt(_ context.Context, p []byte, sc store.SecretContext) ([]byte, error) {
+	return append(xorAll(p), xorTag(sc)...), nil
+}
+
+func (xorCipher) Decrypt(_ context.Context, c []byte, sc store.SecretContext) ([]byte, error) {
+	tag := xorTag(sc)
+	if len(c) < len(tag) || !bytes.Equal(c[len(c)-len(tag):], tag) {
+		return nil, errors.New("xorCipher: ciphertext is bound to another secret context")
+	}
+	return xorAll(c[:len(c)-len(tag)]), nil
+}
+
+// xorPlain decrypts a stand-in ciphertext under sc, or describes why it
+// cannot, for a test to compare against the expected plaintext.
+func xorPlain(c []byte, sc store.SecretContext) string {
+	p, err := xorCipher{}.Decrypt(context.Background(), c, sc)
+	if err != nil {
+		return "<" + err.Error() + ">"
+	}
+	return string(p)
+}
+
+func xorTag(sc store.SecretContext) []byte {
+	sum := sha256.Sum256(sc.AAD())
+	return sum[:8]
+}
 
 func xorAll(b []byte) []byte {
 	out := make([]byte, len(b))

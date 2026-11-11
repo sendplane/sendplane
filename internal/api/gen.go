@@ -190,11 +190,13 @@ const (
 	ErrorCodeLimitExceeded          ErrorCode = "limit_exceeded"
 	ErrorCodeMissingI18nKeys        ErrorCode = "missing_i18n_keys"
 	ErrorCodeNotFound               ErrorCode = "not_found"
+	ErrorCodeNotRetryable           ErrorCode = "not_retryable"
 	ErrorCodePayloadTooLarge        ErrorCode = "payload_too_large"
 	ErrorCodePlatformReadOnly       ErrorCode = "platform_read_only"
 	ErrorCodePreconditionFailed     ErrorCode = "precondition_failed"
 	ErrorCodeRateLimited            ErrorCode = "rate_limited"
 	ErrorCodeRenderFailed           ErrorCode = "render_failed"
+	ErrorCodeSecretCipherRequired   ErrorCode = "secret_cipher_required"
 	ErrorCodeSenderUseDenied        ErrorCode = "sender_use_denied"
 	ErrorCodeTemplateNotPublished   ErrorCode = "template_not_published"
 	ErrorCodeTemplateUseDenied      ErrorCode = "template_use_denied"
@@ -228,6 +230,8 @@ func (e ErrorCode) Valid() bool {
 		return true
 	case ErrorCodeNotFound:
 		return true
+	case ErrorCodeNotRetryable:
+		return true
 	case ErrorCodePayloadTooLarge:
 		return true
 	case ErrorCodePlatformReadOnly:
@@ -237,6 +241,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeRateLimited:
 		return true
 	case ErrorCodeRenderFailed:
+		return true
+	case ErrorCodeSecretCipherRequired:
 		return true
 	case ErrorCodeSenderUseDenied:
 		return true
@@ -490,6 +496,33 @@ func (e ProbeRunFolder) Valid() bool {
 	case ProbeRunFolderSpam:
 		return true
 	case ProbeRunFolderUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SecretState.
+const (
+	SecretStateConsumed  SecretState = "consumed"
+	SecretStateDiscarded SecretState = "discarded"
+	SecretStateExpired   SecretState = "expired"
+	SecretStateNone      SecretState = "none"
+	SecretStatePending   SecretState = "pending"
+)
+
+// Valid indicates whether the value is a known member of the SecretState enum.
+func (e SecretState) Valid() bool {
+	switch e {
+	case SecretStateConsumed:
+		return true
+	case SecretStateDiscarded:
+		return true
+	case SecretStateExpired:
+		return true
+	case SecretStateNone:
+		return true
+	case SecretStatePending:
 		return true
 	default:
 		return false
@@ -1172,6 +1205,18 @@ type Delivery struct {
 	// RetryGen Bumped by a manual retry so the attempt history stays intact.
 	RetryGen *int32 `json:"retry_gen,omitempty"`
 
+	// SecretExpiresAt When the secret stops being sendable. Absent on a delivery that is not sensitive.
+	SecretExpiresAt *time.Time `json:"secret_expires_at,omitempty"`
+
+	// SecretState Lifecycle of a sensitive delivery's `secret_vars` (ADR-0019). `none`
+	// is every delivery sent without them. The encrypted secret exists only
+	// while the state is `pending`; it is deleted in the same write that
+	// moves the delivery to `consumed` (the server accepted the message),
+	// `discarded` (finished without being sent: a permanent failure, a
+	// suppression, a cancel) or `expired` (`secret_expires_at` passed first).
+	// No transition leads back to `pending`.
+	SecretState *SecretState `json:"secret_state,omitempty"`
+
 	// SenderId An entity ID.
 	//
 	// Either a UUIDv7 sendplane minted for a row, or the virtual ID of a
@@ -1188,7 +1233,12 @@ type Delivery struct {
 	//
 	// Examples: 0191f3d2-9c4e-7a1b-8f00-2b6c1d8e4a55, sys:default
 	SenderId ResourceId `json:"sender_id"`
-	SentAt   *time.Time `json:"sent_at,omitempty"`
+
+	// Sensitive Whether the delivery was created with `secret_vars` (ADR-0019). A
+	// sensitive delivery is sent without open or click tracking and is
+	// never retried. The secret itself is never part of this object.
+	Sensitive *bool      `json:"sensitive,omitempty"`
+	SentAt    *time.Time `json:"sent_at,omitempty"`
 
 	// Status Delivery state machine (architecture 4.1). `bounced` is only reachable
 	// from `sent`, asynchronously, via a hard DSN.
@@ -1628,6 +1678,14 @@ type MessageRecipient struct {
 	Locale *string             `json:"locale,omitempty"`
 	Name   *string             `json:"name,omitempty"`
 
+	// SecretVars Values only this recipient may see, read by the template as
+	// `{{ secret.* }}` and never merged into `vars` (ADR-0019). Stored
+	// encrypted, never returned, deleted once the delivery is sent or
+	// finishes. The template must read `secret.*`, and every key it reads
+	// must be present, otherwise `422 validation_failed`. Capped at 8 KiB
+	// of JSON per recipient (`422 limit_exceeded`).
+	SecretVars *map[string]interface{} `json:"secret_vars,omitempty"`
+
 	// Vars Merged over the request-level `vars`.
 	Vars *Vars `json:"vars,omitempty"`
 }
@@ -1645,6 +1703,14 @@ type MessageRequest struct {
 
 	// Priority Higher is claimed first within the transactional lane; `0` when omitted.
 	Priority *int32 `json:"priority,omitempty"`
+
+	// SecretTtlSeconds How long the recipients' `secret_vars` stay sendable; `600` (ten
+	// minutes) when omitted. A delivery
+	// that has not been sent by then fails with `secret expired`, and a
+	// retry that would be scheduled after it is not scheduled. Only
+	// allowed when at least one recipient has `secret_vars`
+	// (`422 validation_failed` otherwise).
+	SecretTtlSeconds *int32 `json:"secret_ttl_seconds,omitempty"`
 
 	// SenderId An entity ID.
 	//
@@ -2255,6 +2321,15 @@ type RetryRequest struct {
 type RetryResult struct {
 	Requeued int64 `json:"requeued"`
 }
+
+// SecretState Lifecycle of a sensitive delivery's `secret_vars` (ADR-0019). `none`
+// is every delivery sent without them. The encrypted secret exists only
+// while the state is `pending`; it is deleted in the same write that
+// moves the delivery to `consumed` (the server accepted the message),
+// `discarded` (finished without being sent: a permanent failure, a
+// suppression, a cancel) or `expired` (`secret_expires_at` passed first).
+// No transition leads back to `pending`.
+type SecretState string
 
 // Sender A From identity bound to a transport and a sending domain.
 //

@@ -37,15 +37,18 @@ func (t cipherTester) Test(ctx context.Context, cfg mailbox.Config) mailbox.Test
 // --- probe mailboxes ---------------------------------------------------
 
 func (s *server) TestProbeMailboxCredentials(ctx context.Context, req TestProbeMailboxCredentialsRequestObject) (TestProbeMailboxCredentialsResponseObject, error) {
-	if _, err := tenantFrom(ctx); err != nil {
+	t, err := tenantFrom(ctx)
+	if err != nil {
 		return nil, err
 	}
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
 	// Validated and encrypted through the same path a create goes through, so
-	// a mailbox that passes the test is one that can be saved.
-	m := &store.ProbeMailbox{}
+	// a mailbox that passes the test is one that can be saved. The fresh ID
+	// is the row the password is bound to; the row is never stored, so the
+	// ciphertext is good for this test only.
+	m := &store.ProbeMailbox{ID: store.NewID(), TenantID: t.id}
 	if err := s.applyMailbox(ctx, m, ProbeMailboxUpdate{
 		Name: req.Body.Name, Kind: req.Body.Kind,
 		Address: req.Body.Address, Host: req.Body.Host, Port: req.Body.Port,
@@ -78,7 +81,7 @@ func (s *server) TestProbeMailbox(ctx context.Context, req TestProbeMailboxReque
 		return TestProbeMailbox200JSONResponse(s.webhookMailboxTestOut()), nil
 	}
 	cfg := probeMailboxConfig(m)
-	override, err := s.overridePassword(ctx, &cfg, passwordOf(req.Body))
+	override, err := s.overridePassword(ctx, t.id, &cfg, passwordOf(req.Body))
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +129,8 @@ func probeMailboxConfig(m *store.ProbeMailbox) mailbox.Config {
 		Protocol: mailbox.ProtocolIMAP,
 		Host:     m.Host, Port: m.Port, TLS: m.TLS,
 		Username: m.Username, Password: m.Password,
-		Folder: m.InboxFolder,
+		PasswordContext: store.ProbeMailboxPasswordContext(m),
+		Folder:          m.InboxFolder,
 	}
 	if m.SpamFolder != "" {
 		cfg.ExtraFolders = []string{m.SpamFolder}
@@ -137,13 +141,16 @@ func probeMailboxConfig(m *store.ProbeMailbox) mailbox.Config {
 // --- bounce mailboxes --------------------------------------------------
 
 func (s *server) TestBounceMailboxCredentials(ctx context.Context, req TestBounceMailboxCredentialsRequestObject) (TestBounceMailboxCredentialsResponseObject, error) {
-	if _, err := tenantFrom(ctx); err != nil {
+	t, err := tenantFrom(ctx)
+	if err != nil {
 		return nil, err
 	}
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	m := &store.BounceMailbox{}
+	// A fresh, never-stored row ID for the password to be bound to; see
+	// TestProbeMailboxCredentials.
+	m := &store.BounceMailbox{ID: store.NewID(), TenantID: t.id}
 	if err := s.applyBounceMailbox(ctx, m, BounceMailboxUpdate{
 		Name: req.Body.Name, Address: req.Body.Address, Protocol: req.Body.Protocol,
 		Host: req.Body.Host, Port: req.Body.Port, Tls: req.Body.Tls,
@@ -167,7 +174,7 @@ func (s *server) TestBounceMailbox(ctx context.Context, req TestBounceMailboxReq
 		return nil, err
 	}
 	cfg := bounceMailboxConfig(m)
-	override, err := s.overridePassword(ctx, &cfg, passwordOf(req.Body))
+	override, err := s.overridePassword(ctx, t.id, &cfg, passwordOf(req.Body))
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +197,8 @@ func bounceMailboxConfig(m *store.BounceMailbox) mailbox.Config {
 		Protocol: protocol,
 		Host:     m.Host, Port: m.Port, TLS: m.TLS,
 		Username: m.Username, Password: m.Password,
-		Folder: m.Folder,
+		PasswordContext: store.BounceMailboxPasswordContext(m),
+		Folder:          m.Folder,
 	}
 }
 
@@ -208,15 +216,20 @@ func passwordOf(body *MailboxTestRequest) *string {
 // whether it did. The plaintext is encrypted first rather than handed to the
 // tester as-is, so that only one thing in the process ever holds a mailbox
 // password in the clear (architecture 16).
-func (s *server) overridePassword(ctx context.Context, cfg *mailbox.Config, pw *string) (bool, error) {
+//
+// It is encrypted under a context of its own (a test purpose and a fresh ID)
+// rather than the stored row's: a ciphertext the row would accept must only
+// ever come from writing the row.
+func (s *server) overridePassword(ctx context.Context, tenantID string, cfg *mailbox.Config, pw *string) (bool, error) {
 	if pw == nil {
 		return false, nil
 	}
-	enc, err := s.secret(ctx, pw, nil)
+	sc := store.MailboxTestPasswordContext(tenantID, store.NewID())
+	enc, err := s.secret(ctx, pw, nil, sc)
 	if err != nil {
 		return false, err
 	}
-	cfg.Password = enc
+	cfg.Password, cfg.PasswordContext = enc, sc
 	return true, nil
 }
 

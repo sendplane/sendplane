@@ -36,7 +36,9 @@ func (s *server) CreateBounceMailbox(ctx context.Context, req CreateBounceMailbo
 	if req.Body == nil {
 		return nil, errBadRequest("a request body is required")
 	}
-	m := &store.BounceMailbox{}
+	// The ID is assigned here because the password is encrypted bound to it
+	// (store.BounceMailboxPasswordContext).
+	m := &store.BounceMailbox{ID: store.NewID(), TenantID: t.id}
 	if err := s.applyBounceMailbox(ctx, m, BounceMailboxUpdate{
 		Name: req.Body.Name, Address: req.Body.Address, Protocol: req.Body.Protocol,
 		Host: req.Body.Host, Port: req.Body.Port, Tls: req.Body.Tls,
@@ -131,7 +133,7 @@ func (s *server) applyBounceMailbox(ctx context.Context, m *store.BounceMailbox,
 	if _, isMove := action.MoveFolder(); isMove && protocol == string(mailbox.ProtocolPOP3) {
 		return errInvalid("after_process: POP3 cannot move a message to another folder")
 	}
-	pw, err := s.secret(ctx, in.Password, m.Password)
+	pw, err := s.secret(ctx, in.Password, m.Password, store.BounceMailboxPasswordContext(m))
 	if err != nil {
 		return err
 	}

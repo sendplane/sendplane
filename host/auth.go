@@ -128,3 +128,6 @@ type TenantSwitcher interface {
 // secrets it builds virtual entities from without importing this package. A
 // host implements one interface either way.
 type SecretCipher = store.SecretCipher
+
+// SecretContext names the row a secret is bound to; see store.SecretContext.
+type SecretContext = store.SecretContext

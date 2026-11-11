@@ -652,6 +652,9 @@ Liquid 렌더가 끝난 HTML에 대해:
    - `sendplane`(기본, `tracking_domain` 필요): `{{ unsubscribe_url }}` = `https://t.example.com/t/u/{token}`. 호스트 목적지(수신자 변수 > 테넌트 URL 템플릿 > 훅)는 토큰 서명에 포함되어 리다이렉트에 사용. 헤더 `List-Unsubscribe: <https://t.example.com/t/u/{token}>` + `List-Unsubscribe-Post: List-Unsubscribe=One-Click`.
    - `host`: 호스트 URL을 그대로 변수와 `List-Unsubscribe`에 넣음. 호스트가 처리 후 `POST /campaigns/{id}/unsubscribes`로 통지해야 통계에 잡힘. `List-Unsubscribe-Post`는 호스트가 원클릭 POST를 받는다고 선언한 경우에만 추가.
    - `none`: transactional 기본값. 헤더/변수 생략.
+4. **sensitive delivery**(`secret_vars` 로 만든 delivery, ADR-0019)에는 1·2를 적용하지 않습니다 — 끌 수 없습니다.
+   재설정 링크나 코드가 든 링크가 클릭 리다이렉트를 지나 `tracking_event.url` 에 남으면 안 되기 때문입니다.
+   3(수신거부 링크·헤더)은 비밀과 무관하므로 그대로 둡니다.
 
 ### 9.3 기록과 집계
 
@@ -691,7 +694,9 @@ IP는 기본 저장하지 않고(테넌트 설정으로 해시 저장), UA는 �
   테넌트가 자기 suppression을 껐어도 이 검사는 합니다 — 그 목록은 모두가 공유하는 릴레이를 보호하는 것이고
   테넌트의 것이 아닙니다. `_system` 목록은 시스템 테넌트에서만 보이고 관리됩니다.
 - **폴링은 곧 자격증명 점검입니다.** 패스마다 다이얼 결과를 `BounceMailbox.Health`(§11.5)에 씁니다 — 성공하면 `ok`, 실패하면 단계(`dial`/`tls`/`auth`/`folder`)와 사유를 남기고 연속 실패를 셉니다. 바운스 메일박스를 주기적으로 들여다보는 건 이 폴러뿐이라, 여기서 못 보면 아무도 못 봅니다.
-- raw 보존은 `TenantSettings.BounceRetainRaw`(기본 off), suppression 보존기간은 `SuppressionRepo.DeleteBefore`로 control의 retention 루프가 정리합니다.
+- raw 보존은 `TenantSettings.BounceRetainRaw`(기본 off). 단 상관관계가 잡힌 delivery가 sensitive(ADR-0019)면
+  설정과 무관하게 raw를 저장하지 않습니다 — DSN은 흔히 원본 본문을 붙여 오고, 그 본문에 비밀이 평문으로 있습니다.
+  상관관계에 실패한 DSN은 sensitive인지 알 수 없어 설정을 따릅니다. suppression 보존기간은 `SuppressionRepo.DeleteBefore`로 control의 retention 루프가 정리합니다.
 - 프로바이더 webhook(SES/SendGrid 등)은 같은 `BounceEvent` 경로로 들어오는 어댑터로 후순위 추가.
 
 **suppression에 대한 결정**: "email DB 없음" 원칙과 약간 긴장 관계에 있지만, hard bounce/complaint 주소로의 재발송은 도메인 평판을 직접 해치므로 **테넌트 설정으로 켜고 끌 수 있는 내장 suppression(기본 on)**을 둡니다. 호스트가 자체 관리하려면 끄고 `BeforeSend` 훅(또는 API 호출 전 필터링)을 쓰면 됩니다. 저장 항목은 `email_norm, reason, source_delivery_id, created_at, expires_at`뿐이며 보존기간이 있습니다(ADR-0008).
@@ -880,6 +885,20 @@ web/
 - 헤더 인젝션: 이메일/표시명/subject의 CR/LF 거부, 커스텀 헤더 화이트리스트.
 - SSRF: webhook URL은 사설 대역 차단(테넌트 설정으로 허용 목록).
 - 비밀: Transport 비밀번호·DKIM 키·IMAP 비밀번호는 `SecretCipher`로 암호화 저장, API 응답에서 마스킹.
+  암호문은 `SecretContext`(용도·테넌트 ID·행 ID, 플랫폼 자원은 `_system`/`sys:<id>`)를 AEAD associated
+  data로 묶어 봉인하므로 다른 행·다른 테넌트로 복사한 암호문은 복호화되지 않고, AAD 없는 복호화로의 런타임
+  폴백은 없습니다. 바인딩 이전 암호문은 업그레이드 때 `sendplane.RewrapSecrets`(`sendplane secrets rewrap`)로
+  한 번 재암호화합니다.
+- **`secret_vars`**(ADR-0019): `POST /messages` 수신자별 비밀 값(OTP, 재설정 링크). 템플릿은 `{{ secret.* }}` 로만
+  읽고 `vars`·`RecipientContext.Vars`·수신거부 URL 템플릿·이벤트 payload에는 들어가지 않습니다. `SecretCipher` 가 없으면
+  `422 secret_cipher_required`(평문 폴백 없음). `DeliverySecretContext`(용도·테넌트·delivery ID·수신자 해시)로 봉인해
+  `delivery.secret_ct` 에 두고, `secret_ttl_seconds`(30초~24시간, 기본 10분) 뒤 만료됩니다. 암호문은 delivery가
+  pending을 벗어나는 바로 그 쓰기에서 지워집니다(`consumed`/`discarded`/`expired`); 만료는 control의 `secret-expiry`
+  루프(1분)와 sender의 claim 후 검사, 그리고 발송 중 검사(레이트리밋 대기는 만료 시각까지만, RCPT 직전 재검사)가 맡습니다. 템플릿이 읽는 `secret.*` 키가 없는 수신자, 또는 `secret.*` 를 읽지 않는
+  템플릿에 온 `secret_vars` 는 422. API 응답에는 `sensitive`·`secret_state`·`secret_expires_at` 만 있고, 재전송은
+  `409 not_retryable`(+ `Requeue` 제외 + sender 상태 검사). 저장되는 에러 문자열·attempt·transport 상태 사유·로그에서는 sender가 비밀 값을
+  `[secret]` 으로 지웁니다(Liquid 에러와 SMTP 응답은 값을 인용할 수 있음). 열람 픽셀·클릭 재작성 없음(§9.2), raw 바운스 없음(§10).
+  `secret.*` 를 읽는 버전은 transactional 전용입니다: 캠페인 생성·수정·시작(API, control)과 sender(secret 없는 delivery는 `template requires secret_vars` 로 permanent `failed`)가 모두 막아, 빈 코드가 담긴 메일이 나가지 않습니다.
 - 바운스 위조: VERP HMAC 검증 실패는 `unverified`로 기록만.
 - 트래킹 URL: 목적지가 서명에 포함되어 오픈 리다이렉트 불가, 토큰 위조 불가. 공개 라우트는 rate limit 적용, 픽셀/리다이렉트 외 응답 없음.
 - 개인정보: Delivery/BounceEvent/Suppression 보존기간(테넌트별), 캠페인 삭제 시 수신자 데이터 함께 삭제, raw 바운스 저장은 opt-in.
@@ -928,7 +947,7 @@ Liquid 문법(ADR-0004)과 내장 suppression 기본 on(ADR-0008)은 사용자 �
 4. **mongo는 CI에서 nightly에만 돕니다** (`ci.yml`의 storetest 매트릭스는 매 PR, `e2e.yml`의 mongo 오버레이는 02:40 UTC 스케줄에서만). PR 단위로는 mongo 경로의 e2e 회귀를 못 잡습니다.
 5. **Helm 차트는 실제 k8s 클러스터에 배포해 본 적이 없습니다.** `helm template`/`helm lint` 수준 검증만 가능하고, HPA·PDB·metrics Service·ServiceMonitor가 실 클러스터에서 기대대로 동작하는지는 확인되지 않았습니다.
 6. **GitHub Actions 실행 이력이 없습니다.** `git remote`는 `github.com/sendplane/sendplane`를 가리키고 저장소 자체는 존재하지만(`gh repo view` 확인), 이 문서 갱신 시점까지 `gh run list`에 워크플로 실행이 한 건도 없습니다 — `ci.yml`/`e2e.yml`/`load-1m.yml`이 실제 GitHub 러너에서 통과하는지는 로컬 실행으로만 확인된 상태입니다.
-7. **store 계약에 없어서 못 하는 것들** (`internal/control/README.md`, `internal/bounce/README.md`): `TrackingEvent`에 유니크 여부를 남기는 필드가 없어 유니크 판정은 `CountUnique` 재계산에만 의존; 캠페인이 없는(transactional) delivery의 보존기간 삭제 경로가 없음; "pending 이벤트가 있는 테넌트"·"최근 완료된 캠페인"을 직접 조회할 방법이 없어 `outbox-sweep`과 finalizer의 커서 훑기로 대신함; `BounceType`에 auto-reply 값이, `BounceSource`에 "상관관계 실패" 값이 없어 각각 플래그와 `heuristic`으로 대신 표시.
+7. **store 계약에 없어서 못 하는 것들** (`internal/control/README.md`, `internal/bounce/README.md`): `TrackingEvent`에 유니크 여부를 남기는 필드가 없어 유니크 판정은 `CountUnique` 재계산에만 의존; 캠페인이 없는(transactional) delivery의 보존기간 삭제 경로가 없음(sensitive delivery의 비밀은 발송·종료·만료 시점에 지워지지만 행의 메타데이터는 남음, ADR-0019); "pending 이벤트가 있는 테넌트"·"최근 완료된 캠페인"을 직접 조회할 방법이 없어 `outbox-sweep`과 finalizer의 커서 훑기로 대신함; `BounceType`에 auto-reply 값이, `BounceSource`에 "상관관계 실패" 값이 없어 각각 플래그와 `heuristic`으로 대신 표시.
 8. **낙관적 동시성의 `version`이 응답에서 읽기 전용**이라 편집 화면은 항상 "읽은 객체"를 들고 있어야 업데이트를 보낼 수 있습니다(`web/README.md` "아직 남은 것").
 9. **ICU 복수형**, 테넌트 전역 공유 i18n 번들: 키 컨벤션(`count.one`/`count.other`)으로 시작, 전용 지원은 없음.
 10. **큐 백엔드 교체(NATS 등)**: `DeliveryRepo.Claim/Complete`가 경계로 설계돼 있지만 현재는 DB-as-queue만 구현.
