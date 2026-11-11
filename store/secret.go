@@ -137,17 +137,26 @@ func MailboxTestPasswordContext(tenantID, testID string) SecretContext {
 // DeliverySecretContext is the context of Delivery.SecretCiphertext.
 //
 // Besides the row it binds the recipient: Bind is "sha256:" and the lowercase
-// hex SHA-256 of EmailNorm. A ciphertext copied onto another delivery fails on
-// ObjectID already; binding the address as well means that even rewriting a
-// row's email columns cannot make sendplane mail a secret to an address it was
-// not sealed for. The address goes in as a hash because a KMS that maps the
-// context to an encryption context writes it to its audit log (CloudTrail and
-// the like) in clear, and a recipient list is personal data; the binding is
-// the same either way.
+// hex SHA-256 of Email, the exact bytes the sender puts in RCPT TO and the To
+// header. A ciphertext copied onto another delivery fails on ObjectID
+// already; binding the address as well means that rewriting a row's email
+// column cannot make sendplane mail a secret to an address it was not sealed
+// for.
 //
-// EmailNorm, like the other fields, never changes for the life of a delivery.
+// It is Email and not EmailNorm on purpose. EmailNorm is what suppression and
+// deduplication compare, not what is sent: a writer who left email_norm alone
+// and changed only email would redirect the mail, and two strings with the
+// same normalization (NormalizeEmail parses the address) can still differ on
+// the wire. So Email is hashed as stored, without normalizing it again.
+//
+// The address goes in as a hash because a KMS that maps the context to an
+// encryption context writes it to its audit log (CloudTrail and the like) in
+// clear, and a recipient list is personal data; the binding is the same
+// either way.
+//
+// Email, like the other fields, never changes for the life of a delivery.
 func DeliverySecretContext(d *Delivery) SecretContext {
-	sum := sha256.Sum256([]byte(d.EmailNorm))
+	sum := sha256.Sum256([]byte(d.Email))
 	return SecretContext{
 		Purpose:  PurposeDeliverySecretVars,
 		TenantID: d.TenantID,

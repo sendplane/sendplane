@@ -112,14 +112,20 @@ func (f *sensitiveFixture) insertSensitiveWith(versionID string, mutate func(*se
 // terminal.
 func (f *sensitiveFixture) run(ids []string, mutate func(*Config)) {
 	f.t.Helper()
-	stop := f.runSenders(1, func(c *Config) {
+	f.runWith(ids, mutate, nil)
+}
+
+// runWith is run with a setup step on the Sender (runSendersWith).
+func (f *sensitiveFixture) runWith(ids []string, mutate func(*Config), setup func(*Sender)) {
+	f.t.Helper()
+	stop := f.runSendersWith(1, func(c *Config) {
 		c.Lanes = map[store.Lane]int{store.LaneTransactional: 2}
 		c.Secrets = f.cipher
 		c.Logger = slog.New(slog.NewTextHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		if mutate != nil {
 			mutate(c)
 		}
-	})
+	}, setup)
 	ok := f.waitTerminal(ids, 20*time.Second)
 	stop()
 	if !ok {
@@ -223,7 +229,7 @@ func TestSensitiveDeliveryRefusedWithoutSending(t *testing.T) {
 			name: "sealed for another recipient",
 			mutate: func(f *sensitiveFixture, d *store.Delivery) {
 				other := *d
-				other.EmailNorm = "attacker@example.net"
+				other.Email, other.EmailNorm = "attacker@example.net", "attacker@example.net"
 				d.SecretCiphertext = f.cipher.seal(t, `{"code":"`+otpCode+`"}`, store.DeliverySecretContext(&other))
 			},
 			wantError: secretDecryptFailedError, wantState: store.SecretDiscarded,
@@ -516,5 +522,250 @@ func TestVersionReadsSecretIsCached(t *testing.T) {
 	}
 	if ts.versionReadsSecret(&store.MessageVersion{ID: "v2", HTMLTpl: "plain"}, now) {
 		t.Fatal("a version without secret.* reports true")
+	}
+}
+
+// Somebody who can write to the database but holds no key rewrites the
+// recipient of a pending sensitive delivery. The RCPT TO and the To header
+// come from the email column, so the secret is bound to that exact string:
+// the rewrite must make the secret undecryptable and nothing may reach the
+// relay, whether or not email_norm is rewritten along with it.
+func TestSensitiveDeliveryRecipientRewriteRefused(t *testing.T) {
+	const attacker = "attacker@example.net"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*store.Delivery)
+	}{
+		{name: "email only", mutate: func(d *store.Delivery) { d.Email = attacker }},
+		{name: "email and email_norm", mutate: func(d *store.Delivery) { d.Email, d.EmailNorm = attacker, attacker }},
+		// Same address after normalization, different bytes on the wire.
+		{name: "email case only", mutate: func(d *store.Delivery) { d.Email = strings.ToUpper(d.Email) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSensitiveFixture(t, fixtureOptions{chaos: chaossmtp.Options{KeepBodies: true}})
+			id := f.insertSensitive(f.version(""), tc.mutate)
+			f.run([]string{id}, nil)
+
+			d := f.get(id)
+			if d.Status != store.DeliveryFailed || d.LastError != secretDecryptFailedError {
+				t.Fatalf("delivery = %s %q, want failed %q", d.Status, d.LastError, secretDecryptFailedError)
+			}
+			if d.SecretCiphertext != nil || d.SecretState == store.SecretPending {
+				t.Fatalf("secret state %s, ciphertext kept %v", d.SecretState, d.SecretCiphertext != nil)
+			}
+			if msgs := f.chaos.Messages(); len(msgs) != 0 {
+				t.Fatalf("relay saw %d messages, the first to %v", len(msgs), msgs[0].Rcpts)
+			}
+		})
+	}
+}
+
+// A relay reply that quotes the message is also what the transport circuit
+// records: a rate_limited (451 4.7.0) or auth (535) reply that flips the
+// transport's status is persisted as its StatusReason and logged. The reply
+// must be scrubbed before the circuit sees it, not only once the delivery's
+// own result is settled.
+func TestSensitiveReplyNeverReachesTransportStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		want store.TransportStatus
+	}{
+		{name: "rate limited 451", code: 451, want: store.TransportCooldown},
+		{name: "auth 535", code: 535, want: store.TransportUnhealthy},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSensitiveFixture(t, fixtureOptions{})
+			ctx := context.Background()
+			tr, err := f.st.Transports().Get(ctx, f.transportID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr.Port = echoSMTP(t, tc.code)
+			if err := f.st.Transports().Update(ctx, tr); err != nil {
+				t.Fatal(err)
+			}
+			versionID := f.version("")
+			// Enough sensitive deliveries for the circuit's threshold (three
+			// rate_limited replies in the window, or three auth failures).
+			for i := 0; i < 4; i++ {
+				f.insertSensitive(versionID, nil)
+			}
+			stop := f.runSenders(1, func(c *Config) {
+				c.Lanes = map[store.Lane]int{store.LaneTransactional: 2}
+				c.Secrets = f.cipher
+				c.Logger = slog.New(slog.NewTextHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			})
+			var got *store.Transport
+			deadline := time.Now().Add(20 * time.Second)
+			for time.Now().Before(deadline) {
+				if got, err = f.st.Transports().Get(ctx, f.transportID); err != nil {
+					t.Fatal(err)
+				}
+				if got.Status == tc.want {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			stop()
+			if got.Status != tc.want {
+				t.Fatalf("transport status = %s, want %s: the circuit never flipped", got.Status, tc.want)
+			}
+			if strings.Contains(got.StatusReason, otpCode) {
+				t.Fatalf("the transport status reason carries the secret: %q", got.StatusReason)
+			}
+			if !strings.Contains(got.StatusReason, redactedSecret) {
+				t.Fatalf("status reason %q: expected the quoted reply, redacted, so this did not exercise the leak", got.StatusReason)
+			}
+			if logs := f.logs.String(); strings.Contains(logs, otpCode) {
+				t.Fatalf("the secret was logged:\n%s", logs)
+			}
+		})
+	}
+}
+
+// jumpClock is real time plus an offset a test moves forward, so a sender
+// can be made to live through ten minutes without waiting for them, while
+// everything that reads real time (the store, the relay) keeps working.
+type jumpClock struct {
+	mu  sync.Mutex
+	off time.Duration
+}
+
+func (c *jumpClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.off)
+}
+
+func (c *jumpClock) jump(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.off += d
+}
+
+// sleep stands in for the limiter's sleep. Like sleepCtx it ends early at the
+// context's deadline, with the deadline's error; it jumps the clock by the
+// time it would have waited instead of waiting.
+func (c *jumpClock) sleep(ctx context.Context, d time.Duration) error {
+	if dl, ok := ctx.Deadline(); ok {
+		if rem := time.Until(dl); rem < d {
+			c.jump(max(rem, 0))
+			return context.DeadlineExceeded
+		}
+	}
+	c.jump(d)
+	return ctx.Err()
+}
+
+// A secret that expires while its delivery is on the way out must not go
+// out. openSecret checks the expiry once, at the start; the rate limiter, a
+// BeforeSend hook and the connect can each take long enough to cross it.
+func TestSensitiveDeliveryExpiringInFlightIsNotSent(t *testing.T) {
+	const ttl = 10 * time.Minute
+	for _, tc := range []struct {
+		name string
+		// rate is the transport's rate; the bucket is drained first, so the
+		// delivery waits 1/rate seconds for its token.
+		rate float64
+		// hook and dial jump the clock past the expiry from inside the
+		// send path.
+		hook, dial bool
+		wantSent   bool
+	}{
+		{name: "limiter wait past expiry", rate: 0.001},                   // waits 1000s, TTL 600s
+		{name: "limiter wait inside the TTL", rate: 0.01, wantSent: true}, // waits 100s
+		{name: "BeforeSend crosses the expiry", hook: true},
+		{name: "connect crosses the expiry", dial: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSensitiveFixture(t, fixtureOptions{})
+			ctx := context.Background()
+			tr, err := f.st.Transports().Get(ctx, f.transportID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.rate > 0 {
+				tr.RatePerSecond = tc.rate
+				if err := f.st.Transports().Update(ctx, tr); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock := &jumpClock{}
+			id := f.insertSensitive(f.version(""), func(d *store.Delivery) { d.SecretExpiresAt = time.Now().Add(ttl) })
+			f.runWith([]string{id}, func(c *Config) {
+				c.Clock = clock.now
+				if tc.hook {
+					c.Hooks.BeforeSend = func(context.Context, *host.OutboundMessage) error {
+						clock.jump(ttl + time.Minute)
+						return nil
+					}
+				}
+				if tc.dial {
+					var nd net.Dialer
+					c.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+						clock.jump(ttl + time.Minute)
+						return nd.DialContext(ctx, network, addr)
+					}
+				}
+			}, func(s *Sender) {
+				s.limiter.Sleep = clock.sleep
+				if tc.rate > 0 {
+					// Take the one token a fresh bucket starts with.
+					if _, err := s.limiter.Wait(ctx, Key{Name: sharedTransportKey(testTenant, tr), Rate: tc.rate}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+
+			d := f.get(id)
+			msgs := f.chaos.Messages()
+			if tc.wantSent {
+				if d.Status != store.DeliverySent || len(msgs) != 1 {
+					t.Fatalf("delivery = %s %q, relay saw %d; want sent", d.Status, d.LastError, len(msgs))
+				}
+				return
+			}
+			if len(msgs) != 0 {
+				t.Fatalf("relay saw %d messages after the secret expired", len(msgs))
+			}
+			if d.Status != store.DeliveryFailed || d.LastErrorClass != store.ErrorClassPermanent || d.LastError != store.SecretExpiredError {
+				t.Fatalf("delivery = %s %s %q, want failed permanent %q", d.Status, d.LastErrorClass, d.LastError, store.SecretExpiredError)
+			}
+			if d.SecretState == store.SecretPending || d.SecretCiphertext != nil {
+				t.Fatalf("secret state %s, ciphertext kept %v; want it wiped", d.SecretState, d.SecretCiphertext != nil)
+			}
+		})
+	}
+}
+
+// An ordinary delivery on a version that reads a property called secret of
+// another object (`vars.secret.code`) is not a secret template and is sent.
+func TestOrdinaryDeliveryOnVarsSecretSends(t *testing.T) {
+	f := newSensitiveFixture(t, fixtureOptions{chaos: chaossmtp.Options{KeepBodies: true}})
+	v := &store.MessageVersion{
+		SubjectTpl: "Hello", HTMLTpl: `<p>{{ vars.secret.code }}</p>`, TextTpl: `{{ vars.secret.code }}`,
+		DefaultLocale: "en",
+	}
+	if err := f.st.Versions().Create(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	d := store.Delivery{
+		ID: store.NewID(), TenantID: testTenant,
+		VersionID: v.ID, SenderID: f.senderID,
+		Lane: store.LaneTransactional, Status: store.DeliveryQueued,
+		Email: "plain@example.org", EmailNorm: "plain@example.org", Locale: "en",
+		Vars: map[string]any{"secret": map[string]any{"code": "ordinary-value"}},
+	}
+	if _, err := f.st.Deliveries().InsertBatch(context.Background(), []store.Delivery{d}); err != nil {
+		t.Fatal(err)
+	}
+	f.run([]string{d.ID}, nil)
+	if got := f.get(d.ID); got.Status != store.DeliverySent {
+		t.Fatalf("delivery = %s %q, want sent", got.Status, got.LastError)
+	}
+	msgs := f.chaos.Messages()
+	if len(msgs) != 1 || !strings.Contains(decodeBody(t, string(msgs[0].Body)), "ordinary-value") {
+		t.Fatalf("relay saw %d messages, want the rendered one", len(msgs))
 	}
 }

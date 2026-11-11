@@ -894,9 +894,9 @@ web/
   `422 secret_cipher_required`(평문 폴백 없음). `DeliverySecretContext`(용도·테넌트·delivery ID·수신자 해시)로 봉인해
   `delivery.secret_ct` 에 두고, `secret_ttl_seconds`(30초~24시간, 기본 10분) 뒤 만료됩니다. 암호문은 delivery가
   pending을 벗어나는 바로 그 쓰기에서 지워집니다(`consumed`/`discarded`/`expired`); 만료는 control의 `secret-expiry`
-  루프(1분)와 sender의 claim 후 검사가 맡습니다. 템플릿이 읽는 `secret.*` 키가 없는 수신자, 또는 `secret.*` 를 읽지 않는
+  루프(1분)와 sender의 claim 후 검사, 그리고 발송 중 검사(레이트리밋 대기는 만료 시각까지만, RCPT 직전 재검사)가 맡습니다. 템플릿이 읽는 `secret.*` 키가 없는 수신자, 또는 `secret.*` 를 읽지 않는
   템플릿에 온 `secret_vars` 는 422. API 응답에는 `sensitive`·`secret_state`·`secret_expires_at` 만 있고, 재전송은
-  `409 not_retryable`(+ `Requeue` 제외 + sender 상태 검사). 저장되는 에러 문자열·attempt·로그에서는 sender가 비밀 값을
+  `409 not_retryable`(+ `Requeue` 제외 + sender 상태 검사). 저장되는 에러 문자열·attempt·transport 상태 사유·로그에서는 sender가 비밀 값을
   `[secret]` 으로 지웁니다(Liquid 에러와 SMTP 응답은 값을 인용할 수 있음). 열람 픽셀·클릭 재작성 없음(§9.2), raw 바운스 없음(§10).
   `secret.*` 를 읽는 버전은 transactional 전용입니다: 캠페인 생성·수정·시작(API, control)과 sender(secret 없는 delivery는 `template requires secret_vars` 로 permanent `failed`)가 모두 막아, 빈 코드가 담긴 메일이 나가지 않습니다.
 - 바운스 위조: VERP HMAC 검증 실패는 `unverified`로 기록만.

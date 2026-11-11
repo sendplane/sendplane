@@ -223,7 +223,7 @@ func (s *server) refuseSecretVersion(ctx context.Context, t *tenant, versionID s
 	if err != nil {
 		return nil //nolint:nilerr // a missing version is reported by the caller or by start
 	}
-	if len(render.SecretKeys(v)) > 0 {
+	if _, reads := render.SecretUsage(v); reads {
 		return errInvalid("message version %s reads secret.*, which is only available to transactional sends with secret_vars", versionID)
 	}
 	return nil

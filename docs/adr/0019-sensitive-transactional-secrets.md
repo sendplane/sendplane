@@ -39,7 +39,7 @@ type SecretContext struct {
     Purpose  string // "transport.password", "sending_domain.dkim_private_key", "delivery.secret_vars", …
     TenantID string
     ObjectID string // 행 ID, 플랫폼 자원은 "sys:<id>"
-    Bind     string // 추가 바인딩 — delivery는 수신자(email_norm) 해시
+    Bind     string // 추가 바인딩 — delivery는 수신자 주소(`email`, RCPT에 쓰는 문자열 그대로)의 해시
 }
 func (c SecretContext) AAD() []byte // 버전 태그 + 길이 접두 인코딩
 
@@ -77,12 +77,22 @@ POST /api/v1/messages
 - 템플릿이 참조하는 `secret.*` 키가 요청에 없으면 **422**. 빈 코드가 든 메일이 나가는 것이 가장 나쁜 결과입니다.
   검사 범위는 subject · HTML · text와 i18n 번역 문자열(번역도 Liquid)입니다.
   반대로 템플릿이 `secret.*` 를 읽지 않는데 `secret_vars` 가 오면 역시 422 — 아무도 쓰지 않는 비밀은 저장하지 않습니다.
+- "읽는다"의 판정(`render.SecretUsage`)은 **최상위 변수 `secret` 에 대한 참조만** 셉니다.
+  - 셈: `secret.code`, `secret["code"]`, 계산된 인덱스 `secret[k]`, 통째로 넘기기(`{{ secret | json }}`, `{% for x in secret %}`).
+    정적으로 알 수 없는 참조만 있어도 `secret_vars` 는 필수입니다.
+  - 안 셈: 다른 객체의 속성(`vars.secret.code`), 문자열 리터럴(`"secret.code"`, `x["secret"]`), 키워드 인자 이름,
+    `{% comment %}` · `{% raw %}` 블록 안.
+  - **가림(shadowing)**: 이 기능 전에는 `secret` 이 바인딩이 아니었으므로 템플릿이 로컬 `secret` 을 선언했을 수 있습니다
+    (`assign` · `capture` · `for` · `tablerow` · `increment` · `decrement`, `t` 의 `secret:` 키워드 인자).
+    그런 버전은 **비밀 템플릿이 아닌 것**으로 보고 기존처럼 발송합니다. 대신 그 버전에 `secret_vars` 를 보내면 422입니다.
 - `secret.*` 를 읽는 템플릿은 **sensitive delivery만** 렌더할 수 있습니다. 캠페인 생성·수정·시작은 422로 미리 거절하고,
   최종 방어선은 sender입니다: sensitive가 아닌 delivery의 버전이 `secret.*` 를 읽으면 발송하지 않고 영구 실패로 끝냅니다
   (캠페인은 시작 시점에 발행 버전을 고정하므로 API 검사만으로는 닫히지 않습니다).
 - 크기 상한: 수신자당 직렬화 JSON 8 KiB. TTL은 30초~24시간, 기본 600초.
-- 저장: `delivery.secret_ct` (SecretContext{Purpose: "delivery.secret_vars", TenantID, ObjectID: delivery ID, Bind: email_norm 해시}로 암호화),
+- 저장: `delivery.secret_ct` (SecretContext{Purpose: "delivery.secret_vars", TenantID, ObjectID: delivery ID, Bind: email 해시}로 암호화),
   `secret_expires_at`, `secret_state`.
+  `email_norm` 이 아니라 `email` 을 묶는 이유: SMTP RCPT와 To 헤더는 `email` 을 그대로 씁니다.
+  `email_norm` 만 묶으면 `email` 칸만 고쳐서 다른 주소로 보내게 할 수 있습니다(PR #4 리뷰).
 - `secret_vars` 가 있는 delivery는 **sensitive** 이고, 아래 정책이 끌 수 없이 적용됩니다.
 
 `secret_state` 와 삭제 시점:
@@ -98,6 +108,12 @@ POST /api/v1/messages
 `failed` (LastError `secret expired`)로 끝냅니다. 이때 TTL은 아직 남아 있으므로 store는 `secret_state` 를 `discarded` 로 기록합니다 —
 `expired` 는 실제로 만료 시각이 지난 뒤 정리된 행에만 붙습니다. 어느 쪽이든 암호문은 같은 쓰기에서 지워집니다.
 
+만료는 처리 시작 때만이 아니라 **발송 도중에도** 검사합니다. BeforeSend 훅, rate limiter 대기, 연결 수립이 TTL을 넘길 수 있기 때문입니다.
+- rate limiter 대기는 `secret_expires_at` 을 deadline으로 둡니다.
+- 연결을 얻은 뒤 RCPT 직전에 한 번 더 검사합니다.
+
+넘었으면 RCPT/DATA 없이 `failed` (LastError `secret expired`)로 끝냅니다. 막지 못하는 구간은 `conn.Send` 자체뿐이고, 그 길이는 `SendTimeout` 이내입니다.
+
 ### 3. 재전송 차단 (겹겹이)
 
 1. API: sensitive delivery의 retry는 `409`.
@@ -112,8 +128,12 @@ POST /api/v1/messages
 - 바운스: sensitive delivery에 상관된 DSN은 `raw` 를 저장하지 않음.
 - `RecipientContext.Vars`, 수신거부 URL 템플릿, 이벤트 payload에 `secret` 없음.
 - 로그/에러 문자열은 **능동적으로 가립니다**. Liquid 오류(`can't convert string(VALUE) …`)와 누락 키 경고, 본문을 되돌려 주는
-  릴레이의 SMTP 응답이 값을 그대로 인용하기 때문입니다. sender가 delivery 결과·attempt 행·렌더 로그에서 비밀 값(원문,
-  HTML 이스케이프, 쿼리 이스케이프 형태)을 `[secret]` 로 치환합니다. 한계: 3바이트 미만 값과 릴레이 응답 안의 QP/base64 인코딩은 가리지 못합니다.
+  릴레이의 SMTP 응답이 값을 그대로 인용하기 때문입니다.
+  - 무엇을: 비밀 값의 원문, HTML 이스케이프, 쿼리 이스케이프 형태를 `[secret]` 로 치환합니다.
+  - 어디서: 실패 문자열이 **만들어지는 자리**(`send()` 안의 SMTP 분류 직후, BeforeSend 오류, 메시지 빌드 오류, 렌더 오류)에서 가립니다.
+    그래야 transport 서킷 상태(`StatusReason`)와 그 로그, attempt 행, delivery 결과 어디에도 원문이 닿지 않습니다.
+    `settleSensitive` 의 치환은 두 번째 방어선으로 남깁니다.
+  - 한계: 3바이트 미만 값과 릴레이 응답 안의 QP/base64 인코딩은 가리지 못합니다.
 
 ## 기각한 대안
 
@@ -132,6 +152,8 @@ POST /api/v1/messages
 - **같은 행 복원**은 AAD가 막지 못합니다: 백업에서 `secret_ct` 를 같은 행에 되돌리고 상태를 되돌리면 같은 수신자에게 다시 갈 수 있습니다.
   DB 쓰기 권한이 전제이고 평문은 읽지 못합니다. 재전송 차단은 §3의 상태 검사가 맡고, AAD는 기밀성과 행·수신자 바인딩을 맡습니다.
 - **at-least-once 구간**: SMTP 250 직후 `MarkSent` 전에 죽으면 lease 만료 후 같은 수신자에게 한 번 더 갈 수 있습니다. 표준 동작을 유지합니다.
+- 로컬 `secret` 을 선언하면서 `{{ secret.code }}` 도 읽는 템플릿은 가림 규칙 때문에 비밀 템플릿으로 보지 않습니다.
+  일반 발송이 받아들여지고 그 값은 템플릿이 선언한 대로 렌더됩니다(기존 동작). 이런 템플릿에 `secret_vars` 를 보내면 422이므로 작성자가 알아챕니다.
 - `Hooks.BeforeSend` 는 렌더된 본문(비밀 포함)을 봅니다. 호스트 자신의 코드이므로 범위 안입니다.
 - VERP 상관에 실패한 DSN은 sensitive 여부를 알 수 없어 테넌트 설정대로 `raw` 가 저장될 수 있습니다.
 - 업그레이드 절차: 새 버전 배포 → senders가 비밀을 쓰기 전에(또는 멈춘 상태로) `secrets rewrap` 실행. 폴백이 없으므로 순서가 중요합니다.

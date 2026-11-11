@@ -150,8 +150,9 @@ func (s *Sender) send(ctx context.Context, t *tenantState, d store.Delivery, sec
 			// A failing hook is the host's problem, which is usually
 			// temporary: retry on the transient schedule rather than throwing
 			// the delivery away, but do consume attempts so it cannot loop.
+			// The hook saw the rendered message and may quote it.
 			return s.decide(d, pol, Failure{
-				Class: store.ErrorClassTransient, Message: "BeforeSend: " + err.Error(),
+				Class: store.ErrorClassTransient, Message: "BeforeSend: " + sec.redact(err.Error()),
 			}, started, transport.ID)
 		}
 	}
@@ -169,8 +170,9 @@ func (s *Sender) send(ctx context.Context, t *tenantState, d store.Delivery, sec
 	})
 	if err != nil {
 		// Header injection and an unbuildable message are permanent: the same
-		// inputs will produce the same failure on every retry.
-		return s.failResult(d, store.ErrorClassPermanent, 0, err.Error(), started)
+		// inputs will produce the same failure on every retry. The error can
+		// quote a rendered header, and a subject may carry the secret.
+		return s.failResult(d, store.ErrorClassPermanent, 0, sec.redact(err.Error()), started)
 	}
 
 	// Envelope sender: VERP when the sending domain has a bounce domain and
@@ -202,11 +204,20 @@ func (s *Sender) send(ctx context.Context, t *tenantState, d store.Delivery, sec
 	if perTenant := s.perTenantRate(transport); perTenant > 0 {
 		keys = append(keys, Key{Name: tenantBucket(transportKey, t.id), Rate: perTenant})
 	}
-	waited, err := s.limiter.Wait(ctx, keys...)
+	// A sensitive delivery waits for its token no longer than its secret
+	// lives: a mail that leaves after the expiry is the stale code the TTL
+	// exists to prevent.
+	waitCtx, cancelWait := s.secretDeadline(ctx, &d, sec)
+	waited, err := s.limiter.Wait(waitCtx, keys...)
+	cancelWait()
 	if waited > 0 {
 		s.cfg.Metrics.Observe(MetricLimiterWait, waited.Seconds(), "transport", transport.ID)
 	}
 	if err != nil {
+		if sec != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			// The secret's deadline, not a shutdown, ended the wait.
+			return s.failResult(d, store.ErrorClassPermanent, 0, store.SecretExpiredError, s.cfg.Clock())
+		}
 		return s.internalDefer(d, "rate limiter", err)
 	}
 
@@ -218,16 +229,29 @@ func (s *Sender) send(ctx context.Context, t *tenantState, d store.Delivery, sec
 	sendStart := s.cfg.Clock()
 	var f Failure
 	conn, err := s.pool.Get(ctx, transport, password)
-	if err != nil {
+	switch {
+	case err != nil:
 		if ctx.Err() != nil {
-			return s.internalDefer(d, "connect", err)
+			return s.internalDefer(d, "connect", sec.redactErr(err))
 		}
 		f = Classify(err)
-	} else {
+	case s.secretExpired(&d, sec):
+		// The password fetch or the connect took the secret past its expiry.
+		// This is the last instant before RCPT and DATA; the connection has
+		// done nothing yet and goes back to the pool.
+		s.pool.Put(conn, true)
+		return s.failResult(d, store.ErrorClassPermanent, 0, store.SecretExpiredError, s.cfg.Clock())
+	default:
 		sendErr := conn.Send(returnPath, []string{d.Email}, raw, s.cfg.SendTimeout)
 		f = Classify(sendErr)
 		s.pool.Put(conn, Reusable(f))
 	}
+	// A relay that quotes the message in its reply quotes the secret with it.
+	// Everything below sees the reply text: the circuit persists it as the
+	// transport's StatusReason and logs it, decide stores it. So it is
+	// scrubbed here, the moment it exists; settleSensitive scrubbing the
+	// result again is the second layer, not the only one.
+	f = sec.redactFailure(f)
 	finished := s.cfg.Clock()
 	s.cfg.Metrics.Observe(MetricSendTime, finished.Sub(sendStart).Seconds(),
 		"transport", transport.ID, "class", f.Class.String())

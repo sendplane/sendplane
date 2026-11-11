@@ -114,10 +114,17 @@ func TestSendMessageSecretVars(t *testing.T) {
 	if got := xorPlain(stored.SecretCiphertext, store.DeliverySecretContext(stored)); got != `{"code":"`+secretCode+`","name":"Ann"}` {
 		t.Fatalf("ciphertext decrypts to %q", got)
 	}
-	other := *stored
-	other.EmailNorm = "b@example.com"
-	if _, err := (xorCipher{}).Decrypt(t.Context(), stored.SecretCiphertext, store.DeliverySecretContext(&other)); err == nil {
-		t.Fatal("the ciphertext decrypts for another recipient")
+	// The recipient binding is the exact string the sender will put in RCPT
+	// TO: the address as the request spelled it, not its normalization.
+	if stored.Email != "A@Example.com" {
+		t.Fatalf("stored email = %q, want the request's spelling", stored.Email)
+	}
+	for _, rcpt := range []string{"b@example.com", stored.EmailNorm} {
+		other := *stored
+		other.Email = rcpt
+		if _, err := (xorCipher{}).Decrypt(t.Context(), stored.SecretCiphertext, store.DeliverySecretContext(&other)); err == nil {
+			t.Fatalf("the ciphertext decrypts for RCPT %q", rcpt)
+		}
 	}
 	// secret_vars never leak into the ordinary variables.
 	if _, ok := stored.Vars["code"]; ok || stored.Vars["product"] != "sendplane" {
@@ -256,6 +263,76 @@ func TestSendMessageSecretKeysMatchTemplate(t *testing.T) {
 	assertNoSecret(t, "error body", w.Body.String())
 }
 
+// A template that reads a property called secret of some other object is an
+// ordinary template: an ordinary send on it is accepted, and secret_vars for
+// it are refused like for any template that reads no secret.*.
+func TestSendMessageOnVarsSecretIsOrdinary(t *testing.T) {
+	e := newEnv(t, func(d *Deps) { d.Secrets = &countingCipher{} })
+	snd := e.seedSender()
+	locales := map[string]map[string]string{"en": {"secret.subject": "Hello"}}
+	tpl := decodeInto[Template](e.t, e.do(http.MethodPost, "/api/v1/templates", TemplateInput{
+		Name: "legacy", Mode: ContentModeHtml, Subject: `{{ "secret.subject" | t }}`,
+		Body:          `<html><body><p>{{ vars.secret.code }} {{ recipient.vars.secret }}</p></body></html>`,
+		DefaultLocale: ptr("en"),
+		I18n:          &I18nBundle{DefaultLocale: ptr("en"), Locales: &locales},
+	}), http.StatusCreated)
+	v := decodeInto[MessageVersion](e.t, e.do(http.MethodPost,
+		"/api/v1/templates/"+tpl.Id.String()+"/publish", nil), http.StatusCreated)
+
+	w := e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
+		SenderId: snd.Id, VersionId: &v.Id,
+		Vars: &Vars{"secret": map[string]any{"code": "not-a-secret"}},
+		To:   []MessageRecipient{{Email: "a@example.com"}},
+	})
+	res := decodeInto[MessageResult](t, w, http.StatusAccepted)
+	if len(res.Deliveries) != 1 {
+		t.Fatalf("deliveries = %+v", res.Deliveries)
+	}
+
+	w = e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
+		SenderId: snd.Id, VersionId: &v.Id,
+		To: []MessageRecipient{{Email: "b@example.com", SecretVars: secretsOf("code", secretCode)}},
+	})
+	decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
+}
+
+// A version that reads the secret only through a computed key has no static
+// key to demand, but it still reads the secret: a recipient without
+// secret_vars is refused, one with them is accepted, and a campaign on it is
+// refused.
+func TestSendMessageSecretComputedKey(t *testing.T) {
+	e := newEnv(t, func(d *Deps) { d.Secrets = &countingCipher{} })
+	snd := e.seedSender()
+	tpl := decodeInto[Template](e.t, e.do(http.MethodPost, "/api/v1/templates", TemplateInput{
+		Name: "computed", Mode: ContentModeHtml, Subject: "Code",
+		Body: `<html><body><p>{{ secret[vars.which] }}</p></body></html>`, DefaultLocale: ptr("en"),
+	}), http.StatusCreated)
+	v := decodeInto[MessageVersion](e.t, e.do(http.MethodPost,
+		"/api/v1/templates/"+tpl.Id.String()+"/publish", nil), http.StatusCreated)
+
+	w := e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
+		SenderId: snd.Id, VersionId: &v.Id, Vars: &Vars{"which": "code"},
+		To: []MessageRecipient{
+			{Email: "a@example.com", SecretVars: secretsOf("code", secretCode)},
+			{Email: "b@example.com"},
+		},
+	})
+	er := decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
+	if !strings.Contains(er.Message, "to[1]") {
+		t.Fatalf("message = %q, want it to name to[1]", er.Message)
+	}
+	assertNoSecret(t, "error body", w.Body.String())
+
+	w = e.do(http.MethodPost, "/api/v1/messages", MessageRequest{
+		SenderId: snd.Id, VersionId: &v.Id, Vars: &Vars{"which": "code"},
+		To: []MessageRecipient{{Email: "a@example.com", SecretVars: secretsOf("code", secretCode)}},
+	})
+	decodeInto[MessageResult](t, w, http.StatusAccepted)
+
+	w = e.do(http.MethodPost, "/api/v1/campaigns", CampaignInput{Name: "c", SenderId: snd.Id, VersionId: &v.Id})
+	decodeError(t, w, http.StatusUnprocessableEntity, ErrorCodeValidationFailed)
+}
+
 func TestSendMessageSecretVarsSizeCap(t *testing.T) {
 	e := newEnv(t)
 	snd, version := e.publishedSecretTemplate()
@@ -366,12 +443,12 @@ func TestSecretKeys(t *testing.T) {
 			"en": {"k": "{{ secret.name }}"},
 		}},
 	}
-	got := strings.Join(render.SecretKeys(v), ",")
-	if got != "code,link,name,token" {
-		t.Fatalf("secretKeysOf = %q", got)
+	keys, reads := render.SecretUsage(v)
+	if got := strings.Join(keys, ","); !reads || got != "code,link,name,token" {
+		t.Fatalf("SecretUsage = %q, %v", got, reads)
 	}
-	if keys := render.SecretKeys(&store.MessageVersion{HTMLTpl: `{{ vars.code }}`}); len(keys) != 0 {
-		t.Fatalf("a version without secret.* reports %v", keys)
+	if keys, reads := render.SecretUsage(&store.MessageVersion{HTMLTpl: `{{ vars.code }}`}); reads || len(keys) != 0 {
+		t.Fatalf("a version without secret.* reports %v, %v", keys, reads)
 	}
 }
 

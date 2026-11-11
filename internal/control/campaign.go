@@ -123,7 +123,7 @@ func refuseSecretVersion(ctx context.Context, st store.Store, versionID string) 
 		}
 		return err
 	}
-	if keys := render.SecretKeys(v); len(keys) > 0 {
+	if _, reads := render.SecretUsage(v); reads {
 		return fmt.Errorf("%w: version %s", ErrSecretVars, versionID)
 	}
 	return nil

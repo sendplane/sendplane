@@ -84,8 +84,10 @@ make gen-check    # CI: 스펙과 gen.go가 어긋나면 실패
 - **`POST /messages`의 `headers`**: `store.Delivery.Headers`에 저장하고 sender가 화이트리스트를 통과시켜 실제 메일에 붙입니다. 검증은 sender와 **같은** 화이트리스트(`sender.ValidateCustomHeader`)로 하므로 허용되지 않는 이름은 발송 시점이 아니라 여기서 422입니다.
 - **`POST /messages`의 `secret_vars`**(ADR-0019): 수신자별 비밀 값. 검증은 행을 쓰기 전에 전부 합니다 —
   `secret_ttl_seconds`는 30~86400(생략 시 600)이고 `secret_vars` 없이 오면 422; `Deps.Secrets`가 nil이면
-  `422 secret_cipher_required`(평문 폴백 없음); 버전의 subject·HTML·text·**번역 문자열**이 읽는 `secret.*` 최상위 키를
-  모든 수신자가 줘야 하고(없으면 수신자 인덱스와 키를 담은 422), `secret.*`를 읽지 않는 버전에 온 `secret_vars`도 422;
+  `422 secret_cipher_required`(평문 폴백 없음); 버전의 subject·HTML·text·**번역 문자열**이 `secret` 을 읽으면(`render.SecretUsage`)
+  모든 수신자가 `secret_vars` 를, 정적으로 알 수 있는 최상위 키는 전부 줘야 하고(없으면 수신자 인덱스와 키를 담은 422 — `secret[k]` 처럼
+  계산된 키만 읽어도 `secret_vars` 자체는 필수), `secret` 을 읽지 않는 버전에 온 `secret_vars`도 422. `vars.secret.code` 처럼 다른 객체의
+  속성, 문자열 리터럴 안의 `secret`, `secret` 을 로컬로 선언한 레거시 버전은 `secret` 을 읽지 않는 것으로 봅니다;
   수신자당 JSON 8 KiB 초과는 `422 limit_exceeded`. 통과하면 delivery ID·테넌트·`email_norm`을 채운 뒤
   `DeliverySecretContext`로 암호화해 `secret_ct`/`secret_state=pending`/`secret_expires_at`을 씁니다. suppressed 수신자는
   암호화하지 않고 처음부터 `discarded`. 멱등 재생은 결과만 돌려주므로 다시 암호화하지도 쓰지도 않습니다.

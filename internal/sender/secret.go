@@ -24,10 +24,15 @@ import (
 //     fails, never one that goes out with an empty code.
 //   - the decrypted values become render.Bindings.Secret and nothing else:
 //     not host.RecipientContext.Vars, not the unsubscribe URL template.
-//   - settleSensitive scrubs the values out of whatever error text the result
-//     carries (a template error, an SMTP reply, a BeforeSend error may all
-//     quote the message), and fails a retry that would only be due after the
+//   - send scrubs the values out of every failure text the moment it is
+//     produced (a template error, an SMTP reply, a BeforeSend error, a MIME
+//     error may all quote the message), before the transport circuit, the
+//     logs or decide see it. settleSensitive scrubs the result again as a
+//     second layer, and fails a retry that would only be due after the
 //     secret has expired.
+//   - send also stops a delivery whose secret expires while it is on its way:
+//     the rate limiter wait is bounded by the expiry, and the expiry is
+//     checked again on the connection, right before RCPT and DATA.
 
 // Fixed failure texts. They say what went wrong without saying anything about
 // the secret.
@@ -123,6 +128,24 @@ func (s *Sender) settleSensitive(d *store.Delivery, sec *secretVars, res store.D
 	return res
 }
 
+// secretExpired reports whether a sensitive delivery's secret has expired by
+// now. openSecret checks the same at the start; send asks again where the
+// time spent on the way (BeforeSend, the rate limiter, the connect) could
+// have crossed it. It is false for an ordinary delivery.
+func (s *Sender) secretExpired(d *store.Delivery, sec *secretVars) bool {
+	return sec != nil && !d.SecretExpiresAt.IsZero() && !d.SecretExpiresAt.After(s.cfg.Clock())
+}
+
+// secretDeadline bounds ctx by a sensitive delivery's secret expiry, read
+// against the configured clock. An ordinary delivery gets ctx unchanged. A
+// secret that has already expired gets a context that is already done.
+func (s *Sender) secretDeadline(ctx context.Context, d *store.Delivery, sec *secretVars) (context.Context, context.CancelFunc) {
+	if sec == nil || d.SecretExpiresAt.IsZero() {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, d.SecretExpiresAt.Sub(s.cfg.Clock()))
+}
+
 // redact replaces every secret value in msg. It is nil-safe so the send path
 // can call it whether or not the delivery is sensitive.
 func (sec *secretVars) redact(msg string) string {
@@ -141,6 +164,18 @@ func (sec *secretVars) redactErr(err error) error {
 		return err
 	}
 	return errors.New(sec.redact(err.Error()))
+}
+
+// redactFailure is redact for a classified send failure: the reply text and
+// the error it came from. The class, code and enhanced status are kept, so
+// what the failure means does not change.
+func (sec *secretVars) redactFailure(f Failure) Failure {
+	if sec == nil {
+		return f
+	}
+	f.Message = sec.redact(f.Message)
+	f.Err = sec.redactErr(f.Err)
+	return f
 }
 
 // secretNeedles collects the forms a secret value can take in an error text:

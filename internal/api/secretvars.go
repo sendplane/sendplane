@@ -41,10 +41,10 @@ type secretPlan struct {
 //   - secret_ttl_seconds is in range, and only given alongside secret_vars;
 //   - secret_vars need a SecretCipher: there is no plaintext fallback for a
 //     secret, unlike the stored transport passwords;
-//   - a version that reads `secret.*` gets every top-level key it reads from
-//     every recipient, because a mail with an empty one-time code is the worst
-//     outcome there is;
-//   - a version that reads no `secret.*` gets no secret_vars, because a
+//   - a version that reads `secret` (render.SecretUsage) gets secret_vars from
+//     every recipient, with every top-level key it reads statically, because
+//     a mail with an empty one-time code is the worst outcome there is;
+//   - a version that reads no `secret` gets no secret_vars, because a
 //     secret nothing renders is a secret stored for nothing;
 //   - each recipient's secret_vars fit maxSecretVarsBytes.
 func (s *server) checkSecretVars(in *MessageRequest, v *store.MessageVersion) (secretPlan, error) {
@@ -71,8 +71,8 @@ func (s *server) checkSecretVars(in *MessageRequest, v *store.MessageVersion) (s
 			"secret_vars need a secret cipher, and this server has none configured")
 	}
 
-	keys := render.SecretKeys(v)
-	if len(keys) == 0 {
+	keys, reads := render.SecretUsage(v)
+	if !reads {
 		if plan.enabled {
 			return plan, errInvalid("the message version reads no secret.* variable, so secret_vars would never be used")
 		}
@@ -82,6 +82,16 @@ func (s *server) checkSecretVars(in *MessageRequest, v *store.MessageVersion) (s
 		var have map[string]any
 		if r.SecretVars != nil {
 			have = *r.SecretVars
+		} else if len(keys) == 0 {
+			// A version that reads the secret only through keys it computes
+			// (`secret[k]`) or as a whole still needs it from every
+			// recipient; with static keys the loop below names the first.
+			e := errInvalid("to[%d] has no secret_vars, which the message version reads", i)
+			e.details = []ErrorDetail{{
+				Field:   ptr(fmt.Sprintf("to[%d].secret_vars", i)),
+				Message: "required by the message version",
+			}}
+			return plan, e
 		}
 		for _, k := range keys {
 			if _, ok := have[k]; !ok {

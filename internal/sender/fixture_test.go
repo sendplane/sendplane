@@ -288,6 +288,13 @@ func (f *fixture) waitTerminal(ids []string, timeout time.Duration) bool {
 // runSenders starts n senders and returns a stop function.
 func (f *fixture) runSenders(n int, mutate func(*Config)) func() {
 	f.t.Helper()
+	return f.runSendersWith(n, mutate, nil)
+}
+
+// runSendersWith is runSenders with a setup step that sees each Sender after
+// New and before Run, for the parts Config does not reach (the limiter).
+func (f *fixture) runSendersWith(n int, mutate func(*Config), setup func(*Sender)) func() {
+	f.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{}, n)
 	for i := 0; i < n; i++ {
@@ -299,6 +306,9 @@ func (f *fixture) runSenders(n int, mutate func(*Config)) func() {
 		if err != nil {
 			cancel()
 			f.t.Fatalf("New: %v", err)
+		}
+		if setup != nil {
+			setup(s)
 		}
 		go func() {
 			defer func() { done <- struct{}{} }()

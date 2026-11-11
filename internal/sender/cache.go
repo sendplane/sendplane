@@ -158,11 +158,13 @@ func (t *tenantState) domain(ctx context.Context, id string, now time.Time) (*st
 	})
 }
 
-// versionReadsSecret reports whether v reads any `secret.*` variable. The
-// answer depends only on the immutable version, so it is scanned once.
+// versionReadsSecret reports whether v reads the `secret` binding
+// (render.SecretUsage). The answer depends only on the immutable version, so
+// it is scanned once.
 func (t *tenantState) versionReadsSecret(v *store.MessageVersion, now time.Time) bool {
 	reads, _ := t.readsSecret.get(v.ID, now, func() (bool, error) {
-		return len(render.SecretKeys(v)) > 0, nil
+		_, reads := render.SecretUsage(v)
+		return reads, nil
 	})
 	return reads
 }

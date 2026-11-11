@@ -84,8 +84,9 @@ func TestSecretContextConstructors(t *testing.T) {
 		purposes[sc.Purpose] = true
 	}
 
-	// A delivery secret binds the recipient too, as a hash of EmailNorm.
-	dl := &Delivery{ID: "id-1", TenantID: "t-1", EmailNorm: "a@example.com"}
+	// A delivery secret binds the recipient too, as a hash of the exact
+	// Email the sender puts in RCPT TO. EmailNorm is not part of it.
+	dl := &Delivery{ID: "id-1", TenantID: "t-1", Email: "a@example.com", EmailNorm: "a@example.com"}
 	sc := DeliverySecretContext(dl)
 	if sc.TenantID != "t-1" || sc.ObjectID != "id-1" {
 		t.Errorf("delivery context %+v does not name the row", sc)
@@ -99,8 +100,19 @@ func TestSecretContextConstructors(t *testing.T) {
 		t.Errorf("delivery context Bind = %q, want %q", sc.Bind, wantBind)
 	}
 	other := *dl
-	other.EmailNorm = "b@example.com"
+	other.Email = "b@example.com"
 	if DeliverySecretContext(&other).Bind == sc.Bind {
 		t.Error("two recipients share a delivery secret binding")
+	}
+	// The same address after normalization is still another RCPT string.
+	other.Email = "A@example.com"
+	if DeliverySecretContext(&other).Bind == sc.Bind {
+		t.Error("the binding normalizes the address; it must hash the RCPT bytes")
+	}
+	// email_norm is not what is sent, so it is not bound.
+	other = *dl
+	other.EmailNorm = "b@example.com"
+	if DeliverySecretContext(&other).Bind != sc.Bind {
+		t.Error("the binding depends on EmailNorm")
 	}
 }
